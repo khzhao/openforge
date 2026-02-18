@@ -1,4 +1,6 @@
 # Copyright 2026 openforge
 
 
-from .openforge import OpenForgeConfig as OpenForgeConfig
+from .openforge import OpenForgeConfig
+
+__all__ = ["OpenForgeConfig"]
