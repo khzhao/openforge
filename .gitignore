@@ -20,6 +20,5 @@ uv.lock
 
 # `rlc` Generated files
 checkpoints
-data
 logs
 wandb

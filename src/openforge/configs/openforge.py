@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from .data import DataConfig
 from .gateway import GatewayConfig
 from .train import ModelConfig, TrainConfig
 
@@ -10,6 +11,7 @@ from .train import ModelConfig, TrainConfig
 class OpenForgeConfig:
     """Configuration for the OpenForge project."""
 
+    data: DataConfig
     gateway: GatewayConfig
     model: ModelConfig
     train: TrainConfig
