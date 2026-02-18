@@ -9,6 +9,9 @@ class ModelConfig:
 
     model_name_or_path: str
     tokenizer_name_or_path: str
+    data_parallel_size: int
+    pipeline_parallel_size: int
+    tensor_parallel_size: int
 
 
 @dataclass
