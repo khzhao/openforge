@@ -3,5 +3,102 @@ name = "openforge"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+authors = [{ name = "Kevin Zhao", email = "kzhao16@gmail.com" }]
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "torch>=2.9.1",
+    "transformers>=5.0.0",
+    "wandb>=0.23.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.2,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
+    "pyrefly>=0.46.0",
+    "pytest>=9.0.2",
+    "ruff>=0.14.10",
+]
+
+[tool.pyrefly]
+project-includes = ["**/*.py*", "**/*.ipynb"]
+
+[tool.pyrefly.errors]
+missing-argument = false
+
+# Relax for third-party packages without type stubs (e.g. transformers).
+# Use per-line `# pyrefly: ignore[missing-attribute]` if you want to keep
+# this check only where you use such packages.
+missing-attribute = false
+
+[tool.ruff]
+src = ["src"]
+include = ["src/**/*.py"]
+line-length = 88
+indent-width = 4
+target-version = "py312"
+
+[tool.ruff.lint]
+preview = true
+
+isort = { known-first-party = ["openforge"] }
+
+select = [
+  "C",
+  "E",
+  "F",
+  "I",
+  "W",
+  "CPY001",
+  "RUF013",
+  "UP006",
+  "PERF102",
+  "PLC1802",
+  "PLC0208",
+  "D",
+  "RUF002",
+  "DOC102",
+  "DOC202",
+  "DOC403",
+  "DOC502",
+]
+
+ignore = [
+  "C901", # complex structure / mccabe complexity
+  "E501", # line-too-long (formatter handles)
+  "E741", # ambiguous variable name
+  "D100", # Missing docstring in public module
+  "D102", # Missing docstring in public method
+  "D104", # Missing docstring in public package
+  "D105", # Missing docstring in magic method
+  "D107", # Missing docstring in __init__
+  "D203", # conflict with D211
+  "D213", # conflict with D212
+]
+
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F403"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
