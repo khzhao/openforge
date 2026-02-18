@@ -1,3 +1,4 @@
 # Copyright 2026 openforge
 
-from .base import *
+
+from .openforge import OpenForgeConfig as OpenForgeConfig
