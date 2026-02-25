@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 
-from openforge.configs.gateway import GatewayConfig
+from openforge.configs import GatewayConfig
 
 
 def create_app(config: GatewayConfig) -> FastAPI:

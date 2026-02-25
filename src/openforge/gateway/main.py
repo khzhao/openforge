@@ -2,7 +2,7 @@
 
 import uvicorn
 
-from openforge.configs.gateway import GatewayConfig
+from openforge.configs import GatewayConfig
 from openforge.gateway.server import create_app
 
 

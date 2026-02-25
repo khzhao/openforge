@@ -2,6 +2,7 @@
 
 from datetime import timedelta
 
+import torch
 import torch.distributed as dist
 
 
@@ -28,6 +29,8 @@ class ActorCriticRefWorker:
         self.world_size = world_size
 
         if not dist.is_initialized():
+            assert torch.cuda.device_count() == 1, "Expected only 1 GPU per worker"
+            torch.cuda.set_device(0)
             dist.init_process_group(
                 backend="nccl",
                 rank=rank,
