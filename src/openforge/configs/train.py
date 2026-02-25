@@ -15,7 +15,9 @@ class ModelConfig:
 class TrainConfig:
     """Configuration for the training process."""
 
-    backend: str
+    num_nodes: int
+    num_gpus_per_node: int
+    num_cpus_per_node: int
     data_parallel_size: int
     pipeline_parallel_size: int
     tensor_parallel_size: int
