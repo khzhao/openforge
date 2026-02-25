@@ -1,6 +1,7 @@
 # Copyright 2026 openforge
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass
@@ -15,6 +16,7 @@ class ModelConfig:
 class TrainConfig:
     """Configuration for the training process."""
 
+    backend: Literal["fsdp2"]
     num_nodes: int
     num_gpus_per_node: int
     num_cpus_per_node: int
