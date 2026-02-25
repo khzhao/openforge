@@ -1,7 +1,8 @@
 # Copyright 2026 openforge
 
+from datetime import timedelta
 
-from openforge.configs import OpenForgeConfig
+import torch.distributed as dist
 
 
 class ActorCriticRefWorker:
@@ -18,10 +19,19 @@ class ActorCriticRefWorker:
 
     def __init__(
         self,
-        cfg: OpenForgeConfig,
         rank: int,
         world_size: int,
+        master_addr: str,
+        master_port: int,
     ):
-        self.cfg = cfg
         self.rank = rank
         self.world_size = world_size
+
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl",
+                rank=rank,
+                world_size=world_size,
+                init_method=f"tcp://{master_addr}:{master_port}",
+                timeout=timedelta(seconds=30),
+            )

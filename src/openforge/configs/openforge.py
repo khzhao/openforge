@@ -64,7 +64,14 @@ class OpenForgeConfig:
         backend_cfg = cls._fsdp2_config(train["backend_cfg"])
         values = dict(train)
         values["backend_cfg"] = backend_cfg
-        return TrainConfig(**values)
+        train_cfg = TrainConfig(**values)
+        if train_cfg.backend == "fsdp2" and (
+            train_cfg.pipeline_parallel_size > 1 or train_cfg.tensor_parallel_size > 1
+        ):
+            raise ValueError(
+                "FSDP2 does not support pipeline parallelism or tensor parallelism"
+            )
+        return train_cfg
 
     @classmethod
     def _fsdp2_config(cls, raw: dict[str, Any]) -> FSDP2Config:
