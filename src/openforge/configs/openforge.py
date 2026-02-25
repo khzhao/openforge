@@ -8,6 +8,14 @@ from typing import Any
 
 import yaml
 
+from .backends.fsdp2 import (
+    AMPConfig,
+    FSDP2Config,
+    MixedPrecisionConfig,
+    OffloadConfig,
+    OptimizerConfig,
+    SchedulerConfig,
+)
 from .data import DataConfig
 from .gateway import GatewayConfig
 from .train import ModelConfig, TrainConfig
@@ -34,7 +42,7 @@ class OpenForgeConfig:
             data=DataConfig(**cls._section(raw, "data")),
             gateway=GatewayConfig(**cls._section(raw, "gateway")),
             model=ModelConfig(**cls._section(raw, "model")),
-            train=TrainConfig(**cls._section(raw, "train")),
+            train=cls._train_config(raw),
         )
 
     @staticmethod
@@ -45,3 +53,27 @@ class OpenForgeConfig:
         if not isinstance(section, dict):
             raise ValueError(f"{name} must be a mapping")
         return section
+
+    @classmethod
+    def _train_config(cls, raw: dict[str, Any]) -> TrainConfig:
+        train = cls._section(raw, "train")
+        backend = train.get("backend")
+        if backend != "fsdp2":
+            raise ValueError("train.backend must be set to 'fsdp2'")
+
+        backend_cfg = cls._fsdp2_config(train["backend_cfg"])
+        values = dict(train)
+        values["backend_cfg"] = backend_cfg
+        return TrainConfig(**values)
+
+    @classmethod
+    def _fsdp2_config(cls, raw: dict[str, Any]) -> FSDP2Config:
+        return FSDP2Config(
+            gradient_checkpointing=raw["gradient_checkpointing"],
+            reshard_after_forward=raw["reshard_after_forward"],
+            mixed_precision=MixedPrecisionConfig(**raw["mixed_precision"]),
+            offload=OffloadConfig(**raw["offload"]),
+            amp=AMPConfig(**raw["amp"]),
+            optim=OptimizerConfig(**raw["optim"]),
+            scheduler=SchedulerConfig(**raw["scheduler"]),
+        )
