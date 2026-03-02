@@ -102,6 +102,12 @@ class FSDP2Config(OpenForgeBaseModel):
     scheduler: SchedulerConfig
 
 
+class MegatronConfig(OpenForgeBaseModel):
+    """Megatron backend configuration."""
+
+    pass
+
+
 class ModelConfig(OpenForgeBaseModel):
     """Configuration for the model."""
 
@@ -112,8 +118,8 @@ class ModelConfig(OpenForgeBaseModel):
 class TrainConfig(OpenForgeBaseModel):
     """Configuration for the training process."""
 
-    backend: Literal["fsdp2"]
-    backend_cfg: FSDP2Config
+    backend: Literal["fsdp2", "megatron"]
+    backend_cfg: FSDP2Config | MegatronConfig
     num_nodes: int
     num_gpus_per_node: int
     num_cpus_per_node: int
@@ -122,10 +128,21 @@ class TrainConfig(OpenForgeBaseModel):
     tensor_parallel_size: int
 
     @model_validator(mode="after")
-    def _validate_fsdp2_parallelism(self) -> TrainConfig:
-        if self.pipeline_parallel_size > 1 or self.tensor_parallel_size > 1:
+    def _validate_backend_settings(self) -> TrainConfig:
+        if self.backend == "fsdp2":
+            if not isinstance(self.backend_cfg, FSDP2Config):
+                raise ValueError(
+                    "backend_cfg must be FSDP2Config when backend is fsdp2"
+                )
+            if self.pipeline_parallel_size > 1 or self.tensor_parallel_size > 1:
+                raise ValueError(
+                    "FSDP2 does not support pipeline parallelism or tensor parallelism"
+                )
+        if self.backend == "megatron" and not isinstance(
+            self.backend_cfg, MegatronConfig
+        ):
             raise ValueError(
-                "FSDP2 does not support pipeline parallelism or tensor parallelism"
+                "backend_cfg must be MegatronConfig when backend is megatron"
             )
         return self
 
