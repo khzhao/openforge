@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 Reward = list[float] | float | None
 
@@ -36,15 +36,15 @@ class RolloutDatum(OpenForgeBaseModel):
 class DataConfig(OpenForgeBaseModel):
     """Configuration for data source behavior."""
 
-    backend: str = "memory"
+    backend: str
 
 
 class GatewayConfig(OpenForgeBaseModel):
     """Configuration for the Gateway server."""
 
-    host: str = "0.0.0.0"
-    port: int = 8000
-    backend_url: str = "http://localhost:8080/v1"
+    host: str
+    port: int
+    backend_url: str
 
 
 class MixedPrecisionConfig(OpenForgeBaseModel):
@@ -152,8 +152,8 @@ class TrainConfig(OpenForgeBaseModel):
 class OpenForgeConfig(OpenForgeBaseModel):
     """Configuration for the OpenForge project."""
 
-    data: DataConfig = Field(default_factory=DataConfig)
-    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    data: DataConfig
+    gateway: GatewayConfig
     model: ModelConfig
     train: TrainConfig
 
