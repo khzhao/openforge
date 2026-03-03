@@ -126,6 +126,8 @@ class TrainConfig(OpenForgeBaseModel):
     data_parallel_size: int
     pipeline_parallel_size: int
     tensor_parallel_size: int
+    checkpoints_dir: str
+    use_critic: bool
 
     @model_validator(mode="after")
     def _validate_backend_settings(self) -> TrainConfig:
