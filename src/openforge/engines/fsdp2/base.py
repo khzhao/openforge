@@ -47,7 +47,7 @@ def apply_fsdp2(
     mp_policy: MixedPrecisionPolicy,
     offload_policy: OffloadPolicy,
     reshard_after_forward: bool,
-) -> None:
+) -> nn.Module:
     """Apply FSDP2 to the model."""
     for shard in MODEL_SHARDS:
         if not _has_attribute(model, shard):
@@ -67,6 +67,7 @@ def apply_fsdp2(
         mp_policy=mp_policy,
         offload_policy=offload_policy,
     )
+    return model
 
 
 def _get_attribute(obj: Any, attribute_path: str) -> Any:
