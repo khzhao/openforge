@@ -74,12 +74,12 @@ class TrainBackend(ABC):
         """
 
     @abstractmethod
-    def offload(self) -> None:
-        """Offload runtime state to reduce active accelerator memory usage."""
+    def sleep(self) -> None:
+        """Move runtime state to a low-memory idle state."""
 
     @abstractmethod
-    def onload(self) -> None:
-        """Restore runtime state for active training."""
+    def wakeup(self) -> None:
+        """Restore runtime state from idle to active training."""
 
     @abstractmethod
     def clear_memory(self) -> None:

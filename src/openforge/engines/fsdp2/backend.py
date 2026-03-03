@@ -42,7 +42,7 @@ class FSDP2Backend(TrainBackend):
         self.lr_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
         self.grad_scaler: torch.amp.GradScaler | None = None
 
-        self._offloaded: bool | None = None
+        self._sleeping: bool | None = None
 
     def initialize(
         self,
@@ -62,7 +62,7 @@ class FSDP2Backend(TrainBackend):
         self._initialize_process_group()
         self._initialize_device()
         self._initialize_train_components()
-        self._offloaded = False
+        self._sleeping = False
 
     def zero_grad(self) -> None:
         self._optimizer().zero_grad(set_to_none=True)
@@ -211,39 +211,39 @@ class FSDP2Backend(TrainBackend):
         loaded_policy_version = int(payload.get("policy_version", loaded_step))
         return loaded_step, loaded_policy_version
 
-    def offload(self) -> None:
+    def sleep(self) -> None:
         model = self._model()
         optimizer = self._optimizer()
         fsdp_cfg = self._backend_cfg
-        offloaded = self._offload_state()
+        sleeping = self._sleep_state()
 
-        if offloaded:
+        if sleeping:
             return
         if fsdp_cfg.offload.mode == "cpu":
-            self._offloaded = True
+            self._sleeping = True
             return
 
         model.to("cpu")
         self._move_optimizer_state(optimizer, "cpu")
         self.clear_memory()
-        self._offloaded = True
+        self._sleeping = True
 
-    def onload(self) -> None:
+    def wakeup(self) -> None:
         model = self._model()
         optimizer = self._optimizer()
         device = self._device()
         fsdp_cfg = self._backend_cfg
-        offloaded = self._offload_state()
+        sleeping = self._sleep_state()
 
-        if not offloaded:
+        if not sleeping:
             return
         if fsdp_cfg.offload.mode == "cpu":
-            self._offloaded = False
+            self._sleeping = False
             return
 
         model.to(device)
         self._move_optimizer_state(optimizer, device)
-        self._offloaded = False
+        self._sleeping = False
 
     def clear_memory(self) -> None:
         if self._device().type == "cuda":
@@ -494,9 +494,9 @@ class FSDP2Backend(TrainBackend):
         assert self.grad_scaler is not None
         return self.grad_scaler
 
-    def _offload_state(self) -> bool:
-        assert self._offloaded is not None
-        return self._offloaded
+    def _sleep_state(self) -> bool:
+        assert self._sleeping is not None
+        return self._sleeping
 
     @property
     def _backend_cfg(self) -> FSDP2Config:
