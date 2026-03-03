@@ -25,7 +25,7 @@ class FSDP2Backend(TrainBackend):
     - cu_seqlens: IntTensor [B+1]
     - loss_mask: Float/Bool Tensor [N]
     - rewards: Float Tensor [N]
-    - position_ids: LongTensor [N] (optional)
+    - position_ids: LongTensor [N]
     """
 
     def __init__(self) -> None:
@@ -75,44 +75,27 @@ class FSDP2Backend(TrainBackend):
         amp_dtype = get_torch_dtype(amp_cfg.precision)
 
         tokens = batch.get("tokens").to(device)
-        cu_seqlens = batch.get("cu_seqlens").to(device)
+        cu_seqlens = batch.get("cu_seqlens").to(device=device, dtype=torch.int32)
         loss_mask = batch.get("loss_mask").to(device).float()
         rewards = batch.get("rewards").to(device).float()
-        position_ids = batch.get("position_ids")
-        if position_ids is not None:
-            position_ids = position_ids.to(device)
-
-        numerator = torch.zeros((), device=device)
-        denominator = torch.zeros((), device=device)
+        position_ids = batch.get("position_ids").to(device)
 
         with torch.autocast(
             device_type=device.type,
             dtype=amp_dtype,
             enabled=amp_enabled,
         ):
-            for i in range(cu_seqlens.numel() - 1):
-                start = int(cu_seqlens[i])
-                end = int(cu_seqlens[i + 1])
-
-                input_ids = tokens[start:end].unsqueeze(0)
-                kwargs = {"input_ids": input_ids}
-                if position_ids is not None:
-                    kwargs["position_ids"] = position_ids[start:end].unsqueeze(0)
-
-                logits = model(**kwargs).logits[0, :-1, :]
-                target = tokens[start + 1 : end]
-                sample_mask = loss_mask[start + 1 : end]
-                sample_rewards = rewards[start + 1 : end]
-
-                log_probs = torch.log_softmax(logits, dim=-1)
-                chosen_log_probs = torch.gather(
-                    log_probs, dim=-1, index=target.unsqueeze(-1)
-                ).squeeze(-1)
-
-                numerator += -(sample_rewards * chosen_log_probs * sample_mask).sum()
-                denominator += sample_mask.sum()
-
-            loss = numerator / denominator.clamp_min(1.0)
+            logits = model(
+                input_ids=tokens.unsqueeze(0),
+                position_ids=position_ids.unsqueeze(0),
+            ).logits[0, :-1, :]
+            loss = self._packed_weighted_nll_loss(
+                logits=logits,
+                tokens=tokens,
+                loss_mask=loss_mask,
+                rewards=rewards,
+                cu_seqlens=cu_seqlens,
+            )
 
         return TensorDict(
             {
@@ -138,8 +121,9 @@ class FSDP2Backend(TrainBackend):
         scheduler = self._scheduler()
         scaler = self._grad_scaler()
         fsdp_cfg = self._backend_cfg
+        scaler_enabled = scaler.is_enabled()
 
-        if scaler.is_enabled():
+        if scaler_enabled:
             scaler.unscale_(optimizer)
 
         torch.nn.utils.clip_grad_norm_(
@@ -147,7 +131,7 @@ class FSDP2Backend(TrainBackend):
             fsdp_cfg.optim.max_grad_norm,
         )
 
-        if scaler.is_enabled():
+        if scaler_enabled:
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -160,7 +144,7 @@ class FSDP2Backend(TrainBackend):
             "global_step": -1.0 if global_step is None else float(global_step),
             "gradient_accumulation_steps": float(self._gradient_accumulation_steps()),
         }
-        if scaler.is_enabled():
+        if scaler_enabled:
             metrics["grad_scale"] = float(scaler.get_scale())
         return metrics
 
@@ -309,6 +293,11 @@ class FSDP2Backend(TrainBackend):
             cfg.model.model_name_or_path,
             trust_remote_code=True,
         )
+        if self._model_uses_linear_attention(model):
+            raise NotImplementedError(
+                "FSDP2Backend packed forward currently requires full-attention-only models. "
+                "Detected linear_attention layers in model config."
+            )
         if fsdp_cfg.gradient_checkpointing:
             model.gradient_checkpointing_enable()
         model.train()
@@ -428,6 +417,42 @@ class FSDP2Backend(TrainBackend):
 
     def _gradient_accumulation_steps(self) -> int:
         return self._cfg().train.gradient_accumulation_steps
+
+    @staticmethod
+    def _packed_weighted_nll_loss(
+        *,
+        logits: torch.Tensor,
+        tokens: torch.Tensor,
+        loss_mask: torch.Tensor,
+        rewards: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        target = tokens[1:]
+        transition_mask = loss_mask[1:].clone()
+        transition_rewards = rewards[1:]
+
+        # Remove cross-sequence targets at packed sequence boundaries.
+        if cu_seqlens.numel() > 2:
+            transition_mask[(cu_seqlens[1:-1] - 1).long()] = 0.0
+
+        log_probs = torch.log_softmax(logits, dim=-1)
+        chosen_log_probs = torch.gather(
+            log_probs, dim=-1, index=target.unsqueeze(-1)
+        ).squeeze(-1)
+        numerator = -(transition_rewards * chosen_log_probs * transition_mask).sum()
+        denominator = transition_mask.sum()
+        return numerator / denominator.clamp_min(1.0)
+
+    @staticmethod
+    def _model_uses_linear_attention(model: torch.nn.Module) -> bool:
+        cfg = getattr(model, "config", None)
+        if cfg is None:
+            return False
+        text_cfg = getattr(cfg, "text_config", cfg)
+        layer_types = getattr(text_cfg, "layer_types", None)
+        if layer_types is None:
+            return False
+        return "linear_attention" in layer_types
 
     def _cfg(self) -> OpenForgeConfig:
         assert self.cfg is not None
