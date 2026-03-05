@@ -127,6 +127,8 @@ class TrainConfig(OpenForgeBaseModel):
     num_nodes: int
     num_gpus_per_node: int
     num_cpus_per_node: int
+    num_gpus_per_engine: int
+    num_cpus_per_engine: int
 
     # Distributed parallelism layout.
     data_parallel_size: int
@@ -176,6 +178,52 @@ class TrainConfig(OpenForgeBaseModel):
         return int(self.mini_batch_size / self.micro_batch_size)
 
 
+class SGLangConfig(OpenForgeBaseModel):
+    """SGLang backend configuration."""
+
+    temperature: float
+    top_p: float
+    top_k: int
+    max_new_tokens: int
+    stop: list[str]
+    stop_token_ids: list[int]
+    skip_special_tokens: bool
+    no_stop_trim: bool
+    spaces_between_words: bool
+
+
+class RolloutConfig(OpenForgeBaseModel):
+    """Configuration for the rollout process."""
+
+    # Backend selection and backend-specific settings.
+    backend: Literal["sglang"]
+    backend_cfg: SGLangConfig
+
+    # Cluster resources.
+    num_nodes: int
+    num_gpus_per_node: int
+    num_cpus_per_node: int
+    num_gpus_per_engine: int
+    num_cpus_per_engine: int
+
+    @model_validator(mode="after")
+    def _validate_resource_layout(self) -> RolloutConfig:
+        total_gpus = self.num_nodes * self.num_gpus_per_node
+        if self.num_gpus_per_engine <= 0:
+            raise ValueError("num_gpus_per_engine must be > 0")
+        if total_gpus % self.num_gpus_per_engine != 0:
+            raise ValueError(
+                f"Total GPUs ({total_gpus}) must be divisible by "
+                f"num_gpus_per_engine ({self.num_gpus_per_engine})"
+            )
+        return self
+
+    @property
+    def num_engines(self) -> int:
+        total_gpus = self.num_nodes * self.num_gpus_per_node
+        return int(total_gpus / self.num_gpus_per_engine)
+
+
 class OpenForgeConfig(OpenForgeBaseModel):
     """Configuration for the OpenForge project."""
 
@@ -183,6 +231,7 @@ class OpenForgeConfig(OpenForgeBaseModel):
     gateway: GatewayConfig
     model: ModelConfig
     train: TrainConfig
+    rollout: RolloutConfig
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> OpenForgeConfig:

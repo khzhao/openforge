@@ -39,10 +39,9 @@ class ActorCriticRefGroup:
         self._master_port = master_port
         self._num_nodes = cfg.train.num_nodes
         self._num_gpus_per_node = cfg.train.num_gpus_per_node
+        self._num_gpus_per_engine = cfg.train.num_gpus_per_engine
+        self._num_cpus_per_engine = cfg.train.num_cpus_per_engine
         self._world_size = self._num_nodes * self._num_gpus_per_node
-        self._cpus_per_worker = (
-            cfg.train.num_cpus_per_node // cfg.train.num_gpus_per_node
-        )
         self._workers: list[ray.actor.ActorHandle] = []
 
         if isinstance(strategy, str):
@@ -55,7 +54,9 @@ class ActorCriticRefGroup:
         strategy: PlacementStrategy,
     ) -> ray.util.placement_group.PlacementGroup:
         """Reserve GPU+CPU bundles atomically via Ray."""
-        bundles = [{"GPU": 1, "CPU": self._cpus_per_worker}] * self._world_size
+        bundles = [
+            {"GPU": self._num_gpus_per_engine, "CPU": self._num_cpus_per_engine}
+        ] * self._world_size
         pg = placement_group(bundles, strategy=strategy.value)
         ray.get(pg.ready())
         return pg
@@ -66,8 +67,8 @@ class ActorCriticRefGroup:
 
         for rank in range(self._world_size):
             worker = RemoteWorker.options(
-                num_cpus=self._cpus_per_worker,
-                num_gpus=1,
+                num_cpus=self._num_cpus_per_engine,
+                num_gpus=self._num_gpus_per_engine,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=self._pg,
                     placement_group_bundle_index=rank,
