@@ -1,40 +1,70 @@
 # Copyright 2026 openforge
 
-from datetime import timedelta
+from __future__ import annotations
 
-import torch
-import torch.distributed as dist
+from tensordict import TensorDict
+
+from openforge.configs import OpenForgeConfig
+from openforge.engines.fsdp2 import FSDP2Backend
 
 
 class ActorCriticRefWorker:
-    """A worker for actor-critic-ref.
+    """Colocated actor-critic-ref worker (one per GPU).
 
-    We intentionally do not wrap this class with a ray.remote decorator. This
-    will allow to write test cases for this class much more easily.
-
-    [2026-02-25] @kzhao:
-    We will restrict this class to colocate the actor/critic/ref
-    workers together into the same group. We will also assume that
-    everything is trained on a singular node consisting of 4-8 GPUs.
+    Not wrapped with ray.remote so it can be tested without Ray.
+    ActorCriticRefGroup wraps it as a remote actor at runtime.
     """
 
-    def __init__(
+    def initialize(
         self,
+        cfg: OpenForgeConfig,
+        *,
         rank: int,
         world_size: int,
         master_addr: str,
         master_port: int,
-    ):
-        self.rank = rank
-        self.world_size = world_size
+    ) -> None:
+        self.cfg = cfg
 
-        if not dist.is_initialized():
-            assert torch.cuda.device_count() == 1, "Expected only 1 GPU per worker"
-            torch.cuda.set_device(0)
-            dist.init_process_group(
-                backend="nccl",
-                rank=rank,
-                world_size=world_size,
-                init_method=f"tcp://{master_addr}:{master_port}",
-                timeout=timedelta(seconds=30),
-            )
+        if cfg.train.backend == "fsdp2":
+            self.backend = FSDP2Backend()
+        else:
+            raise ValueError(f"Unsupported backend: {cfg.train.backend}")
+
+        self.backend.initialize(
+            cfg,
+            rank=rank,
+            world_size=world_size,
+            master_addr=master_addr,
+            master_port=master_port,
+        )
+
+    def train_step(
+        self,
+        batch: TensorDict,
+        *,
+        global_step: int | None = None,
+    ) -> dict[str, float]:
+        backend = self.backend
+        backend.zero_grad()
+        forward_out = backend.forward(batch)
+        backend.backward(forward_out)
+        return backend.step_optimizer(global_step=global_step)
+
+    def save_checkpoint(self, *, step: int, policy_version: int) -> str:
+        return self.backend.save_checkpoint(step=step, policy_version=policy_version)
+
+    def load_checkpoint(self) -> tuple[int, int] | None:
+        return self.backend.load_checkpoint(latest=True)
+
+    def sleep(self) -> None:
+        self.backend.sleep()
+
+    def wakeup(self) -> None:
+        self.backend.wakeup()
+
+    def clear_memory(self) -> None:
+        self.backend.clear_memory()
+
+    def shutdown(self) -> None:
+        self.backend.shutdown()
