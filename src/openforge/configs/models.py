@@ -105,7 +105,8 @@ class FSDP2Config(OpenForgeBaseModel):
 class MegatronConfig(OpenForgeBaseModel):
     """Megatron backend configuration."""
 
-    pass
+    def model_post_init(self) -> None:
+        raise NotImplementedError("Megatron backend is not implemented yet")
 
 
 class ModelConfig(OpenForgeBaseModel):
