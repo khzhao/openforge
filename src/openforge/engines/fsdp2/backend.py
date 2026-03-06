@@ -28,11 +28,9 @@ class FSDP2Backend(TrainBackend):
 
     Expected packed batch contract:
     - tokens: LongTensor [N]
-    - cu_seqlens: IntTensor [B+1]
     - loss_mask: Float/Bool Tensor [N]
     - rewards: Float Tensor [N]
     - position_ids: LongTensor [N]
-    - ref_log_probs: optional FloatTensor [N-1]
     """
 
     def __init__(self) -> None:
@@ -76,19 +74,20 @@ class FSDP2Backend(TrainBackend):
         self._optimizer().zero_grad(set_to_none=True)
 
     def forward(self, batch: TensorDict) -> TensorDict:
+        model = self._model()
+        ref_model = self._maybe_ref_model()
         device = self._device()
         tokens = batch.get("tokens").to(device)
-        cu_seqlens = batch.get("cu_seqlens").to(device=device, dtype=torch.int32)
         loss_mask = batch.get("loss_mask").to(device).float()
         rewards = batch.get("rewards").to(device).float()
         position_ids = batch.get("position_ids").to(device)
         transition_mask = self._transition_mask(
             loss_mask=loss_mask,
-            cu_seqlens=cu_seqlens,
+            position_ids=position_ids,
         )
 
         curr_log_probs = self._compute_log_probs(
-            model=self._model(),
+            model=model,
             tokens=tokens,
             position_ids=position_ids,
         )
@@ -97,12 +96,14 @@ class FSDP2Backend(TrainBackend):
             mask=transition_mask,
         )
 
-        ref_log_probs = self._maybe_compute_ref_log_probs(
-            batch=batch,
-            tokens=tokens,
-            position_ids=position_ids,
-        )
-        if ref_log_probs is not None:
+        ref_log_probs = None
+        if ref_model is not None and self._algo_cfg.kl_coef > 0.0:
+            with torch.no_grad():
+                ref_log_probs = self._compute_log_probs(
+                    model=ref_model,
+                    tokens=tokens,
+                    position_ids=position_ids,
+                )
             loss = loss + (
                 self._algo_cfg.kl_coef
                 * self._masked_mean(
@@ -117,7 +118,6 @@ class FSDP2Backend(TrainBackend):
         }
         if ref_log_probs is not None:
             outputs["ref_log_probs"] = ref_log_probs.detach()
-
         return TensorDict(outputs, batch_size=[])
 
     def backward(self, forward_out: TensorDict) -> None:
@@ -280,7 +280,6 @@ class FSDP2Backend(TrainBackend):
     def sleep(self) -> None:
         model = self._model()
         optimizer = self._optimizer()
-        ref_model = self._maybe_ref_model()
         fsdp_cfg = self._backend_cfg
         sleeping = self._sleep_state()
 
@@ -291,8 +290,6 @@ class FSDP2Backend(TrainBackend):
             return
 
         model.to("cpu")
-        if ref_model is not None:
-            ref_model.to("cpu")
         self._move_optimizer_state(optimizer, "cpu")
         self.clear_memory()
         self._sleeping = True
@@ -300,7 +297,6 @@ class FSDP2Backend(TrainBackend):
     def wakeup(self) -> None:
         model = self._model()
         optimizer = self._optimizer()
-        ref_model = self._maybe_ref_model()
         device = self._device()
         fsdp_cfg = self._backend_cfg
         sleeping = self._sleep_state()
@@ -312,8 +308,6 @@ class FSDP2Backend(TrainBackend):
             return
 
         model.to(device)
-        if ref_model is not None:
-            ref_model.to(device)
         self._move_optimizer_state(optimizer, device)
         self._sleeping = False
 
@@ -358,20 +352,9 @@ class FSDP2Backend(TrainBackend):
         cfg = self._cfg()
         fsdp_cfg = self._backend_cfg
         device = self._device()
-
-        mesh = create_device_mesh(
-            dp_size=cfg.train.parallelism.data_parallel_size,
-            world_size=self._world_size(),
-            device_type=device.type,
-        )
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=get_torch_dtype(fsdp_cfg.mixed_precision.param_dtype),
-            reduce_dtype=get_torch_dtype(fsdp_cfg.mixed_precision.reduce_dtype),
-        )
-        offload_policy = (
-            CPUOffloadPolicy(pin_memory=fsdp_cfg.offload.pin_memory)
-            if fsdp_cfg.offload.mode == "cpu"
-            else OffloadPolicy()
+        mesh, mp_policy, offload_policy = self._create_model_runtime(
+            device=device,
+            cpu_offload=fsdp_cfg.offload.mode == "cpu",
         )
 
         self.model = self._create_fsdp_model(
@@ -384,7 +367,24 @@ class FSDP2Backend(TrainBackend):
             enable_gradient_checkpointing=fsdp_cfg.gradient_checkpointing,
             train_mode=True,
         )
+
         self.ref_model = None
+        if cfg.model.reference_model_name_or_path is not None:
+            ref_offload_policy: OffloadPolicy = (
+                CPUOffloadPolicy(pin_memory=fsdp_cfg.offload.pin_memory)
+                if device.type == "cuda"
+                else OffloadPolicy()
+            )
+            self.ref_model = self._create_fsdp_model(
+                model_name_or_path=cfg.model.reference_model_name_or_path,
+                device=device,
+                device_mesh=mesh,
+                mp_policy=mp_policy,
+                offload_policy=ref_offload_policy,
+                reshard_after_forward=fsdp_cfg.reshard_after_forward,
+                enable_gradient_checkpointing=False,
+                train_mode=False,
+            )
 
         optim_cfg = fsdp_cfg.optim
         self.optimizer = torch.optim.AdamW(
@@ -484,7 +484,7 @@ class FSDP2Backend(TrainBackend):
             model,
             full_state,
             device=device,
-            cpu_offload=self._backend_cfg.offload.mode == "cpu",
+            cpu_offload=isinstance(offload_policy, CPUOffloadPolicy),
         )
         if not train_mode:
             model.requires_grad_(False)
@@ -526,14 +526,14 @@ class FSDP2Backend(TrainBackend):
                 buf.data = buf.data.to(target_device)
         return model
 
-    def _get_or_create_ref_model(self) -> torch.nn.Module:
-        ref_model = self._maybe_ref_model()
-        if ref_model is not None:
-            return ref_model
-
+    def _create_model_runtime(
+        self,
+        *,
+        device: torch.device,
+        cpu_offload: bool,
+    ) -> tuple[object, MixedPrecisionPolicy, OffloadPolicy]:
         cfg = self._cfg()
         fsdp_cfg = self._backend_cfg
-        device = self._device()
         mesh = create_device_mesh(
             dp_size=cfg.train.parallelism.data_parallel_size,
             world_size=self._world_size(),
@@ -543,47 +543,12 @@ class FSDP2Backend(TrainBackend):
             param_dtype=get_torch_dtype(fsdp_cfg.mixed_precision.param_dtype),
             reduce_dtype=get_torch_dtype(fsdp_cfg.mixed_precision.reduce_dtype),
         )
-        offload_policy = (
+        offload_policy: OffloadPolicy = (
             CPUOffloadPolicy(pin_memory=fsdp_cfg.offload.pin_memory)
-            if fsdp_cfg.offload.mode == "cpu"
+            if cpu_offload
             else OffloadPolicy()
         )
-        ref_model_name_or_path = (
-            cfg.model.reference_model_name_or_path or cfg.model.model_name_or_path
-        )
-        self.ref_model = self._create_fsdp_model(
-            model_name_or_path=ref_model_name_or_path,
-            device=device,
-            device_mesh=mesh,
-            mp_policy=mp_policy,
-            offload_policy=offload_policy,
-            reshard_after_forward=fsdp_cfg.reshard_after_forward,
-            enable_gradient_checkpointing=False,
-            train_mode=False,
-        )
-        self.ref_model.requires_grad_(False)
-        return self.ref_model
-
-    def _maybe_compute_ref_log_probs(
-        self,
-        *,
-        batch: TensorDict,
-        tokens: torch.Tensor,
-        position_ids: torch.Tensor,
-    ) -> torch.Tensor | None:
-        if self._algo_cfg.kl_coef <= 0.0:
-            return None
-
-        ref_log_probs = batch.get("ref_log_probs", None)
-        if ref_log_probs is not None:
-            return ref_log_probs.to(self._device()).float()
-
-        with torch.no_grad():
-            return self._compute_log_probs(
-                model=self._get_or_create_ref_model(),
-                tokens=tokens,
-                position_ids=position_ids,
-            )
+        return mesh, mp_policy, offload_policy
 
     def _resolve_checkpoint_path(
         self,
@@ -691,13 +656,12 @@ class FSDP2Backend(TrainBackend):
     def _transition_mask(
         *,
         loss_mask: torch.Tensor,
-        cu_seqlens: torch.Tensor,
+        position_ids: torch.Tensor,
     ) -> torch.Tensor:
         transition_mask = loss_mask[1:].clone()
 
-        # Remove cross-sequence targets at packed sequence boundaries.
-        if cu_seqlens.numel() > 2:
-            transition_mask[(cu_seqlens[1:-1] - 1).long()] = 0.0
+        # A reset to position 0 marks the first token of a packed sequence.
+        transition_mask[position_ids[1:] == 0] = 0.0
         return transition_mask
 
     @staticmethod
@@ -711,11 +675,11 @@ class FSDP2Backend(TrainBackend):
         tokens: torch.Tensor,
         loss_mask: torch.Tensor,
         rewards: torch.Tensor,
-        cu_seqlens: torch.Tensor,
+        position_ids: torch.Tensor,
     ) -> torch.Tensor:
         transition_mask = FSDP2Backend._transition_mask(
             loss_mask=loss_mask,
-            cu_seqlens=cu_seqlens,
+            position_ids=position_ids,
         )
         chosen_log_probs = FSDP2Backend._chosen_log_probs(logits=logits, tokens=tokens)
         return FSDP2Backend._masked_mean(

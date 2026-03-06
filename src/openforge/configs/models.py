@@ -48,6 +48,14 @@ class OpenForgeConfig(OpenForgeBaseModel):
     rollout: RolloutConfig
 
     @model_validator(mode="after")
+    def _validate_algo_requirements(self) -> OpenForgeConfig:
+        if self.algo.kl_coef > 0.0 and self.model.reference_model_name_or_path is None:
+            raise ValueError(
+                "model.reference_model_name_or_path must be set when algo.kl_coef > 0.0"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_cluster_allocations(self) -> OpenForgeConfig:
         usage_by_pool: dict[str, dict[str, int]] = {
             pool.node_pool: {"gpus": 0, "cpus": 0} for pool in self.cluster
