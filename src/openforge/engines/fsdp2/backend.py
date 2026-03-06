@@ -257,9 +257,6 @@ class FSDP2Backend(TrainBackend):
                     sort_keys=True,
                 )
 
-        if dist.is_initialized():
-            dist.barrier()
-
         if self._rank() != 0:
             return None
 
