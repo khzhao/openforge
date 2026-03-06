@@ -12,7 +12,7 @@ from .cluster import ClusterConfig
 from .topology import ParallelismConfig, PlacementConfig
 
 RolloutRole = Literal["prefill", "decode", "regular", "placeholder"]
-EngineTopology = Literal["regular", "prefill_decode"]
+EngineTopology = Literal["regular", "pd"]
 
 
 @dataclass(slots=True)
@@ -131,14 +131,14 @@ class RolloutConfig(OpenForgeBaseModel):
         routable_roles = {
             engine.role for engine in self.engines if engine.role != "placeholder"
         }
-        if self.engine_topology == "prefill_decode":
+        if self.engine_topology == "pd":
             if "prefill" not in routable_roles or "decode" not in routable_roles:
                 raise ValueError(
-                    "prefill_decode rollout must include both prefill and decode engines"
+                    "pd rollout must include both prefill and decode engines"
                 )
             if not routable_roles.issubset({"prefill", "decode"}):
                 raise ValueError(
-                    "prefill_decode rollout may only contain prefill, decode, or placeholder engines"
+                    "pd rollout may only contain prefill, decode, or placeholder engines"
                 )
         else:
             if not routable_roles.issubset({"regular"}):
