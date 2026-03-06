@@ -2,23 +2,16 @@
 
 from __future__ import annotations
 
-from enum import Enum
-from typing import Literal, Sequence
+from typing import Sequence
 
 import ray
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from tensordict import TensorDict
 
-from openforge.configs import ExportedPolicy, OpenForgeConfig
+from openforge.configs import ExportedPolicy, OpenForgeConfig, PlacementStrategy
+from openforge.scheduler.utils import ray_placement_group_strategy
 from openforge.scheduler.workers import ActorRefWorker
-
-
-class PlacementStrategy(Enum):
-    """PACK = fewest nodes; SPREAD = most nodes."""
-
-    PACK = "STRICT_PACK"
-    SPREAD = "STRICT_SPREAD"
 
 
 class ActorRefGroup:
@@ -34,8 +27,7 @@ class ActorRefGroup:
         cfg: OpenForgeConfig,
         master_addr: str,
         master_port: int,
-        strategy: PlacementStrategy
-        | Literal["PACK", "SPREAD"] = PlacementStrategy.PACK,
+        strategy: PlacementStrategy | str = PlacementStrategy.PACK,
     ) -> None:
         self.cfg = cfg
         self._master_addr = master_addr
@@ -49,20 +41,21 @@ class ActorRefGroup:
         self._world_size = resolved.world_size
         self._workers: list[ray.actor.ActorHandle] = []
 
-        if isinstance(strategy, str):
-            strategy = PlacementStrategy[strategy]
         self._pg = self._create_placement_group(strategy)
         self._create_workers()
 
     def _create_placement_group(
         self,
-        strategy: PlacementStrategy,
+        strategy: PlacementStrategy | str,
     ) -> ray.util.placement_group.PlacementGroup:
         """Reserve GPU+CPU bundles atomically via Ray."""
         bundles = [
             {"GPU": self._num_gpus_per_worker, "CPU": self._num_cpus_per_worker}
         ] * self._world_size
-        pg = placement_group(bundles, strategy=strategy.value)
+        pg = placement_group(
+            bundles,
+            strategy=ray_placement_group_strategy(strategy),
+        )
         ray.get(pg.ready())
         return pg
 

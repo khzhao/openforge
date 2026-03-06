@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from enum import Enum
 
 from pydantic import model_validator
 
 from .base import OpenForgeBaseModel
 
-PlacementStrategy = Literal["PACK", "SPREAD"]
+
+class PlacementStrategy(str, Enum):
+    """Placement strategy for grouping workers onto nodes."""
+
+    PACK = "PACK"
+    SPREAD = "SPREAD"
 
 
 class ParallelismConfig(OpenForgeBaseModel):
@@ -52,4 +57,4 @@ class PlacementConfig(OpenForgeBaseModel):
     """Placement target for a workload fragment."""
 
     node_pool: str
-    strategy: PlacementStrategy = "PACK"
+    strategy: PlacementStrategy = PlacementStrategy.PACK

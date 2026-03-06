@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
-from enum import Enum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import ray
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from openforge.configs import ExportedPolicy, OpenForgeConfig, RolloutEndpoint
+from openforge.configs import (
+    ExportedPolicy,
+    OpenForgeConfig,
+    PlacementStrategy,
+    RolloutEndpoint,
+)
+from openforge.scheduler.utils import ray_placement_group_strategy
 from openforge.scheduler.workers import PDRouterWorker, RolloutWorker
 
 if TYPE_CHECKING:
     from openforge.scheduler.actor_ref_group import ActorRefGroup
-
-
-class PlacementStrategy(Enum):
-    """PACK = fewest nodes; SPREAD = most nodes."""
-
-    PACK = "STRICT_PACK"
-    SPREAD = "STRICT_SPREAD"
 
 
 class RolloutGroup:
@@ -29,7 +27,7 @@ class RolloutGroup:
     def __init__(
         self,
         cfg: OpenForgeConfig,
-        strategy: PlacementStrategy | Literal["PACK", "SPREAD"] | None = None,
+        strategy: PlacementStrategy | str | None = None,
     ) -> None:
         self.cfg = cfg
         self._resolved = cfg.rollout.resolve(cfg.cluster)
@@ -136,7 +134,7 @@ class RolloutGroup:
     def _create_workers(
         self,
         *,
-        strategy: PlacementStrategy | Literal["PACK", "SPREAD"] | None,
+        strategy: PlacementStrategy | str | None,
     ) -> None:
         remote_worker = ray.remote(RolloutWorker)
         resolved_by_group: dict[str, list] = {}
@@ -145,13 +143,14 @@ class RolloutGroup:
 
         for group in self.cfg.rollout.engines:
             group_strategy = strategy or group.placement.strategy
-            if isinstance(group_strategy, str):
-                group_strategy = PlacementStrategy[group_strategy]
 
             bundles = [
                 {"GPU": group.gpus_per_engine, "CPU": group.cpus_per_engine}
             ] * group.replicas
-            pg = placement_group(bundles, strategy=group_strategy.value)
+            pg = placement_group(
+                bundles,
+                strategy=ray_placement_group_strategy(group_strategy),
+            )
             ray.get(pg.ready())
             self._placement_groups.append(pg)
 

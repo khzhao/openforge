@@ -13,7 +13,7 @@ from .rollout import (
     RolloutEngineGroupConfig,
     SGLangRequestConfig,
 )
-from .topology import ParallelismConfig, PlacementConfig
+from .topology import ParallelismConfig, PlacementConfig, PlacementStrategy
 from .train import (
     AMPConfig,
     ExportedPolicy,
@@ -45,6 +45,7 @@ __all__ = [
     "OptimizerConfig",
     "ParallelismConfig",
     "PlacementConfig",
+    "PlacementStrategy",
     "ResolvedRolloutEngine",
     "ResolvedRolloutTopology",
     "ResolvedTrainTopology",
