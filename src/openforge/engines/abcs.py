@@ -5,7 +5,7 @@ from contextlib import AbstractContextManager
 
 from tensordict import TensorDict
 
-from openforge.configs import OpenForgeConfig
+from openforge.configs import ExportedPolicy, OpenForgeConfig
 
 
 class TrainBackend(ABC):
@@ -72,6 +72,15 @@ class TrainBackend(ABC):
         If `step` is provided, backend should load that explicit checkpoint.
         Returns `(step, policy_version)` if a checkpoint is found, otherwise `None`.
         """
+
+    @abstractmethod
+    def export_policy_for_rollout(
+        self,
+        *,
+        step: int,
+        policy_version: int,
+    ) -> ExportedPolicy | None:
+        """Export a serving-ready policy artifact for rollout consumption."""
 
     @abstractmethod
     def sleep(self) -> None:

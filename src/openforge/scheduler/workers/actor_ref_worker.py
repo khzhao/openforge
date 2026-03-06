@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from tensordict import TensorDict
 
-from openforge.configs import OpenForgeConfig
+from openforge.configs import ExportedPolicy, OpenForgeConfig
 from openforge.engines.fsdp2 import FSDP2Backend
 
 
@@ -56,6 +56,17 @@ class ActorRefWorker:
 
     def load_checkpoint(self) -> tuple[int, int] | None:
         return self.backend.load_checkpoint(latest=True)
+
+    def export_policy_for_rollout(
+        self,
+        *,
+        step: int,
+        policy_version: int,
+    ) -> ExportedPolicy | None:
+        return self.backend.export_policy_for_rollout(
+            step=step,
+            policy_version=policy_version,
+        )
 
     def sleep(self) -> None:
         self.backend.sleep()

@@ -1,5 +1,7 @@
 # Copyright 2026 openforge
 
+from __future__ import annotations
+
 from enum import Enum
 from typing import Literal
 
@@ -7,7 +9,7 @@ import ray
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from openforge.configs import OpenForgeConfig
+from openforge.configs import ExportedPolicy, OpenForgeConfig
 from openforge.scheduler.workers import ActorRefWorker
 
 
@@ -124,6 +126,27 @@ class ActorRefGroup:
         """Returns (step, policy_version) from rank 0, or None."""
         results = ray.get([worker.load_checkpoint.remote() for worker in self._workers])
         return results[0]
+
+    def export_policy_for_rollout(
+        self,
+        *,
+        step: int,
+        policy_version: int,
+    ) -> ExportedPolicy:
+        """Export a serving-ready policy artifact from the training world."""
+        results = ray.get(
+            [
+                worker.export_policy_for_rollout.remote(
+                    step=step,
+                    policy_version=policy_version,
+                )
+                for worker in self._workers
+            ]
+        )
+        for result in results:
+            if result is not None:
+                return result
+        raise RuntimeError("training export did not return a rollout policy artifact")
 
     def sleep(self) -> None:
         """Offload all workers to CPU."""
