@@ -1,7 +1,6 @@
 # Copyright 2026 openforge
 
 import json
-import math
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
 from pathlib import Path
@@ -21,6 +20,8 @@ from openforge.configs import ExportedPolicy, FSDP2Config, OpenForgeConfig
 from openforge.engines.abcs import TrainBackend
 
 from .base import apply_fsdp2, create_device_mesh, get_torch_dtype
+from .offload import offload_optimizer, offload_params, onload_optimizer, onload_params
+from .scheduler import get_lr_scheduler
 
 
 class FSDP2Backend(TrainBackend):
@@ -285,12 +286,9 @@ class FSDP2Backend(TrainBackend):
 
         if sleeping:
             return
-        if fsdp_cfg.offload.mode == "cpu":
-            self._sleeping = True
-            return
-
-        model.to("cpu")
-        self._move_optimizer_state(optimizer, "cpu")
+        if fsdp_cfg.offload.mode != "cpu":
+            offload_params(model, offload_grad=True)
+            offload_optimizer(optimizer)
         self.clear_memory()
         self._sleeping = True
 
@@ -303,12 +301,10 @@ class FSDP2Backend(TrainBackend):
 
         if not sleeping:
             return
-        if fsdp_cfg.offload.mode == "cpu":
-            self._sleeping = False
-            return
-
-        model.to(device)
-        self._move_optimizer_state(optimizer, device)
+        if fsdp_cfg.offload.mode != "cpu":
+            onload_params(model, device, onload_grad=True)
+            onload_optimizer(optimizer, device)
+        self.clear_memory()
         self._sleeping = False
 
     def clear_memory(self) -> None:
@@ -479,6 +475,7 @@ class FSDP2Backend(TrainBackend):
             mp_policy=mp_policy,
             offload_policy=offload_policy,
             reshard_after_forward=reshard_after_forward,
+            shard_modules=self._backend_cfg.shard_modules,
         )
         model = self._load_full_state_dict_from_rank0(
             model,
@@ -573,51 +570,20 @@ class FSDP2Backend(TrainBackend):
             return None
         return candidates[-1]
 
-    @staticmethod
-    def _move_optimizer_state(
-        optimizer: torch.optim.Optimizer, device: torch.device | str
-    ) -> None:
-        for state in optimizer.state.values():
-            for key, value in state.items():
-                if torch.is_tensor(value):
-                    state[key] = value.to(device, non_blocking=True)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-
     def _build_lr_scheduler(self) -> torch.optim.lr_scheduler.LRScheduler:
         optimizer = self._optimizer()
         fsdp_cfg = self._backend_cfg
 
         scheduler_cfg = fsdp_cfg.scheduler
-        warmup_steps = scheduler_cfg.warmup_steps
-        decay_steps = max(1, warmup_steps)
-
-        min_lr_ratio = (
-            scheduler_cfg.min_lr_rate
-            if scheduler_cfg.min_lr_rate is not None
-            else scheduler_cfg.min_lr / fsdp_cfg.optim.lr
+        return get_lr_scheduler(
+            scheduler_type=scheduler_cfg.type,
+            optimizer=optimizer,
+            num_warmup_steps=scheduler_cfg.warmup_steps,
+            num_training_steps=max(1, scheduler_cfg.warmup_steps * 2),
+            num_cycles=scheduler_cfg.num_cycles,
+            min_lr=scheduler_cfg.min_lr,
+            min_lr_rate=scheduler_cfg.min_lr_rate,
         )
-        min_lr_ratio = float(max(0.0, min(1.0, min_lr_ratio)))
-
-        def lr_lambda(step_idx: int) -> float:
-            if warmup_steps > 0 and step_idx < warmup_steps:
-                return float(step_idx + 1) / float(warmup_steps)
-
-            if scheduler_cfg.type == "constant":
-                return 1.0
-
-            progress = min(1.0, float(step_idx - warmup_steps) / float(decay_steps))
-
-            if scheduler_cfg.type == "linear":
-                decay = 1.0 - progress
-                return min_lr_ratio + (1.0 - min_lr_ratio) * decay
-
-            cosine = 0.5 * (
-                1.0 + math.cos(math.pi * 2.0 * scheduler_cfg.num_cycles * progress)
-            )
-            return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
-
-        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     def _gradient_accumulation_steps(self) -> int:
         return self._cfg().train.gradient_accumulation_steps

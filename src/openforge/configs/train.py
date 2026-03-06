@@ -62,6 +62,7 @@ class FSDP2Config(OpenForgeBaseModel):
 
     gradient_checkpointing: bool
     reshard_after_forward: bool
+    shard_modules: list[str] | None = None
     mixed_precision: MixedPrecisionConfig
     offload: OffloadConfig
     amp: AMPConfig
