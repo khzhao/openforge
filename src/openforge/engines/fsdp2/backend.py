@@ -12,9 +12,10 @@ from tensordict import TensorDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
+    set_model_state_dict,
 )
 from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from openforge.configs import ExportedPolicy, FSDP2Config, OpenForgeConfig
 from openforge.engines.abcs import TrainBackend
@@ -64,8 +65,8 @@ class FSDP2Backend(TrainBackend):
         self.world_size = world_size
         self.master_addr = master_addr
         self.master_port = master_port
-        self._initialize_process_group()
         self._initialize_device()
+        self._initialize_process_group()
         self._initialize_train_components()
         self._sleeping = False
 
@@ -320,12 +321,14 @@ class FSDP2Backend(TrainBackend):
             return
 
         backend = "nccl" if torch.cuda.is_available() else "gloo"
+        device_id = self._device() if self._device().type == "cuda" else None
         dist.init_process_group(
             backend=backend,
             rank=self._rank(),
             world_size=self._world_size(),
             init_method=f"tcp://{self._master_addr()}:{self._master_port()}",
             timeout=timedelta(seconds=30),
+            device_id=device_id,
         )
 
     def _initialize_device(self) -> None:
@@ -340,10 +343,7 @@ class FSDP2Backend(TrainBackend):
         fsdp_cfg = self._backend_cfg
         device = self._device()
 
-        model = AutoModelForCausalLM.from_pretrained(
-            cfg.model.model_name_or_path,
-            trust_remote_code=True,
-        )
+        model, full_state = self._build_model_and_state_for_fsdp()
         if self._model_uses_linear_attention(model):
             raise NotImplementedError(
                 "FSDP2Backend packed forward currently requires full-attention-only models. "
@@ -375,7 +375,12 @@ class FSDP2Backend(TrainBackend):
             offload_policy=offload_policy,
             reshard_after_forward=fsdp_cfg.reshard_after_forward,
         )
-        self.model.to(device)
+        self.model = self._load_full_state_dict_from_rank0(
+            self.model,
+            full_state,
+            device=device,
+            cpu_offload=fsdp_cfg.offload.mode == "cpu",
+        )
 
         optim_cfg = fsdp_cfg.optim
         self.optimizer = torch.optim.AdamW(
@@ -396,6 +401,83 @@ class FSDP2Backend(TrainBackend):
             "cuda",
             enabled=use_grad_scaler,
         )
+
+    def _build_model_and_state_for_fsdp(
+        self,
+    ) -> tuple[torch.nn.Module, dict[str, torch.Tensor]]:
+        cfg = self._cfg()
+        rank = self._rank()
+        world_size = self._world_size()
+        device = self._device()
+
+        def maybe_barrier() -> None:
+            if world_size <= 1 or not dist.is_initialized():
+                return
+            if device.type == "cuda":
+                dist.barrier(device_ids=[device.index])
+            else:
+                dist.barrier()
+
+        if rank == 0:
+            model = AutoModelForCausalLM.from_pretrained(
+                cfg.model.model_name_or_path,
+                trust_remote_code=True,
+            )
+            full_state = model.state_dict()
+            maybe_barrier()
+            return model, full_state
+
+        maybe_barrier()
+
+        model_cfg = AutoConfig.from_pretrained(
+            cfg.model.model_name_or_path,
+            trust_remote_code=True,
+        )
+        tie_word_embeddings = bool(getattr(model_cfg, "tie_word_embeddings", False))
+        init_device = (
+            torch.device("cpu") if tie_word_embeddings else torch.device("meta")
+        )
+        with init_device:
+            model = AutoModelForCausalLM.from_config(
+                model_cfg,
+                trust_remote_code=True,
+            )
+        return model, {}
+
+    def _load_full_state_dict_from_rank0(
+        self,
+        model: torch.nn.Module,
+        full_state: dict[str, torch.Tensor],
+        *,
+        device: torch.device,
+        cpu_offload: bool,
+    ) -> torch.nn.Module:
+        target_device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if device.type == "cuda"
+            else device
+        )
+
+        if self._rank() == 0:
+            model = model.to(device=target_device, non_blocking=True)
+        else:
+            model = model.to_empty(device=target_device)
+
+        options = StateDictOptions(
+            full_state_dict=True,
+            cpu_offload=cpu_offload,
+            broadcast_from_rank0=True,
+        )
+        set_model_state_dict(model, full_state, options=options)
+
+        for _name, buf in model.named_buffers():
+            dist.broadcast(buf, src=0)
+
+        if cpu_offload and target_device.type == "cuda":
+            model.to("cpu", non_blocking=True)
+            for buf in model.buffers():
+                buf.data = buf.data.to(target_device)
+        return model
 
     def _resolve_checkpoint_path(
         self,
