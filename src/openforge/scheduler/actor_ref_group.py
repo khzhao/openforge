@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Literal, Sequence
 
 import ray
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from tensordict import TensorDict
 
 from openforge.configs import ExportedPolicy, OpenForgeConfig
 from openforge.scheduler.workers import ActorRefWorker
@@ -103,14 +104,19 @@ class ActorRefGroup:
 
     def async_train_step(
         self,
-        batch,
+        batches: Sequence[TensorDict],
         *,
         global_step: int | None = None,
     ) -> list[ray.ObjectRef]:
-        """Dispatch a training step to all workers; returns ObjectRefs."""
+        """Dispatch one rank-local training batch to each worker."""
+        if len(batches) != self._world_size:
+            raise ValueError(
+                f"Expected {self._world_size} rank-local batches, got {len(batches)}"
+            )
+
         return [
-            worker.train_step.remote(batch, global_step=global_step)
-            for worker in self._workers
+            worker.train_step.remote(batches[rank], global_step=global_step)
+            for rank, worker in enumerate(self._workers)
         ]
 
     def save_checkpoint(self, *, step: int, policy_version: int) -> list[str]:
