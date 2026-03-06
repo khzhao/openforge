@@ -8,12 +8,14 @@ from .rollout import (
     ResolvedRolloutTopology,
     RolloutConfig,
     RolloutDatum,
+    RolloutEndpoint,
     RolloutEngineGroupConfig,
     SGLangRequestConfig,
 )
 from .topology import ParallelismConfig, PlacementConfig
 from .train import (
     AMPConfig,
+    ExportedPolicy,
     FSDP2Config,
     MegatronConfig,
     MixedPrecisionConfig,
@@ -29,6 +31,7 @@ __all__ = [
     "AMPConfig",
     "ClusterConfig",
     "DataConfig",
+    "ExportedPolicy",
     "FSDP2Config",
     "GatewayConfig",
     "MegatronConfig",
@@ -47,6 +50,7 @@ __all__ = [
     "Reward",
     "RolloutConfig",
     "RolloutDatum",
+    "RolloutEndpoint",
     "RolloutEngineGroupConfig",
     "SGLangRequestConfig",
     "SchedulerConfig",

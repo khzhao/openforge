@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from pydantic import model_validator
@@ -110,6 +112,15 @@ class ResolvedTrainTopology:
         return self.world_size * self.cpus_per_worker
 
 
+@dataclass(slots=True)
+class ExportedPolicy:
+    """Serving artifact exported from the training world."""
+
+    step: int
+    policy_version: int
+    model_path: str
+
+
 class TrainConfig(OpenForgeBaseModel):
     """Configuration for the training process."""
 
@@ -214,3 +225,46 @@ class TrainConfig(OpenForgeBaseModel):
     @property
     def total_cpus(self) -> int:
         return self.num_workers * self.cpus_per_worker
+
+    @property
+    def rollout_policy_dir(self) -> Path:
+        return Path(self.checkpoints_dir) / "rollout_policies"
+
+    def rollout_policy_path(self, policy_version: int) -> Path:
+        return self.rollout_policy_dir / f"policy_{policy_version:08d}"
+
+    def read_exported_policy(
+        self,
+        *,
+        latest: bool = True,
+        policy_version: int | None = None,
+    ) -> ExportedPolicy | None:
+        if policy_version is not None:
+            metadata_path = self.rollout_policy_path(policy_version) / "export.json"
+            return self._read_exported_policy_metadata(metadata_path)
+
+        if not latest:
+            return None
+
+        metadata_candidates = sorted(
+            self.rollout_policy_dir.glob("policy_*/export.json")
+        )
+        if not metadata_candidates:
+            return None
+        return self._read_exported_policy_metadata(metadata_candidates[-1])
+
+    @staticmethod
+    def _read_exported_policy_metadata(
+        metadata_path: Path,
+    ) -> ExportedPolicy | None:
+        if not metadata_path.exists():
+            return None
+
+        with metadata_path.open(encoding="utf-8") as f:
+            payload = json.load(f)
+
+        return ExportedPolicy(
+            step=int(payload["step"]),
+            policy_version=int(payload["policy_version"]),
+            model_path=str(metadata_path.parent),
+        )
