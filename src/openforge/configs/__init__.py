@@ -1,5 +1,6 @@
 # Copyright 2026 openforge
 
+from .algo import AlgorithmConfig
 from .base import Reward
 from .cluster import ClusterConfig, NodePoolConfig
 from .models import DataConfig, GatewayConfig, ModelConfig, OpenForgeConfig
@@ -29,6 +30,7 @@ from .train import (
 
 __all__ = [
     "AMPConfig",
+    "AlgorithmConfig",
     "ClusterConfig",
     "DataConfig",
     "ExportedPolicy",

@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
+from .algo import AlgorithmConfig
 from .base import OpenForgeBaseModel
 from .cluster import ClusterConfig
 from .rollout import RolloutConfig
@@ -32,6 +33,7 @@ class ModelConfig(OpenForgeBaseModel):
 
     model_name_or_path: str
     tokenizer_name_or_path: str
+    reference_model_name_or_path: str | None = None
 
 
 class OpenForgeConfig(OpenForgeBaseModel):
@@ -40,6 +42,7 @@ class OpenForgeConfig(OpenForgeBaseModel):
     data: DataConfig
     gateway: GatewayConfig
     model: ModelConfig
+    algo: AlgorithmConfig = Field(default_factory=AlgorithmConfig)
     cluster: ClusterConfig
     train: TrainConfig
     rollout: RolloutConfig

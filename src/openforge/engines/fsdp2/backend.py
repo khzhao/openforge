@@ -32,6 +32,7 @@ class FSDP2Backend(TrainBackend):
     - loss_mask: Float/Bool Tensor [N]
     - rewards: Float Tensor [N]
     - position_ids: LongTensor [N]
+    - ref_log_probs: optional FloatTensor [N-1]
     """
 
     def __init__(self) -> None:
@@ -44,6 +45,7 @@ class FSDP2Backend(TrainBackend):
         self.device: torch.device | None = None
 
         self.model: torch.nn.Module | None = None
+        self.ref_model: torch.nn.Module | None = None
         self.optimizer: torch.optim.Optimizer | None = None
         self.lr_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
         self.grad_scaler: torch.amp.GradScaler | None = None
@@ -74,41 +76,49 @@ class FSDP2Backend(TrainBackend):
         self._optimizer().zero_grad(set_to_none=True)
 
     def forward(self, batch: TensorDict) -> TensorDict:
-        model = self._model()
         device = self._device()
-        amp_cfg = self._backend_cfg.amp
-        amp_enabled = bool(amp_cfg.enabled and device.type == "cuda")
-        amp_dtype = get_torch_dtype(amp_cfg.precision)
-
         tokens = batch.get("tokens").to(device)
         cu_seqlens = batch.get("cu_seqlens").to(device=device, dtype=torch.int32)
         loss_mask = batch.get("loss_mask").to(device).float()
         rewards = batch.get("rewards").to(device).float()
         position_ids = batch.get("position_ids").to(device)
+        transition_mask = self._transition_mask(
+            loss_mask=loss_mask,
+            cu_seqlens=cu_seqlens,
+        )
 
-        with torch.autocast(
-            device_type=device.type,
-            dtype=amp_dtype,
-            enabled=amp_enabled,
-        ):
-            logits = model(
-                input_ids=tokens.unsqueeze(0),
-                position_ids=position_ids.unsqueeze(0),
-            ).logits[0, :-1, :]
-            loss = self._packed_weighted_nll_loss(
-                logits=logits,
-                tokens=tokens,
-                loss_mask=loss_mask,
-                rewards=rewards,
-                cu_seqlens=cu_seqlens,
+        curr_log_probs = self._compute_log_probs(
+            model=self._model(),
+            tokens=tokens,
+            position_ids=position_ids,
+        )
+        loss = self._masked_mean(
+            values=-(rewards[1:] * curr_log_probs),
+            mask=transition_mask,
+        )
+
+        ref_log_probs = self._maybe_compute_ref_log_probs(
+            batch=batch,
+            tokens=tokens,
+            position_ids=position_ids,
+        )
+        if ref_log_probs is not None:
+            loss = loss + (
+                self._algo_cfg.kl_coef
+                * self._masked_mean(
+                    values=curr_log_probs - ref_log_probs,
+                    mask=transition_mask,
+                )
             )
 
-        return TensorDict(
-            {
-                "loss": loss,
-            },
-            batch_size=[],
-        )
+        outputs = {
+            "loss": loss,
+            "curr_log_probs": curr_log_probs.detach(),
+        }
+        if ref_log_probs is not None:
+            outputs["ref_log_probs"] = ref_log_probs.detach()
+
+        return TensorDict(outputs, batch_size=[])
 
     def backward(self, forward_out: TensorDict) -> None:
         scaler = self._grad_scaler()
@@ -270,6 +280,7 @@ class FSDP2Backend(TrainBackend):
     def sleep(self) -> None:
         model = self._model()
         optimizer = self._optimizer()
+        ref_model = self._maybe_ref_model()
         fsdp_cfg = self._backend_cfg
         sleeping = self._sleep_state()
 
@@ -280,6 +291,8 @@ class FSDP2Backend(TrainBackend):
             return
 
         model.to("cpu")
+        if ref_model is not None:
+            ref_model.to("cpu")
         self._move_optimizer_state(optimizer, "cpu")
         self.clear_memory()
         self._sleeping = True
@@ -287,6 +300,7 @@ class FSDP2Backend(TrainBackend):
     def wakeup(self) -> None:
         model = self._model()
         optimizer = self._optimizer()
+        ref_model = self._maybe_ref_model()
         device = self._device()
         fsdp_cfg = self._backend_cfg
         sleeping = self._sleep_state()
@@ -298,6 +312,8 @@ class FSDP2Backend(TrainBackend):
             return
 
         model.to(device)
+        if ref_model is not None:
+            ref_model.to(device)
         self._move_optimizer_state(optimizer, device)
         self._sleeping = False
 
@@ -343,16 +359,6 @@ class FSDP2Backend(TrainBackend):
         fsdp_cfg = self._backend_cfg
         device = self._device()
 
-        model, full_state = self._build_model_and_state_for_fsdp()
-        if self._model_uses_linear_attention(model):
-            raise NotImplementedError(
-                "FSDP2Backend packed forward currently requires full-attention-only models. "
-                "Detected linear_attention layers in model config."
-            )
-        if fsdp_cfg.gradient_checkpointing:
-            model.gradient_checkpointing_enable()
-        model.train()
-
         mesh = create_device_mesh(
             dp_size=cfg.train.parallelism.data_parallel_size,
             world_size=self._world_size(),
@@ -368,19 +374,17 @@ class FSDP2Backend(TrainBackend):
             else OffloadPolicy()
         )
 
-        self.model = apply_fsdp2(
-            model=model,
+        self.model = self._create_fsdp_model(
+            model_name_or_path=cfg.model.model_name_or_path,
+            device=device,
             device_mesh=mesh,
             mp_policy=mp_policy,
             offload_policy=offload_policy,
             reshard_after_forward=fsdp_cfg.reshard_after_forward,
+            enable_gradient_checkpointing=fsdp_cfg.gradient_checkpointing,
+            train_mode=True,
         )
-        self.model = self._load_full_state_dict_from_rank0(
-            self.model,
-            full_state,
-            device=device,
-            cpu_offload=fsdp_cfg.offload.mode == "cpu",
-        )
+        self.ref_model = None
 
         optim_cfg = fsdp_cfg.optim
         self.optimizer = torch.optim.AdamW(
@@ -404,8 +408,8 @@ class FSDP2Backend(TrainBackend):
 
     def _build_model_and_state_for_fsdp(
         self,
+        model_name_or_path: str,
     ) -> tuple[torch.nn.Module, dict[str, torch.Tensor]]:
-        cfg = self._cfg()
         rank = self._rank()
         world_size = self._world_size()
         device = self._device()
@@ -420,7 +424,7 @@ class FSDP2Backend(TrainBackend):
 
         if rank == 0:
             model = AutoModelForCausalLM.from_pretrained(
-                cfg.model.model_name_or_path,
+                model_name_or_path,
                 trust_remote_code=True,
             )
             full_state = model.state_dict()
@@ -430,7 +434,7 @@ class FSDP2Backend(TrainBackend):
         maybe_barrier()
 
         model_cfg = AutoConfig.from_pretrained(
-            cfg.model.model_name_or_path,
+            model_name_or_path,
             trust_remote_code=True,
         )
         tie_word_embeddings = bool(getattr(model_cfg, "tie_word_embeddings", False))
@@ -443,6 +447,49 @@ class FSDP2Backend(TrainBackend):
                 trust_remote_code=True,
             )
         return model, {}
+
+    def _create_fsdp_model(
+        self,
+        *,
+        model_name_or_path: str,
+        device: torch.device,
+        device_mesh,
+        mp_policy: MixedPrecisionPolicy,
+        offload_policy: OffloadPolicy,
+        reshard_after_forward: bool,
+        enable_gradient_checkpointing: bool,
+        train_mode: bool,
+    ) -> torch.nn.Module:
+        model, full_state = self._build_model_and_state_for_fsdp(model_name_or_path)
+        if self._model_uses_linear_attention(model):
+            raise NotImplementedError(
+                "FSDP2Backend packed forward currently requires full-attention-only models. "
+                "Detected linear_attention layers in model config."
+            )
+        if enable_gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+        if train_mode:
+            model.train()
+        else:
+            model.eval()
+
+        model = apply_fsdp2(
+            model=model,
+            device_mesh=device_mesh,
+            mp_policy=mp_policy,
+            offload_policy=offload_policy,
+            reshard_after_forward=reshard_after_forward,
+        )
+        model = self._load_full_state_dict_from_rank0(
+            model,
+            full_state,
+            device=device,
+            cpu_offload=self._backend_cfg.offload.mode == "cpu",
+        )
+        if not train_mode:
+            model.requires_grad_(False)
+            model.eval()
+        return model
 
     def _load_full_state_dict_from_rank0(
         self,
@@ -478,6 +525,65 @@ class FSDP2Backend(TrainBackend):
             for buf in model.buffers():
                 buf.data = buf.data.to(target_device)
         return model
+
+    def _get_or_create_ref_model(self) -> torch.nn.Module:
+        ref_model = self._maybe_ref_model()
+        if ref_model is not None:
+            return ref_model
+
+        cfg = self._cfg()
+        fsdp_cfg = self._backend_cfg
+        device = self._device()
+        mesh = create_device_mesh(
+            dp_size=cfg.train.parallelism.data_parallel_size,
+            world_size=self._world_size(),
+            device_type=device.type,
+        )
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=get_torch_dtype(fsdp_cfg.mixed_precision.param_dtype),
+            reduce_dtype=get_torch_dtype(fsdp_cfg.mixed_precision.reduce_dtype),
+        )
+        offload_policy = (
+            CPUOffloadPolicy(pin_memory=fsdp_cfg.offload.pin_memory)
+            if fsdp_cfg.offload.mode == "cpu"
+            else OffloadPolicy()
+        )
+        ref_model_name_or_path = (
+            cfg.model.reference_model_name_or_path or cfg.model.model_name_or_path
+        )
+        self.ref_model = self._create_fsdp_model(
+            model_name_or_path=ref_model_name_or_path,
+            device=device,
+            device_mesh=mesh,
+            mp_policy=mp_policy,
+            offload_policy=offload_policy,
+            reshard_after_forward=fsdp_cfg.reshard_after_forward,
+            enable_gradient_checkpointing=False,
+            train_mode=False,
+        )
+        self.ref_model.requires_grad_(False)
+        return self.ref_model
+
+    def _maybe_compute_ref_log_probs(
+        self,
+        *,
+        batch: TensorDict,
+        tokens: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self._algo_cfg.kl_coef <= 0.0:
+            return None
+
+        ref_log_probs = batch.get("ref_log_probs", None)
+        if ref_log_probs is not None:
+            return ref_log_probs.to(self._device()).float()
+
+        with torch.no_grad():
+            return self._compute_log_probs(
+                model=self._get_or_create_ref_model(),
+                tokens=tokens,
+                position_ids=position_ids,
+            )
 
     def _resolve_checkpoint_path(
         self,
@@ -551,6 +657,53 @@ class FSDP2Backend(TrainBackend):
     def _gradient_accumulation_steps(self) -> int:
         return self._cfg().train.gradient_accumulation_steps
 
+    def _compute_log_probs(
+        self,
+        *,
+        model: torch.nn.Module,
+        tokens: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        device = self._device()
+        amp_cfg = self._backend_cfg.amp
+        amp_enabled = bool(amp_cfg.enabled and device.type == "cuda")
+        amp_dtype = get_torch_dtype(amp_cfg.precision)
+        with torch.autocast(
+            device_type=device.type,
+            dtype=amp_dtype,
+            enabled=amp_enabled,
+        ):
+            logits = model(
+                input_ids=tokens.unsqueeze(0),
+                position_ids=position_ids.unsqueeze(0),
+            ).logits[0, :-1, :]
+        return self._chosen_log_probs(logits=logits, tokens=tokens)
+
+    @staticmethod
+    def _chosen_log_probs(
+        *, logits: torch.Tensor, tokens: torch.Tensor
+    ) -> torch.Tensor:
+        target = tokens[1:]
+        log_probs = torch.log_softmax(logits, dim=-1)
+        return torch.gather(log_probs, dim=-1, index=target.unsqueeze(-1)).squeeze(-1)
+
+    @staticmethod
+    def _transition_mask(
+        *,
+        loss_mask: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        transition_mask = loss_mask[1:].clone()
+
+        # Remove cross-sequence targets at packed sequence boundaries.
+        if cu_seqlens.numel() > 2:
+            transition_mask[(cu_seqlens[1:-1] - 1).long()] = 0.0
+        return transition_mask
+
+    @staticmethod
+    def _masked_mean(*, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        return (values * mask).sum() / mask.sum().clamp_min(1.0)
+
     @staticmethod
     def _packed_weighted_nll_loss(
         *,
@@ -560,21 +713,15 @@ class FSDP2Backend(TrainBackend):
         rewards: torch.Tensor,
         cu_seqlens: torch.Tensor,
     ) -> torch.Tensor:
-        target = tokens[1:]
-        transition_mask = loss_mask[1:].clone()
-        transition_rewards = rewards[1:]
-
-        # Remove cross-sequence targets at packed sequence boundaries.
-        if cu_seqlens.numel() > 2:
-            transition_mask[(cu_seqlens[1:-1] - 1).long()] = 0.0
-
-        log_probs = torch.log_softmax(logits, dim=-1)
-        chosen_log_probs = torch.gather(
-            log_probs, dim=-1, index=target.unsqueeze(-1)
-        ).squeeze(-1)
-        numerator = -(transition_rewards * chosen_log_probs * transition_mask).sum()
-        denominator = transition_mask.sum()
-        return numerator / denominator.clamp_min(1.0)
+        transition_mask = FSDP2Backend._transition_mask(
+            loss_mask=loss_mask,
+            cu_seqlens=cu_seqlens,
+        )
+        chosen_log_probs = FSDP2Backend._chosen_log_probs(logits=logits, tokens=tokens)
+        return FSDP2Backend._masked_mean(
+            values=-(rewards[1:] * chosen_log_probs),
+            mask=transition_mask,
+        )
 
     @staticmethod
     def _model_uses_linear_attention(model: torch.nn.Module) -> bool:
@@ -615,6 +762,9 @@ class FSDP2Backend(TrainBackend):
         assert self.model is not None
         return self.model
 
+    def _maybe_ref_model(self) -> torch.nn.Module | None:
+        return self.ref_model
+
     def _optimizer(self) -> torch.optim.Optimizer:
         assert self.optimizer is not None
         return self.optimizer
@@ -630,6 +780,10 @@ class FSDP2Backend(TrainBackend):
     def _sleep_state(self) -> bool:
         assert self._sleeping is not None
         return self._sleeping
+
+    @property
+    def _algo_cfg(self):
+        return self._cfg().algo
 
     @property
     def _backend_cfg(self) -> FSDP2Config:
