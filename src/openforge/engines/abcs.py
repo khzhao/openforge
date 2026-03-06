@@ -56,7 +56,7 @@ class TrainBackend(ABC):
         policy_version: int,
         save_optimizer: bool = True,
     ) -> str:
-        """Save checkpoint to cfg.train.checkpoints_dir and return saved path."""
+        """Save checkpoint to cfg.train.checkpoints_dir."""
 
     @abstractmethod
     def load_checkpoint(

@@ -1,3 +1,3 @@
 # Copyright 2026 openforge
 
-from .actor_critic_ref_worker import ActorCriticRefWorker as ActorCriticRefWorker
+from .actor_ref_worker import ActorRefWorker as ActorRefWorker

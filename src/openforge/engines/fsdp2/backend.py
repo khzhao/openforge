@@ -258,11 +258,7 @@ class FSDP2Backend(TrainBackend):
             raise ValueError(
                 f"FSDP2Backend requires backend=fsdp2, got {cfg.train.backend}"
             )
-        if cfg.train.use_critic:
-            raise NotImplementedError(
-                "FSDP2Backend currently supports actor-only training."
-            )
-        assert isinstance(cfg.train.backend_cfg, FSDP2Config)
+        assert isinstance(cfg.train.backend_config, FSDP2Config)
 
     def _initialize_process_group(self) -> None:
         if dist.is_initialized():
@@ -303,7 +299,7 @@ class FSDP2Backend(TrainBackend):
         model.train()
 
         mesh = create_device_mesh(
-            dp_size=cfg.train.data_parallel_size,
+            dp_size=cfg.train.parallelism.data_parallel_size,
             world_size=self._world_size(),
             device_type=device.type,
         )
@@ -501,5 +497,5 @@ class FSDP2Backend(TrainBackend):
     @property
     def _backend_cfg(self) -> FSDP2Config:
         cfg = self._cfg()
-        assert isinstance(cfg.train.backend_cfg, FSDP2Config)
-        return cfg.train.backend_cfg
+        assert isinstance(cfg.train.backend_config, FSDP2Config)
+        return cfg.train.backend_config

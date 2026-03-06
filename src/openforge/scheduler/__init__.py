@@ -1,5 +1,5 @@
 # Copyright 2026 openforge
 
-from .actor_critic_ref_group import ActorCriticRefGroup
+from .actor_ref_group import ActorRefGroup
 
-__all__ = ["ActorCriticRefGroup"]
+__all__ = ["ActorRefGroup"]

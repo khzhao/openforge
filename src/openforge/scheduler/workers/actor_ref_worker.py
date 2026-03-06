@@ -8,11 +8,11 @@ from openforge.configs import OpenForgeConfig
 from openforge.engines.fsdp2 import FSDP2Backend
 
 
-class ActorCriticRefWorker:
-    """Colocated actor-critic-ref worker (one per GPU).
+class ActorRefWorker:
+    """Colocated actor-ref worker (one per GPU).
 
     Not wrapped with ray.remote so it can be tested without Ray.
-    ActorCriticRefGroup wraps it as a remote actor at runtime.
+    ActorRefGroup wraps it as a remote actor at runtime.
     """
 
     def initialize(

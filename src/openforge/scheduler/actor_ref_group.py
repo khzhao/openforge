@@ -8,7 +8,7 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from openforge.configs import OpenForgeConfig
-from openforge.scheduler.workers import ActorCriticRefWorker
+from openforge.scheduler.workers import ActorRefWorker
 
 
 class PlacementStrategy(Enum):
@@ -18,8 +18,8 @@ class PlacementStrategy(Enum):
     SPREAD = "STRICT_SPREAD"
 
 
-class ActorCriticRefGroup:
-    """Ray actor group for colocated actor-critic-ref workers.
+class ActorRefGroup:
+    """Ray actor group for colocated actor-ref workers.
 
     Args:
         cfg: OpenForge configuration.
@@ -37,11 +37,13 @@ class ActorCriticRefGroup:
         self.cfg = cfg
         self._master_addr = master_addr
         self._master_port = master_port
-        self._num_nodes = cfg.train.num_nodes
-        self._num_gpus_per_node = cfg.train.num_gpus_per_node
-        self._num_gpus_per_engine = cfg.train.num_gpus_per_engine
-        self._num_cpus_per_engine = cfg.train.num_cpus_per_engine
-        self._world_size = self._num_nodes * self._num_gpus_per_node
+
+        resolved = cfg.train.resolve(cfg.cluster)
+        self._num_nodes = resolved.num_nodes
+        self._num_gpus_per_node = resolved.num_gpus_per_node
+        self._num_gpus_per_worker = 1
+        self._num_cpus_per_worker = resolved.cpus_per_worker
+        self._world_size = resolved.world_size
         self._workers: list[ray.actor.ActorHandle] = []
 
         if isinstance(strategy, str):
@@ -55,7 +57,7 @@ class ActorCriticRefGroup:
     ) -> ray.util.placement_group.PlacementGroup:
         """Reserve GPU+CPU bundles atomically via Ray."""
         bundles = [
-            {"GPU": self._num_gpus_per_engine, "CPU": self._num_cpus_per_engine}
+            {"GPU": self._num_gpus_per_worker, "CPU": self._num_cpus_per_worker}
         ] * self._world_size
         pg = placement_group(bundles, strategy=strategy.value)
         ray.get(pg.ready())
@@ -63,12 +65,12 @@ class ActorCriticRefGroup:
 
     def _create_workers(self) -> None:
         """Pin one remote worker per bundle in the placement group."""
-        RemoteWorker = ray.remote(ActorCriticRefWorker)
+        RemoteWorker = ray.remote(ActorRefWorker)
 
         for rank in range(self._world_size):
             worker = RemoteWorker.options(
-                num_cpus=self._num_cpus_per_engine,
-                num_gpus=self._num_gpus_per_engine,
+                num_cpus=self._num_cpus_per_worker,
+                num_gpus=self._num_gpus_per_worker,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=self._pg,
                     placement_group_bundle_index=rank,
