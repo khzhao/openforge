@@ -74,47 +74,6 @@ class SGLangServerClient:
         version = payload.get("weight_version")
         return None if version is None else str(version)
 
-    def update_weights_from_disk(
-        self,
-        model_path: str,
-        *,
-        load_format: str | None = None,
-        flush_cache: bool = True,
-        abort_all_requests: bool = False,
-        weight_version: str | None = None,
-        is_async: bool = False,
-        torch_empty_cache: bool = False,
-        keep_pause: bool = False,
-        recapture_cuda_graph: bool = False,
-        token_step: int = 0,
-        manifest: dict[str, Any] | None = None,
-        timeout: float = 30.0,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model_path": model_path,
-            "load_format": load_format,
-            "abort_all_requests": abort_all_requests,
-            "weight_version": weight_version,
-            "is_async": is_async,
-            "torch_empty_cache": torch_empty_cache,
-            "keep_pause": keep_pause,
-            "recapture_cuda_graph": recapture_cuda_graph,
-            "token_step": token_step,
-            "flush_cache": flush_cache,
-            "manifest": manifest,
-        }
-        _, body = self._request(
-            "POST",
-            "/update_weights_from_disk",
-            payload=payload,
-            timeout=timeout,
-        )
-        if not isinstance(body, dict):
-            raise RuntimeError(
-                "sglang /update_weights_from_disk did not return a JSON object"
-            )
-        return body
-
     def update_weights_from_distributed(
         self,
         *,

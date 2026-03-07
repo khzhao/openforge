@@ -16,7 +16,6 @@ from .rollout import (
 from .topology import ParallelismConfig, PlacementConfig, PlacementStrategy
 from .train import (
     AMPConfig,
-    ExportedPolicy,
     FSDP2Config,
     MegatronConfig,
     MixedPrecisionConfig,
@@ -25,6 +24,7 @@ from .train import (
     ResolvedTrainTopology,
     ResolvedTrainWorker,
     SchedulerConfig,
+    SerializedPolicyWeights,
     TrainConfig,
 )
 
@@ -33,7 +33,6 @@ __all__ = [
     "AlgorithmConfig",
     "ClusterConfig",
     "DataConfig",
-    "ExportedPolicy",
     "FSDP2Config",
     "GatewayConfig",
     "MegatronConfig",
@@ -57,5 +56,6 @@ __all__ = [
     "RolloutEngineGroupConfig",
     "SGLangRequestConfig",
     "SchedulerConfig",
+    "SerializedPolicyWeights",
     "TrainConfig",
 ]

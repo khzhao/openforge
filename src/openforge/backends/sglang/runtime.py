@@ -113,39 +113,6 @@ class SGLangEngineRuntime:
     def continue_generation(self) -> Any:
         return self.client.continue_generation(timeout=self.request_timeout_seconds)
 
-    def update_weights_from_disk(
-        self,
-        *,
-        model_path: str,
-        load_format: str | None = None,
-        flush_cache: bool = True,
-        abort_all_requests: bool = False,
-        weight_version: str | None = None,
-        is_async: bool = False,
-        torch_empty_cache: bool = False,
-        keep_pause: bool = False,
-        recapture_cuda_graph: bool = False,
-        token_step: int = 0,
-        manifest: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        payload = self.client.update_weights_from_disk(
-            model_path,
-            load_format=load_format,
-            flush_cache=flush_cache,
-            abort_all_requests=abort_all_requests,
-            weight_version=weight_version,
-            is_async=is_async,
-            torch_empty_cache=torch_empty_cache,
-            keep_pause=keep_pause,
-            recapture_cuda_graph=recapture_cuda_graph,
-            token_step=token_step,
-            manifest=manifest,
-            timeout=max(self.request_timeout_seconds, 30.0),
-        )
-        self.spec.model_path = model_path
-        self.spec.policy_version = self._coerce_policy_version(weight_version)
-        return payload
-
     def update_weights_from_distributed(
         self,
         *,
@@ -158,7 +125,8 @@ class SGLangEngineRuntime:
         weight_version: str | None = None,
         load_format: str | None = None,
     ) -> dict[str, Any]:
-        return self.client.update_weights_from_distributed(
+        policy_version = self._require_policy_version(weight_version)
+        payload = self.client.update_weights_from_distributed(
             names=names,
             dtypes=dtypes,
             shapes=shapes,
@@ -169,6 +137,8 @@ class SGLangEngineRuntime:
             load_format=load_format,
             timeout=max(self.request_timeout_seconds, 30.0),
         )
+        self.spec.policy_version = policy_version
+        return payload
 
     def update_weights_from_tensor(
         self,
@@ -179,7 +149,8 @@ class SGLangEngineRuntime:
         abort_all_requests: bool = False,
         weight_version: str | None = None,
     ) -> dict[str, Any]:
-        return self.client.update_weights_from_tensor(
+        policy_version = self._require_policy_version(weight_version)
+        payload = self.client.update_weights_from_tensor(
             serialized_named_tensors=serialized_named_tensors,
             load_format=load_format,
             flush_cache=flush_cache,
@@ -187,6 +158,8 @@ class SGLangEngineRuntime:
             weight_version=weight_version,
             timeout=max(self.request_timeout_seconds, 30.0),
         )
+        self.spec.policy_version = policy_version
+        return payload
 
     def _wait_until_ready(self) -> None:
         deadline = time.monotonic() + HEALTHCHECK_TIMEOUT_SECONDS
@@ -220,10 +193,12 @@ class SGLangEngineRuntime:
         )
 
     @staticmethod
-    def _coerce_policy_version(weight_version: str | None) -> int | None:
+    def _require_policy_version(weight_version: str | None) -> int:
         if weight_version is None:
-            return None
+            raise ValueError("weight_version is required for SGLang weight updates")
         try:
             return int(weight_version)
-        except ValueError:
-            return None
+        except ValueError as exc:
+            raise ValueError(
+                f"weight_version must be an integer string, got {weight_version!r}"
+            ) from exc
