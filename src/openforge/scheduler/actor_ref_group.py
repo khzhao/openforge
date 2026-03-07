@@ -9,7 +9,12 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from tensordict import TensorDict
 
-from openforge.configs import ExportedPolicy, OpenForgeConfig, PlacementStrategy
+from openforge.configs import (
+    DistributedPolicyWeights,
+    OpenForgeConfig,
+    PlacementStrategy,
+    SerializedPolicyWeights,
+)
 from openforge.scheduler.utils import ray_placement_group_strategy
 from openforge.scheduler.workers import ActorRefWorker
 
@@ -126,16 +131,16 @@ class ActorRefGroup:
         results = ray.get([worker.load_checkpoint.remote() for worker in self._workers])
         return results[0]
 
-    def export_policy_for_rollout(
+    def export_policy_weights_for_rollout(
         self,
         *,
         step: int,
         policy_version: int,
-    ) -> ExportedPolicy:
-        """Export a serving-ready policy artifact from the training world."""
+    ) -> SerializedPolicyWeights:
+        """Export live SGLang weight-update payload from the training world."""
         results = ray.get(
             [
-                worker.export_policy_for_rollout.remote(
+                worker.export_policy_weights_for_rollout.remote(
                     step=step,
                     policy_version=policy_version,
                 )
@@ -145,7 +150,93 @@ class ActorRefGroup:
         for result in results:
             if result is not None:
                 return result
-        raise RuntimeError("training export did not return a rollout policy artifact")
+        raise RuntimeError("training export did not return rollout weight payloads")
+
+    def prepare_policy_weights_for_distributed_rollout(
+        self,
+        *,
+        step: int,
+        policy_version: int,
+    ) -> DistributedPolicyWeights:
+        """Prepare metadata-only payloads for distributed rollout sync."""
+        results = ray.get(
+            [
+                worker.prepare_policy_weights_for_distributed_rollout.remote(
+                    step=step,
+                    policy_version=policy_version,
+                )
+                for worker in self._workers
+            ]
+        )
+        for result in results:
+            if result is not None:
+                return result
+        raise RuntimeError(
+            "training export did not return distributed rollout weight payloads"
+        )
+
+    def init_policy_weights_update_group(
+        self,
+        *,
+        master_addr: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        backend: str,
+    ) -> None:
+        ray.get(
+            self._workers[0].init_policy_weights_update_group.remote(
+                master_addr=master_addr,
+                master_port=master_port,
+                world_size=world_size,
+                group_name=group_name,
+                backend=backend,
+            )
+        )
+
+    def async_broadcast_prepared_policy_weights_bucket(
+        self,
+        *,
+        bucket_index: int,
+        group_name: str,
+    ) -> ray.ObjectRef:
+        return self._workers[0].broadcast_prepared_policy_weights_bucket.remote(
+            bucket_index=bucket_index,
+            group_name=group_name,
+        )
+
+    def destroy_policy_weights_update_group(self, *, group_name: str) -> None:
+        ray.get(
+            self._workers[0].destroy_policy_weights_update_group.remote(
+                group_name=group_name,
+            )
+        )
+
+    def clear_prepared_policy_weights_for_rollout(self) -> None:
+        ray.get(self._workers[0].clear_prepared_policy_weights_for_rollout.remote())
+
+    def allocate_free_port(self, *, start: int = 40000) -> int:
+        return ray.get(self._workers[0].allocate_free_port.remote(start=start))
+
+    def sync_policy_weights_to_rollout(
+        self,
+        *,
+        rollout_workers: list[ray.actor.ActorHandle],
+        rollout_engines: list[object],
+        policy_version: int,
+        sync_mode: str,
+    ) -> None:
+        ray.get(
+            [
+                worker.sync_policy_weights_to_rollout.remote(
+                    rollout_workers=rollout_workers,
+                    rollout_engines=rollout_engines,
+                    policy_version=policy_version,
+                    sync_mode=sync_mode,
+                )
+                for worker in self._workers
+            ]
+        )
 
     def sleep(self) -> None:
         """Offload all workers to CPU."""

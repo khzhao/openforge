@@ -9,7 +9,6 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from openforge.configs import (
-    ExportedPolicy,
     OpenForgeConfig,
     PlacementStrategy,
     RolloutEndpoint,
@@ -96,40 +95,44 @@ class RolloutGroup:
             and endpoint.healthy
         ]
 
-    def load_weights_from_policy(self, policy: ExportedPolicy) -> list[RolloutEndpoint]:
-        """Restart rollout engines from an exported training policy."""
-        self._engine_endpoints = ray.get(
-            [worker.load_weights_from_policy.remote(policy) for worker in self._workers]
-        )
-
-        if self.cfg.rollout.engine_topology == "pd":
-            self._router_endpoint = self._restart_router()
-
-        return self.routable_endpoints()
-
-    def load_latest_weights_from_train(self) -> list[RolloutEndpoint]:
-        """Load the most recent exported training policy into rollout."""
-        latest = self.cfg.train.read_exported_policy(latest=True)
-        if latest is None:
-            raise FileNotFoundError(
-                "no rollout policy export found under train.checkpoints_dir"
-            )
-        return self.load_weights_from_policy(latest)
-
     def sync_from_train(
         self,
         train_group: ActorRefGroup,
         *,
         step: int,
         policy_version: int,
-    ) -> ExportedPolicy:
-        """Export from training and then restart rollout from that artifact."""
-        policy = train_group.export_policy_for_rollout(
-            step=step,
-            policy_version=policy_version,
-        )
-        self.load_weights_from_policy(policy)
-        return policy
+    ) -> list[RolloutEndpoint]:
+        """Export live weights from training and push them into rollout."""
+        tensor_workers: list[tuple[ray.actor.ActorHandle, object]] = []
+        distributed_workers: list[tuple[ray.actor.ActorHandle, object]] = []
+        for worker, engine in zip(self._workers, self._resolved.engines, strict=True):
+            if self._uses_tensor_sync(engine):
+                tensor_workers.append((worker, engine))
+            else:
+                distributed_workers.append((worker, engine))
+
+        endpoints: list[RolloutEndpoint] = []
+        if tensor_workers:
+            train_group.sync_policy_weights_to_rollout(
+                rollout_workers=[worker for worker, _ in tensor_workers],
+                rollout_engines=[engine for _, engine in tensor_workers],
+                policy_version=policy_version,
+                sync_mode="tensor",
+            )
+        if distributed_workers:
+            train_group.sync_policy_weights_to_rollout(
+                rollout_workers=[worker for worker, _ in distributed_workers],
+                rollout_engines=[engine for _, engine in distributed_workers],
+                policy_version=policy_version,
+                sync_mode="distributed",
+            )
+
+        endpoints = ray.get([worker.endpoint.remote() for worker in self._workers])
+        self._engine_endpoints = endpoints
+        return self.routable_endpoints()
+
+    def _uses_tensor_sync(self, engine) -> bool:
+        return engine.placement.node_pool == self.cfg.train.placement.node_pool
 
     def _create_workers(
         self,

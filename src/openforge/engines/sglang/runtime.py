@@ -99,6 +99,12 @@ class SGLangEngineRuntime:
     def get_weight_version(self) -> str | None:
         return self.client.get_weight_version(timeout=self.request_timeout_seconds)
 
+    def check_weights(self, *, action: str) -> dict[str, Any]:
+        return self.client.check_weights(
+            action=action,
+            timeout=max(self.request_timeout_seconds, 30.0),
+        )
+
     def flush_cache(self) -> bool:
         return self.client.flush_cache(timeout=self.request_timeout_seconds)
 
@@ -110,6 +116,32 @@ class SGLangEngineRuntime:
 
     def continue_generation(self) -> Any:
         return self.client.continue_generation(timeout=self.request_timeout_seconds)
+
+    def init_weights_update_group(
+        self,
+        *,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str,
+        backend: str,
+    ) -> dict[str, Any]:
+        return self.client.init_weights_update_group(
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=rank_offset,
+            world_size=world_size,
+            group_name=group_name,
+            backend=backend,
+            timeout=max(self.request_timeout_seconds, 30.0),
+        )
+
+    def destroy_weights_update_group(self, *, group_name: str) -> dict[str, Any]:
+        return self.client.destroy_weights_update_group(
+            group_name=group_name,
+            timeout=max(self.request_timeout_seconds, 30.0),
+        )
 
     def update_weights_from_distributed(
         self,

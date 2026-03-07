@@ -16,6 +16,8 @@ from .rollout import (
 from .topology import ParallelismConfig, PlacementConfig, PlacementStrategy
 from .train import (
     AMPConfig,
+    DistributedPolicyWeightBucket,
+    DistributedPolicyWeights,
     FSDP2Config,
     MegatronConfig,
     MixedPrecisionConfig,
@@ -33,6 +35,8 @@ __all__ = [
     "AlgorithmConfig",
     "ClusterConfig",
     "DataConfig",
+    "DistributedPolicyWeightBucket",
+    "DistributedPolicyWeights",
     "FSDP2Config",
     "GatewayConfig",
     "MegatronConfig",

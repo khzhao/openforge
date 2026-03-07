@@ -5,7 +5,11 @@ from contextlib import AbstractContextManager
 
 from tensordict import TensorDict
 
-from openforge.configs import OpenForgeConfig, SerializedPolicyWeights
+from openforge.configs import (
+    DistributedPolicyWeights,
+    OpenForgeConfig,
+    SerializedPolicyWeights,
+)
 
 
 class TrainBackend(ABC):
@@ -81,6 +85,44 @@ class TrainBackend(ABC):
         policy_version: int,
     ) -> SerializedPolicyWeights | None:
         """Export a live SGLang weight-update payload for rollout consumption."""
+
+    @abstractmethod
+    def prepare_policy_weights_for_distributed_rollout(
+        self,
+        *,
+        step: int,
+        policy_version: int,
+    ) -> DistributedPolicyWeights | None:
+        """Prepare metadata and cached buckets for SGLang distributed sync."""
+
+    @abstractmethod
+    def init_policy_weights_update_group(
+        self,
+        *,
+        master_addr: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        backend: str,
+    ) -> None:
+        """Initialize the train-side source rank of a rollout weight-update group."""
+
+    @abstractmethod
+    def broadcast_prepared_policy_weights_bucket(
+        self,
+        *,
+        bucket_index: int,
+        group_name: str,
+    ) -> None:
+        """Broadcast one previously prepared weight bucket to rollout consumers."""
+
+    @abstractmethod
+    def destroy_policy_weights_update_group(self, *, group_name: str) -> None:
+        """Destroy a previously initialized rollout weight-update group."""
+
+    @abstractmethod
+    def clear_prepared_policy_weights_for_rollout(self) -> None:
+        """Release any cached rollout sync buckets after a sync completes."""
 
     @abstractmethod
     def sleep(self) -> None:

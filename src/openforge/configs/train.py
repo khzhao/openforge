@@ -60,6 +60,7 @@ class FSDP2Config(OpenForgeBaseModel):
 
     gradient_checkpointing: bool
     reshard_after_forward: bool
+    update_weight_buffer_size: int = 64 * 1024 * 1024
     shard_modules: list[str] | None = None
     mixed_precision: MixedPrecisionConfig
     offload: OffloadConfig
@@ -119,6 +120,25 @@ class SerializedPolicyWeights:
     policy_version: int
     load_format: str
     serialized_weight_buckets: list[str]
+
+
+@dataclass(slots=True)
+class DistributedPolicyWeightBucket:
+    """Metadata for one live distributed weight-update bucket."""
+
+    names: list[str]
+    dtypes: list[str]
+    shapes: list[list[int]]
+
+
+@dataclass(slots=True)
+class DistributedPolicyWeights:
+    """Metadata-only rollout update payload for SGLang distributed sync."""
+
+    step: int
+    policy_version: int
+    load_format: str
+    weight_buckets: list[DistributedPolicyWeightBucket]
 
 
 class TrainConfig(OpenForgeBaseModel):

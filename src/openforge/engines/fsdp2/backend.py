@@ -15,12 +15,19 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from openforge.configs import FSDP2Config, OpenForgeConfig, SerializedPolicyWeights
+from openforge.configs import (
+    DistributedPolicyWeightBucket,
+    DistributedPolicyWeights,
+    FSDP2Config,
+    OpenForgeConfig,
+    SerializedPolicyWeights,
+)
 from openforge.engines.abcs import TrainBackend
 
 from .base import apply_fsdp2, create_device_mesh, get_torch_dtype
 from .offload import offload_optimizer, offload_params, onload_optimizer, onload_params
 from .scheduler import get_lr_scheduler
+from .weight_update import DistributedWeightUpdater, TensorWeightUpdater
 
 
 class FSDP2Backend(TrainBackend):
@@ -49,6 +56,10 @@ class FSDP2Backend(TrainBackend):
         self.grad_scaler: torch.amp.GradScaler | None = None
 
         self._sleeping: bool | None = None
+        self._prepared_rollout_weight_buckets: (
+            list[list[tuple[str, torch.Tensor]]] | None
+        ) = None
+        self._rollout_update_groups: dict[str, object] = {}
 
     def initialize(
         self,
@@ -237,17 +248,10 @@ class FSDP2Backend(TrainBackend):
             serialize_named_tensors_for_sglang,
         )
 
-        model = self._model()
-
-        options = StateDictOptions(
-            full_state_dict=True,
-            cpu_offload=True,
-        )
-        state_dict = get_model_state_dict(model, options=options)
-
         if self._rank() != 0:
             return None
 
+        state_dict = self._rollout_state_dict()
         serialized_weight_buckets = serialize_named_tensors_for_sglang(
             state_dict.items()
         )
@@ -257,6 +261,142 @@ class FSDP2Backend(TrainBackend):
             load_format="flattened_bucket",
             serialized_weight_buckets=serialized_weight_buckets,
         )
+
+    def prepare_policy_weights_for_distributed_rollout(
+        self,
+        *,
+        step: int,
+        policy_version: int,
+    ) -> DistributedPolicyWeights | None:
+        from openforge.engines.sglang.serialization import (
+            bucket_named_tensors_for_sglang,
+        )
+
+        if self._rank() != 0:
+            return None
+
+        state_dict = self._rollout_state_dict()
+        named_tensor_buckets = bucket_named_tensors_for_sglang(state_dict.items())
+        self._prepared_rollout_weight_buckets = [
+            [(name, tensor.detach().clone()) for name, tensor in bucket]
+            for bucket in named_tensor_buckets
+        ]
+        return DistributedPolicyWeights(
+            step=step,
+            policy_version=policy_version,
+            load_format="flattened_bucket",
+            weight_buckets=[
+                DistributedPolicyWeightBucket(
+                    names=[name for name, _ in bucket],
+                    dtypes=[
+                        str(tensor.dtype).replace("torch.", "") for _, tensor in bucket
+                    ],
+                    shapes=[list(tensor.shape) for _, tensor in bucket],
+                )
+                for bucket in named_tensor_buckets
+            ],
+        )
+
+    def init_policy_weights_update_group(
+        self,
+        *,
+        master_addr: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        backend: str,
+    ) -> None:
+        from sglang.srt.utils.common import init_custom_process_group
+
+        if self._rank() != 0:
+            return
+        if group_name in self._rollout_update_groups:
+            return
+        self._rollout_update_groups[group_name] = init_custom_process_group(
+            backend=backend,
+            init_method=f"tcp://{master_addr}:{master_port}",
+            world_size=world_size,
+            rank=0,
+            group_name=group_name,
+            device_id=self._device() if self._device().type == "cuda" else None,
+        )
+
+    def broadcast_prepared_policy_weights_bucket(
+        self,
+        *,
+        bucket_index: int,
+        group_name: str,
+    ) -> None:
+        from openforge.engines.sglang.serialization import FlattenedTensorBucket
+
+        if self._rank() != 0:
+            return
+        if self._prepared_rollout_weight_buckets is None:
+            raise RuntimeError("no prepared rollout weight buckets are available")
+        if group_name not in self._rollout_update_groups:
+            raise RuntimeError(f"missing rollout update group {group_name!r}")
+
+        bucket = self._prepared_rollout_weight_buckets[bucket_index]
+        device = self._device()
+        flattened_bucket = FlattenedTensorBucket(
+            named_tensors=[
+                (name, tensor.to(device=device, non_blocking=device.type == "cuda"))
+                for name, tensor in bucket
+            ]
+        )
+        dist.broadcast(
+            flattened_bucket.get_flattened_tensor(),
+            src=0,
+            group=self._rollout_update_groups[group_name],
+        )
+
+    def destroy_policy_weights_update_group(self, *, group_name: str) -> None:
+        if self._rank() != 0:
+            return
+        process_group = self._rollout_update_groups.pop(group_name, None)
+        if process_group is not None:
+            dist.destroy_process_group(process_group)
+
+    def clear_prepared_policy_weights_for_rollout(self) -> None:
+        self._prepared_rollout_weight_buckets = None
+
+    def sync_policy_weights_to_rollout(
+        self,
+        *,
+        rollout_workers: list[object],
+        rollout_engines: list[object],
+        policy_version: int,
+        sync_mode: str,
+    ) -> None:
+        if not rollout_workers:
+            return
+
+        if sync_mode == "tensor":
+            updater = TensorWeightUpdater(
+                self._cfg(),
+                self._model(),
+                rank=self._rank(),
+                world_size=self._world_size(),
+                device=self._device(),
+                master_addr=self._master_addr(),
+            )
+        elif sync_mode == "distributed":
+            updater = DistributedWeightUpdater(
+                self._cfg(),
+                self._model(),
+                rank=self._rank(),
+                world_size=self._world_size(),
+                device=self._device(),
+                master_addr=self._master_addr(),
+            )
+        else:
+            raise ValueError(f"unsupported rollout sync mode {sync_mode!r}")
+
+        updater.connect_rollout_engines(
+            rollout_workers=rollout_workers,
+            rollout_engines=rollout_engines,
+        )
+        updater.update_weights(policy_version=policy_version)
 
     def sleep(self) -> None:
         model = self._model()
@@ -292,6 +432,10 @@ class FSDP2Backend(TrainBackend):
             torch.cuda.empty_cache()
 
     def shutdown(self) -> None:
+        self._prepared_rollout_weight_buckets = None
+        for process_group in self._rollout_update_groups.values():
+            dist.destroy_process_group(process_group)
+        self._rollout_update_groups.clear()
         if dist.is_initialized():
             dist.destroy_process_group()
 
@@ -301,6 +445,13 @@ class FSDP2Backend(TrainBackend):
                 f"FSDP2Backend requires backend=fsdp2, got {cfg.train.backend}"
             )
         assert isinstance(cfg.train.backend_config, FSDP2Config)
+
+    def _rollout_state_dict(self) -> dict[str, torch.Tensor]:
+        options = StateDictOptions(
+            full_state_dict=True,
+            cpu_offload=True,
+        )
+        return get_model_state_dict(self._model(), options=options)
 
     def _initialize_process_group(self) -> None:
         if dist.is_initialized():

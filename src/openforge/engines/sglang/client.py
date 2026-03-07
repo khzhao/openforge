@@ -3,8 +3,8 @@
 import json
 from http import HTTPStatus
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+import requests
 
 
 class SGLangServerClient:
@@ -71,6 +71,73 @@ class SGLangServerClient:
         payload = self.get_model_info(timeout=timeout)
         version = payload.get("weight_version")
         return None if version is None else str(version)
+
+    def check_weights(
+        self,
+        *,
+        action: str,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        _, body = self._request(
+            "POST",
+            "/weights_checker",
+            payload={"action": action},
+            timeout=timeout,
+        )
+        if not isinstance(body, dict):
+            raise RuntimeError(
+                "sglang /weights_checker did not return a JSON object"
+            )
+        return body
+
+    def init_weights_update_group(
+        self,
+        *,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str,
+        backend: str,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        payload = {
+            "master_address": master_address,
+            "master_port": master_port,
+            "rank_offset": rank_offset,
+            "world_size": world_size,
+            "group_name": group_name,
+            "backend": backend,
+        }
+        _, body = self._request(
+            "POST",
+            "/init_weights_update_group",
+            payload=payload,
+            timeout=timeout,
+        )
+        if not isinstance(body, dict):
+            raise RuntimeError(
+                "sglang /init_weights_update_group did not return a JSON object"
+            )
+        return body
+
+    def destroy_weights_update_group(
+        self,
+        *,
+        group_name: str,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        _, body = self._request(
+            "POST",
+            "/destroy_weights_update_group",
+            payload={"group_name": group_name},
+            timeout=timeout,
+        )
+        if not isinstance(body, dict):
+            raise RuntimeError(
+                "sglang /destroy_weights_update_group did not return a JSON object"
+            )
+        return body
 
     def update_weights_from_distributed(
         self,
@@ -168,33 +235,32 @@ class SGLangServerClient:
         timeout: float,
         raise_for_status: bool = True,
     ) -> tuple[int, Any]:
-        data = None
         headers = self._headers(path)
+        request_kwargs: dict[str, Any] = {
+            "headers": headers,
+            "timeout": timeout,
+        }
         if payload is not None:
-            data = json.dumps(payload).encode("utf-8")
-            headers["Content-Type"] = "application/json; charset=utf-8"
-
-        request = Request(
-            url=f"{self.base_url}{path}",
-            data=data,
-            headers=headers,
-            method=method,
-        )
-
+            request_kwargs["json"] = payload
         try:
-            with urlopen(request, timeout=timeout) as response:
-                raw_body = response.read().decode("utf-8")
-                return response.status, self._decode_body(raw_body)
-        except HTTPError as exc:
-            raw_body = exc.read().decode("utf-8")
-            if not raise_for_status:
-                return exc.code, self._decode_body(raw_body)
-            raise RuntimeError(
-                f"sglang request {method} {path} failed with status {exc.code}: "
-                f"{raw_body.strip()}"
-            ) from exc
-        except URLError as exc:
+            response = requests.request(
+                method,
+                f"{self.base_url}{path}",
+                **request_kwargs,
+            )
+        except requests.RequestException as exc:
             raise OSError(f"sglang request {method} {path} failed: {exc}") from exc
+
+        raw_body = response.text
+        if raise_for_status:
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                raise RuntimeError(
+                    f"sglang request {method} {path} failed with status "
+                    f"{response.status_code}: {raw_body.strip()}"
+                ) from exc
+        return response.status_code, self._decode_body(raw_body)
 
     def _headers(self, path: str) -> dict[str, str]:
         headers: dict[str, str] = {}
