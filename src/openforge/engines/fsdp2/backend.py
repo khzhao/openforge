@@ -1,6 +1,5 @@
 # Copyright 2026 openforge
 
-import json
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
 from pathlib import Path
@@ -14,9 +13,9 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
 )
 from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM
 
-from openforge.configs import ExportedPolicy, FSDP2Config, OpenForgeConfig
+from openforge.configs import FSDP2Config, OpenForgeConfig, SerializedPolicyWeights
 from openforge.engines.abcs import TrainBackend
 
 from .base import apply_fsdp2, create_device_mesh, get_torch_dtype
@@ -228,15 +227,17 @@ class FSDP2Backend(TrainBackend):
         loaded_policy_version = int(payload.get("policy_version", loaded_step))
         return loaded_step, loaded_policy_version
 
-    def export_policy_for_rollout(
+    def export_policy_weights_for_rollout(
         self,
         *,
         step: int,
         policy_version: int,
-    ) -> ExportedPolicy | None:
-        cfg = self._cfg()
+    ) -> SerializedPolicyWeights | None:
+        from openforge.engines.sglang.serialization import (
+            serialize_named_tensors_for_sglang,
+        )
+
         model = self._model()
-        policy_dir = cfg.train.rollout_policy_path(policy_version)
 
         options = StateDictOptions(
             full_state_dict=True,
@@ -244,38 +245,17 @@ class FSDP2Backend(TrainBackend):
         )
         state_dict = get_model_state_dict(model, options=options)
 
-        if self._rank() == 0:
-            policy_dir.mkdir(parents=True, exist_ok=True)
-            model.save_pretrained(
-                policy_dir,
-                state_dict=state_dict,
-                safe_serialization=True,
-            )
-            tokenizer = AutoTokenizer.from_pretrained(
-                cfg.model.tokenizer_name_or_path,
-                trust_remote_code=True,
-            )
-            tokenizer.save_pretrained(policy_dir)
-
-            metadata_path = policy_dir / "export.json"
-            with metadata_path.open("w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "step": step,
-                        "policy_version": policy_version,
-                    },
-                    f,
-                    indent=2,
-                    sort_keys=True,
-                )
-
         if self._rank() != 0:
             return None
 
-        return ExportedPolicy(
+        serialized_weight_buckets = serialize_named_tensors_for_sglang(
+            state_dict.items()
+        )
+        return SerializedPolicyWeights(
             step=step,
             policy_version=policy_version,
-            model_path=str(policy_dir),
+            load_format="flattened_bucket",
+            serialized_weight_buckets=serialized_weight_buckets,
         )
 
     def sleep(self) -> None:

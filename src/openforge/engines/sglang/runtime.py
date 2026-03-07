@@ -1,7 +1,5 @@
 # Copyright 2026 openforge
 
-from __future__ import annotations
-
 import multiprocessing
 import os
 import time
