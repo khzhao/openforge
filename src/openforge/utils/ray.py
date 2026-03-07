@@ -2,6 +2,13 @@
 
 import ray
 
+from openforge.configs.topology import PlacementStrategy
+
+_RAY_PLACEMENT_STRATEGIES = {
+    PlacementStrategy.PACK: "STRICT_PACK",
+    PlacementStrategy.SPREAD: "STRICT_SPREAD",
+}
+
 
 def get_current_ray_node_ip_address() -> str:
     """Get the IP address of the current Ray node."""
@@ -10,3 +17,19 @@ def get_current_ray_node_ip_address() -> str:
     )
     address = ray.util.get_node_ip_address()
     return address
+
+
+def normalize_placement_strategy(
+    strategy: PlacementStrategy | str,
+) -> PlacementStrategy:
+    """Normalize config/runtime placement values to the shared enum."""
+    return (
+        strategy
+        if isinstance(strategy, PlacementStrategy)
+        else PlacementStrategy(strategy)
+    )
+
+
+def ray_placement_group_strategy(strategy: PlacementStrategy | str) -> str:
+    """Map the shared placement enum to Ray placement-group strategy names."""
+    return _RAY_PLACEMENT_STRATEGIES[normalize_placement_strategy(strategy)]
