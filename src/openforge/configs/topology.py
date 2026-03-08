@@ -1,7 +1,5 @@
 # Copyright 2026 openforge
 
-from __future__ import annotations
-
 from enum import Enum
 
 from pydantic import model_validator
@@ -26,7 +24,7 @@ class ParallelismConfig(OpenForgeBaseModel):
     expert_parallel_size: int = 1
 
     @model_validator(mode="after")
-    def _validate_parallelism(self) -> ParallelismConfig:
+    def _validate_parallelism(self) -> "ParallelismConfig":
         if self.data_parallel_size <= 0:
             raise ValueError("data_parallel_size must be > 0")
         if self.pipeline_parallel_size <= 0:

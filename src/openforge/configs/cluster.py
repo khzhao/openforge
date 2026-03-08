@@ -1,7 +1,5 @@
 # Copyright 2026 openforge
 
-from __future__ import annotations
-
 from pydantic import RootModel, model_validator
 
 from .base import OpenForgeBaseModel
@@ -16,7 +14,7 @@ class NodePoolConfig(OpenForgeBaseModel):
     num_cpus_per_node: int
 
     @model_validator(mode="after")
-    def _validate_pool(self) -> NodePoolConfig:
+    def _validate_pool(self) -> "NodePoolConfig":
         if self.num_nodes <= 0:
             raise ValueError("num_nodes must be > 0")
         if self.num_gpus_per_node <= 0:
@@ -38,7 +36,7 @@ class ClusterConfig(RootModel[list[NodePoolConfig]]):
     """Top-level physical cluster inventory."""
 
     @model_validator(mode="after")
-    def _validate_cluster(self) -> ClusterConfig:
+    def _validate_cluster(self) -> "ClusterConfig":
         if not self.root:
             raise ValueError("cluster must not be empty")
 

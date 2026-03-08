@@ -1,7 +1,5 @@
 # Copyright 2026 openforge
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Literal
 
@@ -73,7 +71,7 @@ class RolloutEngineGroupConfig(OpenForgeBaseModel):
     placement: PlacementConfig
 
     @model_validator(mode="after")
-    def _validate_group(self) -> RolloutEngineGroupConfig:
+    def _validate_group(self) -> "RolloutEngineGroupConfig":
         if self.replicas <= 0:
             raise ValueError("replicas must be > 0")
         if self.gpus_per_engine <= 0:
@@ -135,7 +133,7 @@ class RolloutConfig(OpenForgeBaseModel):
     engines: list[RolloutEngineGroupConfig]
 
     @model_validator(mode="after")
-    def _validate_rollout_config(self) -> RolloutConfig:
+    def _validate_rollout_config(self) -> "RolloutConfig":
         if not self.engines:
             raise ValueError("rollout.engines must not be empty")
 

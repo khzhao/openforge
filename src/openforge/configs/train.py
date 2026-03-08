@@ -1,7 +1,5 @@
 # Copyright 2026 openforge
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Literal
 
@@ -112,35 +110,6 @@ class ResolvedTrainTopology:
         return self.world_size * self.cpus_per_worker
 
 
-@dataclass(slots=True)
-class SerializedPolicyWeights:
-    """Live rollout weight update payload serialized for SGLang."""
-
-    step: int
-    policy_version: int
-    load_format: str
-    serialized_weight_buckets: list[str]
-
-
-@dataclass(slots=True)
-class DistributedPolicyWeightBucket:
-    """Metadata for one live distributed weight-update bucket."""
-
-    names: list[str]
-    dtypes: list[str]
-    shapes: list[list[int]]
-
-
-@dataclass(slots=True)
-class DistributedPolicyWeights:
-    """Metadata-only rollout update payload for SGLang distributed sync."""
-
-    step: int
-    policy_version: int
-    load_format: str
-    weight_buckets: list[DistributedPolicyWeightBucket]
-
-
 class TrainConfig(OpenForgeBaseModel):
     """Configuration for the training process."""
 
@@ -157,7 +126,7 @@ class TrainConfig(OpenForgeBaseModel):
     placement: PlacementConfig
 
     @model_validator(mode="after")
-    def _validate_train_config(self) -> TrainConfig:
+    def _validate_train_config(self) -> "TrainConfig":
         if self.global_batch_size <= 0:
             raise ValueError("global_batch_size must be > 0")
         if self.mini_batch_size <= 0:

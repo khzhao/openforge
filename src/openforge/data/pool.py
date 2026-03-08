@@ -4,7 +4,8 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections import deque
 
-from openforge.configs import Reward, RolloutDatum
+from openforge.configs.base import Reward
+from openforge.configs.rollout import RolloutDatum
 
 
 class DataPool(ABC):

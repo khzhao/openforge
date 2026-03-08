@@ -1,7 +1,5 @@
 # Copyright 2026 openforge
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import yaml
@@ -25,7 +23,6 @@ class GatewayConfig(OpenForgeBaseModel):
 
     host: str
     port: int
-    backend_url: str
 
 
 class ModelConfig(OpenForgeBaseModel):
@@ -48,7 +45,7 @@ class OpenForgeConfig(OpenForgeBaseModel):
     rollout: RolloutConfig
 
     @model_validator(mode="after")
-    def _validate_algo_requirements(self) -> OpenForgeConfig:
+    def _validate_algo_requirements(self) -> "OpenForgeConfig":
         if self.algo.kl_coef > 0.0 and self.model.reference_model_name_or_path is None:
             raise ValueError(
                 "model.reference_model_name_or_path must be set when algo.kl_coef > 0.0"
@@ -56,7 +53,7 @@ class OpenForgeConfig(OpenForgeBaseModel):
         return self
 
     @model_validator(mode="after")
-    def _validate_cluster_allocations(self) -> OpenForgeConfig:
+    def _validate_cluster_allocations(self) -> "OpenForgeConfig":
         usage_by_pool: dict[str, dict[str, int]] = {
             pool.node_pool: {"gpus": 0, "cpus": 0} for pool in self.cluster
         }
@@ -85,7 +82,7 @@ class OpenForgeConfig(OpenForgeBaseModel):
         return self
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> OpenForgeConfig:
+    def from_yaml(cls, path: str | Path) -> "OpenForgeConfig":
         """Load OpenForgeConfig from a YAML file."""
         with Path(path).open(encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}

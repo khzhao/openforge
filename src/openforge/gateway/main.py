@@ -4,7 +4,7 @@ import argparse
 
 import uvicorn
 
-from openforge.configs import OpenForgeConfig
+from openforge.configs.models import OpenForgeConfig
 from openforge.gateway.server import create_app
 
 
