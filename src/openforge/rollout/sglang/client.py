@@ -7,7 +7,7 @@ from typing import Any
 import requests
 
 
-class SGLangServerClient:
+class SGLangControlClient:
     """Small client for SGLang server control and metadata endpoints."""
 
     def __init__(
@@ -85,9 +85,7 @@ class SGLangServerClient:
             timeout=timeout,
         )
         if not isinstance(body, dict):
-            raise RuntimeError(
-                "sglang /weights_checker did not return a JSON object"
-            )
+            raise RuntimeError("sglang /weights_checker did not return a JSON object")
         return body
 
     def init_weights_update_group(

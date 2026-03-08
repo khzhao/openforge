@@ -9,25 +9,25 @@ import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
-    get_model_state_dict,
     set_model_state_dict,
 )
 from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from openforge.configs import (
-    DistributedPolicyWeightBucket,
-    DistributedPolicyWeights,
-    FSDP2Config,
-    OpenForgeConfig,
-    SerializedPolicyWeights,
+from openforge.configs.models import OpenForgeConfig
+from openforge.configs.train import FSDP2Config
+from openforge.policy.types import (
+    DistributedUpdateSession,
+    PolicyArtifactRef,
+    TensorUpdateSession,
 )
-from openforge.engines.abcs import TrainBackend
+from openforge.train.backend import TrainBackend
+from openforge.train.types import CheckpointInfo, TrainStepResult, TrainWorkerSpec
 
-from .base import apply_fsdp2, create_device_mesh, get_torch_dtype
-from .offload import offload_optimizer, offload_params, onload_optimizer, onload_params
+from .memory import offload_optimizer, offload_params, onload_optimizer, onload_params
+from .publish import DistributedWeightUpdater, TensorWeightUpdater
+from .runtime import apply_fsdp2, create_device_mesh, get_torch_dtype
 from .scheduler import get_lr_scheduler
-from .weight_update import DistributedWeightUpdater, TensorWeightUpdater
 
 
 class FSDP2Backend(TrainBackend):
@@ -56,20 +56,16 @@ class FSDP2Backend(TrainBackend):
         self.grad_scaler: torch.amp.GradScaler | None = None
 
         self._sleeping: bool | None = None
-        self._prepared_rollout_weight_buckets: (
-            list[list[tuple[str, torch.Tensor]]] | None
-        ) = None
-        self._rollout_update_groups: dict[str, object] = {}
 
     def initialize(
         self,
-        cfg: OpenForgeConfig,
-        *,
-        rank: int,
-        world_size: int,
-        master_addr: str,
-        master_port: int,
+        spec: TrainWorkerSpec,
     ) -> None:
+        cfg = spec.cfg
+        rank = spec.rank
+        world_size = spec.world_size
+        master_addr = spec.master_addr
+        master_port = spec.master_port
         self._validate_init_cfg(cfg)
         self.cfg = cfg
         self.rank = rank
@@ -142,7 +138,7 @@ class FSDP2Backend(TrainBackend):
     def no_sync(self) -> AbstractContextManager[None]:
         return nullcontext()
 
-    def step_optimizer(self, *, global_step: int | None = None) -> dict[str, float]:
+    def step_optimizer(self, *, global_step: int | None = None) -> TrainStepResult:
         model = self._model()
         optimizer = self._optimizer()
         scheduler = self._scheduler()
@@ -173,7 +169,11 @@ class FSDP2Backend(TrainBackend):
         }
         if scaler_enabled:
             metrics["grad_scale"] = float(scaler.get_scale())
-        return metrics
+        return TrainStepResult(
+            rank=self._rank(),
+            global_step=global_step,
+            metrics=metrics,
+        )
 
     def save_checkpoint(
         self,
@@ -181,7 +181,7 @@ class FSDP2Backend(TrainBackend):
         step: int,
         policy_version: int,
         save_optimizer: bool = True,
-    ) -> str:
+    ) -> CheckpointInfo:
         cfg = self._cfg()
         model = self._model()
         optimizer = self._optimizer()
@@ -205,7 +205,11 @@ class FSDP2Backend(TrainBackend):
                 payload["grad_scaler_state"] = scaler.state_dict()
 
         torch.save(payload, path)
-        return str(path)
+        return CheckpointInfo(
+            step=step,
+            policy_version=policy_version,
+            path=str(path),
+        )
 
     def load_checkpoint(
         self,
@@ -213,7 +217,7 @@ class FSDP2Backend(TrainBackend):
         latest: bool = True,
         step: int | None = None,
         load_optimizer: bool = True,
-    ) -> tuple[int, int] | None:
+    ) -> CheckpointInfo | None:
         cfg = self._cfg()
         model = self._model()
         optimizer = self._optimizer()
@@ -236,162 +240,71 @@ class FSDP2Backend(TrainBackend):
 
         loaded_step = int(payload["step"])
         loaded_policy_version = int(payload.get("policy_version", loaded_step))
-        return loaded_step, loaded_policy_version
+        return CheckpointInfo(
+            step=loaded_step,
+            policy_version=loaded_policy_version,
+            path=str(path),
+        )
 
-    def export_policy_weights_for_rollout(
+    def export_policy_artifact(
         self,
         *,
         step: int,
         policy_version: int,
-    ) -> SerializedPolicyWeights | None:
-        from openforge.engines.sglang.serialization import (
-            serialize_named_tensors_for_sglang,
-        )
-
+    ) -> PolicyArtifactRef | None:
         if self._rank() != 0:
             return None
-
-        state_dict = self._rollout_state_dict()
-        serialized_weight_buckets = serialize_named_tensors_for_sglang(
-            state_dict.items()
-        )
-        return SerializedPolicyWeights(
+        checkpoint = self.save_checkpoint(
             step=step,
             policy_version=policy_version,
-            load_format="flattened_bucket",
-            serialized_weight_buckets=serialized_weight_buckets,
+            save_optimizer=False,
+        )
+        return PolicyArtifactRef(
+            step=checkpoint.step,
+            policy_version=checkpoint.policy_version,
+            path=checkpoint.path,
         )
 
-    def prepare_policy_weights_for_distributed_rollout(
+    def push_tensor_update(
         self,
+        session: TensorUpdateSession,
         *,
         step: int,
         policy_version: int,
-    ) -> DistributedPolicyWeights | None:
-        from openforge.engines.sglang.serialization import (
-            bucket_named_tensors_for_sglang,
-        )
-
-        if self._rank() != 0:
-            return None
-
-        state_dict = self._rollout_state_dict()
-        named_tensor_buckets = bucket_named_tensors_for_sglang(state_dict.items())
-        self._prepared_rollout_weight_buckets = [
-            [(name, tensor.detach().clone()) for name, tensor in bucket]
-            for bucket in named_tensor_buckets
-        ]
-        return DistributedPolicyWeights(
-            step=step,
-            policy_version=policy_version,
-            load_format="flattened_bucket",
-            weight_buckets=[
-                DistributedPolicyWeightBucket(
-                    names=[name for name, _ in bucket],
-                    dtypes=[
-                        str(tensor.dtype).replace("torch.", "") for _, tensor in bucket
-                    ],
-                    shapes=[list(tensor.shape) for _, tensor in bucket],
-                )
-                for bucket in named_tensor_buckets
-            ],
-        )
-
-    def init_policy_weights_update_group(
-        self,
-        *,
-        master_addr: str,
-        master_port: int,
-        world_size: int,
-        group_name: str,
-        backend: str,
     ) -> None:
-        from sglang.srt.utils.common import init_custom_process_group
-
-        if self._rank() != 0:
-            return
-        if group_name in self._rollout_update_groups:
-            return
-        self._rollout_update_groups[group_name] = init_custom_process_group(
-            backend=backend,
-            init_method=f"tcp://{master_addr}:{master_port}",
-            world_size=world_size,
-            rank=0,
-            group_name=group_name,
-            device_id=self._device() if self._device().type == "cuda" else None,
+        rollout_workers, rollout_engines = self._session_targets(session)
+        updater = TensorWeightUpdater(
+            self._cfg(),
+            self._model(),
+            rank=self._rank(),
+            world_size=self._world_size(),
+            device=self._device(),
+            master_addr=self._master_addr(),
+            session=session,
         )
+        updater.connect_rollout_engines(
+            rollout_workers=rollout_workers,
+            rollout_engines=rollout_engines,
+        )
+        updater.update_weights(policy_version=policy_version)
 
-    def broadcast_prepared_policy_weights_bucket(
+    def push_distributed_update(
         self,
+        session: DistributedUpdateSession,
         *,
-        bucket_index: int,
-        group_name: str,
-    ) -> None:
-        from openforge.engines.sglang.serialization import FlattenedTensorBucket
-
-        if self._rank() != 0:
-            return
-        if self._prepared_rollout_weight_buckets is None:
-            raise RuntimeError("no prepared rollout weight buckets are available")
-        if group_name not in self._rollout_update_groups:
-            raise RuntimeError(f"missing rollout update group {group_name!r}")
-
-        bucket = self._prepared_rollout_weight_buckets[bucket_index]
-        device = self._device()
-        flattened_bucket = FlattenedTensorBucket(
-            named_tensors=[
-                (name, tensor.to(device=device, non_blocking=device.type == "cuda"))
-                for name, tensor in bucket
-            ]
-        )
-        dist.broadcast(
-            flattened_bucket.get_flattened_tensor(),
-            src=0,
-            group=self._rollout_update_groups[group_name],
-        )
-
-    def destroy_policy_weights_update_group(self, *, group_name: str) -> None:
-        if self._rank() != 0:
-            return
-        process_group = self._rollout_update_groups.pop(group_name, None)
-        if process_group is not None:
-            dist.destroy_process_group(process_group)
-
-    def clear_prepared_policy_weights_for_rollout(self) -> None:
-        self._prepared_rollout_weight_buckets = None
-
-    def sync_policy_weights_to_rollout(
-        self,
-        *,
-        rollout_workers: list[object],
-        rollout_engines: list[object],
+        step: int,
         policy_version: int,
-        sync_mode: str,
     ) -> None:
-        if not rollout_workers:
-            return
-
-        if sync_mode == "tensor":
-            updater = TensorWeightUpdater(
-                self._cfg(),
-                self._model(),
-                rank=self._rank(),
-                world_size=self._world_size(),
-                device=self._device(),
-                master_addr=self._master_addr(),
-            )
-        elif sync_mode == "distributed":
-            updater = DistributedWeightUpdater(
-                self._cfg(),
-                self._model(),
-                rank=self._rank(),
-                world_size=self._world_size(),
-                device=self._device(),
-                master_addr=self._master_addr(),
-            )
-        else:
-            raise ValueError(f"unsupported rollout sync mode {sync_mode!r}")
-
+        rollout_workers, rollout_engines = self._session_targets(session)
+        updater = DistributedWeightUpdater(
+            self._cfg(),
+            self._model(),
+            rank=self._rank(),
+            world_size=self._world_size(),
+            device=self._device(),
+            master_addr=self._master_addr(),
+            session=session,
+        )
         updater.connect_rollout_engines(
             rollout_workers=rollout_workers,
             rollout_engines=rollout_engines,
@@ -432,10 +345,6 @@ class FSDP2Backend(TrainBackend):
             torch.cuda.empty_cache()
 
     def shutdown(self) -> None:
-        self._prepared_rollout_weight_buckets = None
-        for process_group in self._rollout_update_groups.values():
-            dist.destroy_process_group(process_group)
-        self._rollout_update_groups.clear()
         if dist.is_initialized():
             dist.destroy_process_group()
 
@@ -445,13 +354,6 @@ class FSDP2Backend(TrainBackend):
                 f"FSDP2Backend requires backend=fsdp2, got {cfg.train.backend}"
             )
         assert isinstance(cfg.train.backend_config, FSDP2Config)
-
-    def _rollout_state_dict(self) -> dict[str, torch.Tensor]:
-        options = StateDictOptions(
-            full_state_dict=True,
-            cpu_offload=True,
-        )
-        return get_model_state_dict(self._model(), options=options)
 
     def _initialize_process_group(self) -> None:
         if dist.is_initialized():
@@ -715,6 +617,16 @@ class FSDP2Backend(TrainBackend):
             min_lr=scheduler_cfg.min_lr,
             min_lr_rate=scheduler_cfg.min_lr_rate,
         )
+
+    def _session_targets(self, session) -> tuple[list[object], list[object]]:
+        rollout_workers = session.transport_metadata.get("rollout_workers", [])
+        rollout_engines = session.transport_metadata.get("rollout_engines", [])
+        if len(rollout_workers) != len(rollout_engines):
+            raise ValueError(
+                "session transport metadata must provide rollout_workers and "
+                "rollout_engines with matching lengths"
+            )
+        return list(rollout_workers), list(rollout_engines)
 
     def _gradient_accumulation_steps(self) -> int:
         return self._cfg().train.gradient_accumulation_steps

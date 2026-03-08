@@ -7,7 +7,7 @@ from collections.abc import Callable
 from multiprocessing.process import BaseProcess
 from typing import Any
 
-from .client import SGLangServerClient
+from .client import SGLangControlClient
 from .spec import SGLangEngineSpec
 
 HEALTHCHECK_TIMEOUT_SECONDS = 300.0
@@ -62,7 +62,7 @@ class SGLangEngineRuntime:
         self.request_timeout_seconds = request_timeout_seconds
         self._process_launcher = process_launcher
         self.process: BaseProcess | None = None
-        self.client = SGLangServerClient(spec.url)
+        self.client = SGLangControlClient(spec.url)
 
     def start(self) -> None:
         if self.process is not None and self.process.is_alive():
