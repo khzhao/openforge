@@ -1,8 +1,10 @@
 # Copyright 2026 openforge
 
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -11,7 +13,12 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     set_model_state_dict,
 )
-from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    FSDPModule,
+    MixedPrecisionPolicy,
+    OffloadPolicy,
+)
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from openforge.configs.models import OpenForgeConfig
@@ -136,7 +143,16 @@ class FSDP2Backend(TrainBackend):
             loss.backward()
 
     def no_sync(self) -> AbstractContextManager[None]:
-        return nullcontext()
+        @contextmanager
+        def _no_sync() -> Iterator[None]:
+            model = cast(FSDPModule, self._model())
+            model.set_requires_gradient_sync(False)
+            try:
+                yield
+            finally:
+                model.set_requires_gradient_sync(True)
+
+        return _no_sync()
 
     def step_optimizer(self, *, global_step: int | None = None) -> TrainStepResult:
         model = self._model()
