@@ -306,7 +306,7 @@ def test_sglang_control_client_request_and_headers() -> None:
         )
 
 
-def test_sglang_control_client_public_methods_and_fallbacks() -> None:
+def test_sglang_control_client_public_methods() -> None:
     client = SGLangControlClient("http://127.0.0.1:31000")
 
     with mock.patch.object(
@@ -315,11 +315,8 @@ def test_sglang_control_client_public_methods_and_fallbacks() -> None:
         side_effect=[
             OSError("offline"),
             (503, None),
-            RuntimeError("missing"),
             (200, {"weight_version": 11}),
-            RuntimeError("missing"),
             (200, {"name": "server"}),
-            RuntimeError("missing"),
             (200, {"weight_version": 11}),
         ],
     ):
@@ -833,8 +830,8 @@ TESTS = [
         test_sglang_control_client_request_and_headers,
     ),
     (
-        "sglang_control_client_public_methods_and_fallbacks",
-        test_sglang_control_client_public_methods_and_fallbacks,
+        "sglang_control_client_public_methods",
+        test_sglang_control_client_public_methods,
     ),
     (
         "sglang_control_client_payload_methods",

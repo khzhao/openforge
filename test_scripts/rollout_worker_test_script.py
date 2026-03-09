@@ -302,7 +302,6 @@ def test_rollout_worker_initialize_and_load_artifact() -> None:
             engine=engine,
             host="10.0.0.8",
             port=30000,
-            model_path="test-model",
         )
         worker = RolloutWorker()
 
@@ -329,7 +328,6 @@ def test_rollout_worker_applies_tensor_and_distributed_sessions() -> None:
             engine=engine,
             host="10.0.0.9",
             port=30000,
-            model_path="test-model",
         )
         worker = RolloutWorker()
         tensor_session = TensorUpdateSession(
@@ -397,7 +395,6 @@ def test_rollout_worker_placeholder_paths_and_helper_methods() -> None:
             engine=engine,
             host="10.0.0.10",
             port=30010,
-            model_path="placeholder-model",
             policy_version=4,
         )
         worker = RolloutWorker()
@@ -464,7 +461,6 @@ def test_rollout_worker_builds_pd_specs_and_checks_health() -> None:
             host="10.0.0.11",
             port=31000,
             bootstrap_port=31001,
-            model_path="prefill-model",
             policy_version=7,
         )
         prefill_worker.engine = prefill_engine
@@ -482,7 +478,6 @@ def test_rollout_worker_builds_pd_specs_and_checks_health() -> None:
             host="10.0.0.12",
             port=32000,
             bootstrap_port=None,
-            model_path="decode-model",
             policy_version=None,
         )
         decode_worker.engine = decode_engine
@@ -534,9 +529,11 @@ def test_rollout_worker_builds_pd_specs_and_checks_health() -> None:
             return_value=mock.Mock(model_path=None, policy_version=8)
         )
     )
-    worker._sync_runtime_state()
-    assert worker.model_path == "regular-model"
-    assert worker.policy_version == 8
+    assert_raises(
+        RuntimeError,
+        worker._sync_runtime_state,
+        match="did not report model_path",
+    )
 
     with (
         mock.patch(

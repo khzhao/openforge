@@ -300,7 +300,6 @@ class RolloutWorkerGroup:
             host=host,
             port=port,
             bootstrap_port=bootstrap_port,
-            model_path=self.cfg.model.model_name_or_path,
             policy_version=None,
         )
 

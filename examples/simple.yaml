@@ -6,7 +6,6 @@ data:
 gateway:
   host: 127.0.0.1
   port: 8000
-  backend_url: http://127.0.0.1:9000
 
 model:
   model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
@@ -14,7 +13,7 @@ model:
   reference_model_name_or_path: null
 
 algo:
-  kl_coef: 0.01
+  kl_coef: 0.0
 
 cluster:
   - node_pool: default

@@ -265,9 +265,9 @@ class FakeBackend:
         self.calls.append("shutdown")
 
 
-class LegacyBackend(FakeBackend):
+class InvalidReturnBackend(FakeBackend):
     def step_optimizer(self, *, global_step: int | None = None):
-        self.calls.append(("legacy_step_optimizer", global_step))
+        self.calls.append(("invalid_step_optimizer", global_step))
         return {"legacy_metric": 2.0}
 
     def save_checkpoint(
@@ -277,7 +277,7 @@ class LegacyBackend(FakeBackend):
         policy_version: int,
         save_optimizer: bool = True,
     ):
-        self.calls.append(("legacy_save_checkpoint", step, policy_version, save_optimizer))
+        self.calls.append(("invalid_save_checkpoint", step, policy_version, save_optimizer))
         return "/tmp/legacy-checkpoint.pt"
 
     def load_checkpoint(
@@ -287,8 +287,17 @@ class LegacyBackend(FakeBackend):
         step: int | None = None,
         load_optimizer: bool = True,
     ):
-        self.calls.append(("legacy_load_checkpoint", latest, step, load_optimizer))
+        self.calls.append(("invalid_load_checkpoint", latest, step, load_optimizer))
         return (12, 34)
+
+    def export_policy_artifact(
+        self,
+        *,
+        step: int,
+        policy_version: int,
+    ):
+        self.calls.append(("invalid_export_policy_artifact", step, policy_version))
+        return "/tmp/legacy-artifact.pt"
 
 
 class FakeRemoteMethod:
@@ -442,7 +451,7 @@ def test_train_backend_is_abstract() -> None:
     assert_raises(TypeError, TrainBackend)
 
 
-def test_train_worker_legacy_backend_return_adapters() -> None:
+def test_train_worker_rejects_legacy_backend_return_shapes() -> None:
     cfg = make_config(world_size=1, cpus_per_worker=0)
     spec = TrainWorkerSpec(
         cfg=cfg,
@@ -452,18 +461,35 @@ def test_train_worker_legacy_backend_return_adapters() -> None:
         master_port=29599,
     )
 
-    with mock.patch("openforge.train.worker.FSDP2Backend", LegacyBackend):
+    with mock.patch("openforge.train.worker.FSDP2Backend", InvalidReturnBackend):
         worker = TrainWorker()
         worker.initialize(spec)
-        result = worker.step([make_batch()], global_step=5)
-        checkpoint = worker.save_checkpoint(step=7, policy_version=8)
-        restored = worker.load_checkpoint()
-
-    assert result.metrics["legacy_metric"] == 2.0
-    assert checkpoint.path == "/tmp/legacy-checkpoint.pt"
-    assert restored is not None
-    assert restored.step == 12
-    assert restored.policy_version == 34
+        assert_raises(
+            TypeError,
+            worker.step,
+            [make_batch()],
+            global_step=5,
+            match="step_optimizer must return TrainStepResult",
+        )
+        assert_raises(
+            TypeError,
+            worker.save_checkpoint,
+            step=7,
+            policy_version=8,
+            match="save_checkpoint must return CheckpointInfo",
+        )
+        assert_raises(
+            TypeError,
+            worker.load_checkpoint,
+            match="load_checkpoint must return CheckpointInfo \\| None",
+        )
+        assert_raises(
+            TypeError,
+            worker.export_policy_artifact,
+            step=9,
+            policy_version=10,
+            match="export_policy_artifact must return PolicyArtifactRef \\| None",
+        )
 
 
 def fake_initialize(self: TrainWorker, spec: TrainWorkerSpec):
@@ -710,8 +736,8 @@ def run_suite(artifacts_dir: Path) -> int:
             ),
             ("train_backend_is_abstract", test_train_backend_is_abstract),
             (
-                "train_worker_legacy_backend_return_adapters",
-                test_train_worker_legacy_backend_return_adapters,
+                "train_worker_rejects_legacy_backend_return_shapes",
+                test_train_worker_rejects_legacy_backend_return_shapes,
             ),
             (
                 "train_worker_group_validates_inputs_and_handles_missing_artifacts",

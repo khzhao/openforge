@@ -32,11 +32,7 @@ class RolloutWorker:
         self.host = spec.host
         self.port = spec.port
         self.bootstrap_port = spec.bootstrap_port
-        self.model_path = (
-            spec.model_path
-            if spec.model_path is not None
-            else spec.cfg.model.model_name_or_path
-        )
+        self.model_path = spec.cfg.model.model_name_or_path
         self.policy_version = spec.policy_version
         self.runtime: RolloutRuntime | None = None
 
@@ -265,9 +261,9 @@ class RolloutWorker:
         if runtime is None:
             return
         endpoint = runtime.endpoint()
-        self.model_path = (
-            endpoint.model_path if endpoint.model_path is not None else self.model_path
-        )
+        if endpoint.model_path is None:
+            raise RuntimeError("rollout runtime endpoint did not report model_path")
+        self.model_path = endpoint.model_path
         self.policy_version = endpoint.policy_version
 
     def _engine_name(self) -> str:

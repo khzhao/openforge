@@ -2,7 +2,6 @@
 
 from contextlib import nullcontext
 from dataclasses import replace
-from pathlib import Path
 from typing import Sequence
 
 from tensordict import TensorDict
@@ -68,13 +67,12 @@ class TrainWorker:
                 backend.backward(forward_out)
 
         result = backend.step_optimizer(global_step=global_step)
-        if isinstance(result, TrainStepResult):
-            return result
-        return TrainStepResult(
-            rank=self._state.rank,
-            global_step=global_step,
-            metrics=result,
-        )
+        if not isinstance(result, TrainStepResult):
+            raise TypeError(
+                "TrainBackend.step_optimizer must return TrainStepResult, "
+                f"got {type(result).__name__}"
+            )
+        return result
 
     def save_checkpoint(
         self,
@@ -88,9 +86,12 @@ class TrainWorker:
             policy_version=policy_version,
             save_optimizer=save_optimizer,
         )
-        if isinstance(result, CheckpointInfo):
-            return result
-        return CheckpointInfo(step=step, policy_version=policy_version, path=result)
+        if not isinstance(result, CheckpointInfo):
+            raise TypeError(
+                "TrainBackend.save_checkpoint must return CheckpointInfo, "
+                f"got {type(result).__name__}"
+            )
+        return result
 
     def load_checkpoint(
         self,
@@ -106,12 +107,9 @@ class TrainWorker:
         )
         if result is None or isinstance(result, CheckpointInfo):
             return result
-
-        loaded_step, loaded_policy_version = result
-        return CheckpointInfo(
-            step=loaded_step,
-            policy_version=loaded_policy_version,
-            path=self._checkpoint_path(loaded_step),
+        raise TypeError(
+            "TrainBackend.load_checkpoint must return CheckpointInfo | None, "
+            f"got {type(result).__name__}"
         )
 
     def export_policy_artifact(
@@ -120,10 +118,16 @@ class TrainWorker:
         step: int,
         policy_version: int,
     ) -> PolicyArtifactRef | None:
-        return self.backend.export_policy_artifact(
+        artifact = self.backend.export_policy_artifact(
             step=step,
             policy_version=policy_version,
         )
+        if artifact is not None and not isinstance(artifact, PolicyArtifactRef):
+            raise TypeError(
+                "TrainBackend.export_policy_artifact must return "
+                f"PolicyArtifactRef | None, got {type(artifact).__name__}"
+            )
+        return artifact
 
     def push_tensor_update(
         self,
@@ -168,7 +172,3 @@ class TrainWorker:
     def shutdown(self) -> None:
         self.backend.shutdown()
         self._state = replace(self._state, initialized=False)
-
-    def _checkpoint_path(self, step: int) -> str:
-        checkpoints_dir = Path(self.spec.cfg.train.checkpoints_dir)
-        return str(checkpoints_dir / f"step_{step:08d}.rank_{self._state.rank:05d}.pt")

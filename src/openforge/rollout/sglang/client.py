@@ -46,26 +46,16 @@ class SGLangControlClient:
         return status == HTTPStatus.OK
 
     def get_model_info(self, *, timeout: float = 5.0) -> dict[str, Any]:
-        for path in ("/model_info", "/get_model_info"):
-            try:
-                _, payload = self._request("GET", path, timeout=timeout)
-            except RuntimeError:
-                continue
-            if isinstance(payload, dict):
-                return payload
-            raise RuntimeError(f"sglang {path} did not return a JSON object")
-        raise RuntimeError("sglang model info endpoint was not available")
+        _, payload = self._request("GET", "/model_info", timeout=timeout)
+        if not isinstance(payload, dict):
+            raise RuntimeError("sglang /model_info did not return a JSON object")
+        return payload
 
     def get_server_info(self, *, timeout: float = 5.0) -> dict[str, Any]:
-        for path in ("/server_info", "/get_server_info"):
-            try:
-                _, payload = self._request("GET", path, timeout=timeout)
-            except RuntimeError:
-                continue
-            if isinstance(payload, dict):
-                return payload
-            raise RuntimeError(f"sglang {path} did not return a JSON object")
-        raise RuntimeError("sglang server info endpoint was not available")
+        _, payload = self._request("GET", "/server_info", timeout=timeout)
+        if not isinstance(payload, dict):
+            raise RuntimeError("sglang /server_info did not return a JSON object")
+        return payload
 
     def get_weight_version(self, *, timeout: float = 5.0) -> str | None:
         payload = self.get_model_info(timeout=timeout)

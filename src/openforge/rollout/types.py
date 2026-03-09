@@ -17,5 +17,4 @@ class RolloutWorkerSpec:
     host: str
     port: int
     bootstrap_port: int | None = None
-    model_path: str | None = None
     policy_version: int | None = None
