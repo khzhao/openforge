@@ -36,9 +36,6 @@ class RolloutWorker:
         self.policy_version = spec.policy_version
         self.runtime: RolloutRuntime | None = None
 
-        if self.engine.role == "placeholder":
-            return self.endpoint()
-
         runtime_spec = self._build_runtime_spec()
         self.runtime = SGLangRuntime(runtime_spec)
         self.runtime.start()
@@ -46,69 +43,39 @@ class RolloutWorker:
         return self.endpoint()
 
     def endpoint(self) -> RolloutEndpoint:
-        if self.engine.role == "placeholder":
-            return RolloutEndpoint(
-                name=self._engine_name(),
-                role=self.engine.role,
-                host=self.host,
-                port=None,
-                bootstrap_port=None,
-                url=None,
-                healthy=False,
-                policy_version=self.policy_version,
-                model_path=self.model_path,
-            )
-
         runtime = self._runtime()
         self._sync_runtime_state()
         return runtime.endpoint()
 
     def is_healthy(self) -> bool:
-        if self.engine.role == "placeholder":
-            return False
         return self._runtime().is_healthy()
 
     def pause_generation(self, *, mode: str = "abort") -> None:
-        if self.engine.role == "placeholder":
-            return
         self._runtime().pause_generation(mode=mode)
 
     def continue_generation(self) -> None:
-        if self.engine.role == "placeholder":
-            return
         self._runtime().continue_generation()
 
     def flush_cache(self) -> bool:
-        if self.engine.role == "placeholder":
-            return True
         return self._runtime().flush_cache()
 
     def get_model_info(self) -> dict[str, object]:
-        if self.engine.role == "placeholder":
-            return {}
         return cast(dict[str, object], self._runtime().get_model_info())
 
     def get_server_info(self) -> dict[str, object]:
-        if self.engine.role == "placeholder":
-            return {}
         return cast(dict[str, object], self._runtime().get_server_info())
 
     def get_weight_version(self) -> str | None:
-        if self.engine.role == "placeholder":
-            return None
         return self._runtime().get_weight_version()
 
     def load_policy_artifact(self, artifact: PolicyArtifactRef) -> RolloutEndpoint:
         self.model_path = artifact.path
         self.policy_version = artifact.policy_version
-        if self.engine.role != "placeholder":
-            self._runtime().load_policy_artifact(artifact)
-            self._sync_runtime_state()
+        self._runtime().load_policy_artifact(artifact)
+        self._sync_runtime_state()
         return self.endpoint()
 
     def begin_tensor_update(self, session: TensorUpdateSession) -> None:
-        if self.engine.role == "placeholder":
-            return
         self._runtime().begin_tensor_update(session)
         self.policy_version = session.policy_version
 
@@ -119,8 +86,6 @@ class RolloutWorker:
         load_format: str,
         policy_version: int,
     ) -> None:
-        if self.engine.role == "placeholder":
-            return
         self._runtime().apply_tensor_bucket(
             serialized_named_tensors=serialized_named_tensors,
             load_format=load_format,
@@ -129,14 +94,11 @@ class RolloutWorker:
         self.policy_version = policy_version
 
     def finish_tensor_update(self, session: TensorUpdateSession) -> RolloutEndpoint:
-        if self.engine.role != "placeholder":
-            self._runtime().finish_tensor_update(session)
-            self._sync_runtime_state()
+        self._runtime().finish_tensor_update(session)
+        self._sync_runtime_state()
         return self.endpoint()
 
     def begin_distributed_update(self, session: DistributedUpdateSession) -> None:
-        if self.engine.role == "placeholder":
-            return
         self._runtime().begin_distributed_update(session)
 
     def apply_distributed_bucket(
@@ -147,8 +109,6 @@ class RolloutWorker:
         load_format: str,
         group_name: str,
     ) -> None:
-        if self.engine.role == "placeholder":
-            return
         self._runtime().apply_distributed_bucket(
             bucket=bucket,
             policy_version=policy_version,
@@ -161,15 +121,12 @@ class RolloutWorker:
         self,
         session: DistributedUpdateSession,
     ) -> RolloutEndpoint:
-        if self.engine.role != "placeholder":
-            self._runtime().finish_distributed_update(session)
-            self.policy_version = session.policy_version
-            self._sync_runtime_state()
+        self._runtime().finish_distributed_update(session)
+        self.policy_version = session.policy_version
+        self._sync_runtime_state()
         return self.endpoint()
 
     def abort_update(self, *, session_id: str) -> None:
-        if self.engine.role == "placeholder":
-            return
         self._runtime().abort_update(session_id=session_id)
 
     def shutdown(self) -> None:

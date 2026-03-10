@@ -4,7 +4,6 @@
 """Standalone tests for RolloutWorker and SGLang runtime glue."""
 
 import argparse
-from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -383,70 +382,6 @@ def test_rollout_worker_applies_tensor_and_distributed_sessions() -> None:
     assert runtime.abort_calls == ["dist-1"]
 
 
-def test_rollout_worker_placeholder_paths_and_helper_methods() -> None:
-    with TemporaryDirectory(prefix="openforge_rollout_worker_") as temp_dir:
-        cfg = make_config(temp_dir)
-        engine = replace(
-            cfg.rollout.resolve(cfg.cluster).engines[0],
-            role="placeholder",
-        )
-        spec = RolloutWorkerSpec(
-            cfg=cfg,
-            engine=engine,
-            host="10.0.0.10",
-            port=30010,
-            policy_version=4,
-        )
-        worker = RolloutWorker()
-        endpoint = worker.initialize(spec)
-
-    assert endpoint.role == "placeholder"
-    assert endpoint.url is None
-    assert endpoint.policy_version == 4
-    assert worker.is_healthy() is False
-    assert worker.flush_cache() is True
-    assert worker.get_model_info() == {}
-    assert worker.get_server_info() == {}
-    assert worker.get_weight_version() is None
-    worker.pause_generation()
-    worker.continue_generation()
-    worker.begin_tensor_update(
-        TensorUpdateSession(
-            session_id="tensor-placeholder",
-            policy_version=9,
-            load_format="flattened_bucket",
-            engine_ids=[0],
-        )
-    )
-    worker.apply_tensor_bucket(
-        serialized_named_tensors=["ignored"],
-        load_format="flattened_bucket",
-        policy_version=9,
-    )
-    worker.begin_distributed_update(
-        DistributedUpdateSession(
-            session_id="dist-placeholder",
-            policy_version=9,
-            load_format="flattened_bucket",
-            engine_ids=[0],
-            master_addr="127.0.0.1",
-            master_port=1234,
-            group_name="placeholder",
-            world_size=2,
-            backend="gloo",
-            rank_offsets={0: 1},
-        )
-    )
-    worker.apply_distributed_bucket(
-        bucket=WeightBucketMeta(names=["x"], dtypes=["float32"], shapes=[[1]]),
-        policy_version=9,
-        load_format="flattened_bucket",
-        group_name="placeholder",
-    )
-    worker.abort_update(session_id="ignored")
-    worker.shutdown()
-
-
 def test_rollout_worker_builds_pd_specs_and_checks_health() -> None:
     with TemporaryDirectory(prefix="openforge_rollout_worker_pd_") as temp_dir:
         cfg = make_config(temp_dir, engine_topology="pd")
@@ -576,10 +511,6 @@ def run_suite(artifacts_dir: Path) -> int:
             (
                 "rollout_worker_applies_tensor_and_distributed_sessions",
                 test_rollout_worker_applies_tensor_and_distributed_sessions,
-            ),
-            (
-                "rollout_worker_placeholder_paths_and_helper_methods",
-                test_rollout_worker_placeholder_paths_and_helper_methods,
             ),
             (
                 "rollout_worker_builds_pd_specs_and_checks_health",

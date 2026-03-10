@@ -37,12 +37,11 @@ class TrainWorker:
             raise ValueError(f"Unsupported backend: {spec.cfg.train.backend}")
 
         self.backend.initialize(spec)
-        device = str(getattr(self.backend, "device", "unknown"))
         self._state = TrainWorkerState(
             rank=spec.rank,
             world_size=spec.world_size,
             backend=spec.cfg.train.backend,
-            device=device,
+            device=self.backend.device,
             initialized=True,
             sleeping=False,
         )

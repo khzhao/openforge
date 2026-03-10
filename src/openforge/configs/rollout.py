@@ -9,7 +9,7 @@ from .base import OpenForgeBaseModel, Reward
 from .cluster import ClusterConfig
 from .topology import ParallelismConfig, PlacementConfig
 
-RolloutRole = Literal["prefill", "decode", "regular", "placeholder"]
+RolloutRole = Literal["prefill", "decode", "regular"]
 EngineTopology = Literal["regular", "pd"]
 
 
@@ -141,19 +141,15 @@ class RolloutConfig(OpenForgeBaseModel):
         if len(names) != len(set(names)):
             raise ValueError("rollout engine names must be unique")
 
-        routable_roles = {
-            engine.role for engine in self.engines if engine.role != "placeholder"
-        }
-        if not routable_roles:
-            raise ValueError("rollout must include at least one non-placeholder engine")
+        roles = {engine.role for engine in self.engines}
         if self.engine_topology == "pd":
-            if "prefill" not in routable_roles or "decode" not in routable_roles:
+            if "prefill" not in roles or "decode" not in roles:
                 raise ValueError(
                     "pd rollout must include both prefill and decode engines"
                 )
-            if not routable_roles.issubset({"prefill", "decode"}):
+            if not roles.issubset({"prefill", "decode"}):
                 raise ValueError(
-                    "pd rollout may only contain prefill, decode, or placeholder engines"
+                    "pd rollout may only contain prefill or decode engines"
                 )
 
             prefill_shapes = {
@@ -175,10 +171,8 @@ class RolloutConfig(OpenForgeBaseModel):
                     "pd rollout currently requires all decode engines to share the same parallelism"
                 )
         else:
-            if not routable_roles.issubset({"regular"}):
-                raise ValueError(
-                    "regular rollout may only contain regular or placeholder engines"
-                )
+            if not roles.issubset({"regular"}):
+                raise ValueError("regular rollout may only contain regular engines")
         return self
 
     def resolve(self, cluster: ClusterConfig) -> ResolvedRolloutTopology:
