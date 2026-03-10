@@ -62,6 +62,22 @@ class SGLangControlClient:
         version = payload.get("weight_version")
         return None if version is None else str(version)
 
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        _, body = self._request(
+            "POST",
+            "/generate",
+            payload=payload,
+            timeout=timeout,
+        )
+        if not isinstance(body, dict):
+            raise RuntimeError("sglang /generate did not return a JSON object")
+        return body
+
     def update_weights_from_disk(
         self,
         *,
@@ -105,29 +121,6 @@ class SGLangControlClient:
         )
         if not isinstance(body, dict):
             raise RuntimeError("sglang /weights_checker did not return a JSON object")
-        return body
-
-    def pause_generation(
-        self,
-        *,
-        mode: str = "abort",
-        timeout: float = 5.0,
-    ) -> Any:
-        _, body = self._request(
-            "POST",
-            "/pause_generation",
-            payload={"mode": mode},
-            timeout=timeout,
-        )
-        return body
-
-    def continue_generation(self, *, timeout: float = 5.0) -> Any:
-        _, body = self._request(
-            "POST",
-            "/continue_generation",
-            payload={},
-            timeout=timeout,
-        )
         return body
 
     def _request(

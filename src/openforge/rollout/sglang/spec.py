@@ -8,14 +8,10 @@ from typing import Any
 class SGLangEngineSpec:
     """Concrete launch and control specification for one SGLang engine."""
 
-    engine_id: int
     name: str
-    role: str
     host: str
     port: int
-    bootstrap_port: int | None
     model_path: str
-    tokenizer_path: str
     policy_version: int | None
     server_args: dict[str, Any]
 

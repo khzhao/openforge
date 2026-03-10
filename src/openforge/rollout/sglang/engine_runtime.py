@@ -84,10 +84,6 @@ class SGLangEngineRuntime:
                 process.join(timeout=PROCESS_TERMINATION_TIMEOUT_SECONDS)
         self.process = None
 
-    def restart(self) -> None:
-        self.stop()
-        self.start()
-
     def is_healthy(self) -> bool:
         process = self.process
         if process is None or not process.is_alive():
@@ -99,6 +95,17 @@ class SGLangEngineRuntime:
 
     def get_weight_version(self) -> str | None:
         return self.client.get_weight_version(timeout=self.request_timeout_seconds)
+
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return self.client.generate(
+            payload=payload,
+            timeout=self.request_timeout_seconds if timeout is None else timeout,
+        )
 
     def update_weights_from_disk(
         self,
@@ -136,15 +143,6 @@ class SGLangEngineRuntime:
 
     def flush_cache(self) -> bool:
         return self.client.flush_cache(timeout=self.request_timeout_seconds)
-
-    def pause_generation(self, *, mode: str = "abort") -> Any:
-        return self.client.pause_generation(
-            mode=mode,
-            timeout=self.request_timeout_seconds,
-        )
-
-    def continue_generation(self) -> Any:
-        return self.client.continue_generation(timeout=self.request_timeout_seconds)
 
     def _wait_until_ready(self) -> None:
         deadline = time.monotonic() + HEALTHCHECK_TIMEOUT_SECONDS
