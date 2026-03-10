@@ -52,7 +52,9 @@ class ParallelismConfig(OpenForgeBaseModel):
 
     @property
     def world_size(self) -> int:
-        return self.data_parallel_size * self.fsdp_parallel_size * self.model_parallel_size
+        return (
+            self.data_parallel_size * self.fsdp_parallel_size * self.model_parallel_size
+        )
 
 
 class PlacementConfig(OpenForgeBaseModel):

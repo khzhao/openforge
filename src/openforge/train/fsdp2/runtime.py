@@ -33,21 +33,11 @@ def create_device_mesh(
         "FSDP2 currently expects world_size to equal "
         "data_parallel_size * fsdp_parallel_size"
     )
-    if dp_size == 1:
-        # A pure-FSDP layout should use a 1D mesh. A 2D mesh with a replicate
-        # dimension of size 1 still routes through HSDP internals.
-        device_mesh = init_device_mesh(
-            device_type,
-            mesh_shape=(fsdp_size,),
-            mesh_dim_names=("fsdp",),
-        )
-    else:
-        device_mesh = init_device_mesh(
-            device_type,
-            mesh_shape=(dp_size, fsdp_size),
-            mesh_dim_names=("dp", "fsdp"),
-        )
-    return device_mesh
+    return init_device_mesh(
+        device_type,
+        mesh_shape=(dp_size, fsdp_size),
+        mesh_dim_names=("dp", "fsdp"),
+    )
 
 
 def get_torch_dtype(dtype: str) -> torch.dtype:

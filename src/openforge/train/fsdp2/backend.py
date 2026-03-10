@@ -304,9 +304,12 @@ class FSDP2Backend(TrainBackend):
         if sleeping:
             return
         if fsdp_cfg.offload.mode != "cpu":
+            # Sleep transitions the backend into an idle state between updates,
+            # so any in-flight gradients can be dropped before offload.
+            optimizer.zero_grad(set_to_none=True)
             self._reshard_model(model)
             self._distributed_barrier()
-            offload_params(model, offload_grad=True)
+            offload_params(model, offload_grad=False)
             offload_optimizer(optimizer)
             self._distributed_barrier()
         self.clear_memory()
@@ -322,7 +325,7 @@ class FSDP2Backend(TrainBackend):
         if not sleeping:
             return
         if fsdp_cfg.offload.mode != "cpu":
-            onload_params(model, device, onload_grad=True)
+            onload_params(model, device, onload_grad=False)
             onload_optimizer(optimizer, device)
             self._reshard_model(model)
             self._distributed_barrier()
