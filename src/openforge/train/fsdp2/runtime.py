@@ -23,20 +23,30 @@ _DEFAULT_BLOCK_ATTR_PATHS: Sequence[str] = (
 
 def create_device_mesh(
     dp_size: int,
+    fsdp_size: int,
     world_size: int,
     device_type: Literal["cuda", "cpu"] = "cuda",
 ) -> DeviceMesh:
     """Create a device mesh for FSDP2."""
     assert dist.is_initialized(), "Distributed process group must be initialized"
-    assert world_size % dp_size == 0, (
-        "World size must be divisible by data parallel size"
+    assert world_size == dp_size * fsdp_size, (
+        "FSDP2 currently expects world_size to equal "
+        "data_parallel_size * fsdp_parallel_size"
     )
-    fsdp_size = world_size // dp_size
-    device_mesh = init_device_mesh(
-        device_type,
-        mesh_shape=(dp_size, fsdp_size),
-        mesh_dim_names=("dp", "fsdp"),
-    )
+    if dp_size == 1:
+        # A pure-FSDP layout should use a 1D mesh. A 2D mesh with a replicate
+        # dimension of size 1 still routes through HSDP internals.
+        device_mesh = init_device_mesh(
+            device_type,
+            mesh_shape=(fsdp_size,),
+            mesh_dim_names=("fsdp",),
+        )
+    else:
+        device_mesh = init_device_mesh(
+            device_type,
+            mesh_shape=(dp_size, fsdp_size),
+            mesh_dim_names=("dp", "fsdp"),
+        )
     return device_mesh
 
 

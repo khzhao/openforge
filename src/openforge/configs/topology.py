@@ -18,6 +18,8 @@ class ParallelismConfig(OpenForgeBaseModel):
     """Distributed parallelism layout for a train world or rollout engine."""
 
     data_parallel_size: int = 1
+    # FSDP2 parallelism and should only be set when using FSDP2 backend
+    fsdp_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     context_parallel_size: int = 1
@@ -27,6 +29,8 @@ class ParallelismConfig(OpenForgeBaseModel):
     def _validate_parallelism(self) -> "ParallelismConfig":
         if self.data_parallel_size <= 0:
             raise ValueError("data_parallel_size must be > 0")
+        if self.fsdp_parallel_size <= 0:
+            raise ValueError("fsdp_parallel_size must be > 0")
         if self.pipeline_parallel_size <= 0:
             raise ValueError("pipeline_parallel_size must be > 0")
         if self.tensor_parallel_size <= 0:
@@ -48,7 +52,7 @@ class ParallelismConfig(OpenForgeBaseModel):
 
     @property
     def world_size(self) -> int:
-        return self.data_parallel_size * self.model_parallel_size
+        return self.data_parallel_size * self.fsdp_parallel_size * self.model_parallel_size
 
 
 class PlacementConfig(OpenForgeBaseModel):

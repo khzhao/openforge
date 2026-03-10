@@ -304,8 +304,11 @@ class FSDP2Backend(TrainBackend):
         if sleeping:
             return
         if fsdp_cfg.offload.mode != "cpu":
+            self._reshard_model(model)
+            self._distributed_barrier()
             offload_params(model, offload_grad=True)
             offload_optimizer(optimizer)
+            self._distributed_barrier()
         self.clear_memory()
         self._sleeping = True
 
@@ -321,6 +324,8 @@ class FSDP2Backend(TrainBackend):
         if fsdp_cfg.offload.mode != "cpu":
             onload_params(model, device, onload_grad=True)
             onload_optimizer(optimizer, device)
+            self._reshard_model(model)
+            self._distributed_barrier()
         self.clear_memory()
         self._sleeping = False
 
@@ -550,6 +555,7 @@ class FSDP2Backend(TrainBackend):
         fsdp_cfg = self._backend_cfg
         mesh = create_device_mesh(
             dp_size=cfg.train.parallelism.data_parallel_size,
+            fsdp_size=cfg.train.parallelism.fsdp_parallel_size,
             world_size=self._world_size(),
             device_type=device.type,
         )
@@ -697,6 +703,23 @@ class FSDP2Backend(TrainBackend):
         if layer_types is None:
             return False
         return "linear_attention" in layer_types
+
+    def _reshard_model(self, model: torch.nn.Module) -> None:
+        fsdp_modules = [
+            module for module in model.modules() if isinstance(module, FSDPModule)
+        ]
+        for module in reversed(fsdp_modules):
+            module.reshard()
+
+    def _distributed_barrier(self) -> None:
+        if not dist.is_initialized():
+            return
+        device = self._device()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device=device)
+            dist.barrier(device_ids=[device.index])
+        else:
+            dist.barrier()
 
     def _cfg(self) -> OpenForgeConfig:
         assert self.cfg is not None

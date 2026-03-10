@@ -12,15 +12,15 @@ def offload_params(
 ) -> None:
     """Offload model parameters to CPU."""
     model.to(device="cpu")
-    if not offload_grad:
-        return
-
-    for parameter in model.parameters():
-        grad = parameter.grad
-        if grad is None or grad.device.type == "cpu":
-            continue
-        parameter.grad = grad.detach().to("cpu", non_blocking=True)
-        del grad
+    if offload_grad:
+        for parameter in model.parameters():
+            grad = parameter.grad
+            if grad is None or grad.device.type == "cpu":
+                continue
+            parameter.grad = grad.detach().to("cpu", non_blocking=True)
+            del grad
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 @torch.no_grad()
@@ -31,15 +31,15 @@ def onload_params(
 ) -> None:
     """Load model parameters from CPU to GPU."""
     model.to(device=device)
-    if not onload_grad:
-        return
-
-    for parameter in model.parameters():
-        grad = parameter.grad
-        if grad is None or grad.device == device:
-            continue
-        parameter.grad = grad.detach().to(device, non_blocking=True)
-        del grad
+    if onload_grad:
+        for parameter in model.parameters():
+            grad = parameter.grad
+            if grad is None or grad.device == device:
+                continue
+            parameter.grad = grad.detach().to(device, non_blocking=True)
+            del grad
+    if device.type == "cuda":
+        torch.cuda.synchronize(device=device)
 
 
 @torch.no_grad()
