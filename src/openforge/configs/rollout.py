@@ -9,8 +9,8 @@ from .base import OpenForgeBaseModel, Reward
 from .cluster import ClusterConfig
 from .topology import ParallelismConfig, PlacementConfig
 
-RolloutRole = Literal["prefill", "decode", "regular"]
-EngineTopology = Literal["regular", "pd"]
+RolloutRole = Literal["regular"]
+EngineTopology = Literal["regular"]
 
 
 @dataclass(slots=True)
@@ -142,37 +142,8 @@ class RolloutConfig(OpenForgeBaseModel):
             raise ValueError("rollout engine names must be unique")
 
         roles = {engine.role for engine in self.engines}
-        if self.engine_topology == "pd":
-            if "prefill" not in roles or "decode" not in roles:
-                raise ValueError(
-                    "pd rollout must include both prefill and decode engines"
-                )
-            if not roles.issubset({"prefill", "decode"}):
-                raise ValueError(
-                    "pd rollout may only contain prefill or decode engines"
-                )
-
-            prefill_shapes = {
-                self._parallelism_signature(engine.parallelism)
-                for engine in self.engines
-                if engine.role == "prefill"
-            }
-            decode_shapes = {
-                self._parallelism_signature(engine.parallelism)
-                for engine in self.engines
-                if engine.role == "decode"
-            }
-            if len(prefill_shapes) > 1:
-                raise ValueError(
-                    "pd rollout currently requires all prefill engines to share the same parallelism"
-                )
-            if len(decode_shapes) > 1:
-                raise ValueError(
-                    "pd rollout currently requires all decode engines to share the same parallelism"
-                )
-        else:
-            if not roles.issubset({"regular"}):
-                raise ValueError("regular rollout may only contain regular engines")
+        if not roles.issubset({"regular"}):
+            raise ValueError("rollout engines must all use role=regular")
         return self
 
     def resolve(self, cluster: ClusterConfig) -> ResolvedRolloutTopology:
@@ -233,13 +204,3 @@ class RolloutConfig(OpenForgeBaseModel):
     @property
     def num_engines(self) -> int:
         return sum(group.replicas for group in self.engines)
-
-    @staticmethod
-    def _parallelism_signature(parallelism: ParallelismConfig) -> tuple[int, ...]:
-        return (
-            parallelism.data_parallel_size,
-            parallelism.pipeline_parallel_size,
-            parallelism.tensor_parallel_size,
-            parallelism.context_parallel_size,
-            parallelism.expert_parallel_size,
-        )

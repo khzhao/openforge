@@ -9,11 +9,7 @@ from tensordict import TensorDict
 
 from openforge.configs.models import OpenForgeConfig
 from openforge.configs.topology import PlacementStrategy
-from openforge.policy.types import (
-    DistributedUpdateSession,
-    PolicyArtifactRef,
-    TensorUpdateSession,
-)
+from openforge.policy.types import PolicyArtifactRef
 from openforge.train.types import (
     CheckpointInfo,
     TrainStepResult,
@@ -150,42 +146,6 @@ class TrainWorkerGroup:
             if result is not None:
                 return result
         raise RuntimeError("training export did not return a policy artifact")
-
-    def push_tensor_update(
-        self,
-        session: TensorUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        ray.get(
-            [
-                worker.push_tensor_update.remote(
-                    session,
-                    step=step,
-                    policy_version=policy_version,
-                )
-                for worker in self._workers
-            ]
-        )
-
-    def push_distributed_update(
-        self,
-        session: DistributedUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        ray.get(
-            [
-                worker.push_distributed_update.remote(
-                    session,
-                    step=step,
-                    policy_version=policy_version,
-                )
-                for worker in self._workers
-            ]
-        )
 
     def sleep(self) -> None:
         ray.get([worker.sleep.remote() for worker in self._workers])

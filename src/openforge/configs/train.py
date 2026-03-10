@@ -58,7 +58,6 @@ class FSDP2Config(OpenForgeBaseModel):
 
     gradient_checkpointing: bool
     reshard_after_forward: bool
-    update_weight_buffer_size: int = 64 * 1024 * 1024
     shard_modules: list[str] | None = None
     mixed_precision: MixedPrecisionConfig
     offload: OffloadConfig

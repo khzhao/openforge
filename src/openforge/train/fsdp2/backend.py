@@ -11,6 +11,7 @@ import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
+    get_model_state_dict,
     set_model_state_dict,
 )
 from torch.distributed.fsdp import (
@@ -19,20 +20,15 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     OffloadPolicy,
 )
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from openforge.configs.models import OpenForgeConfig
 from openforge.configs.train import FSDP2Config
-from openforge.policy.types import (
-    DistributedUpdateSession,
-    PolicyArtifactRef,
-    TensorUpdateSession,
-)
+from openforge.policy.types import PolicyArtifactRef
 from openforge.train.backend import TrainBackend
 from openforge.train.types import CheckpointInfo, TrainStepResult, TrainWorkerSpec
 
 from .memory import offload_optimizer, offload_params, onload_optimizer, onload_params
-from .publish import DistributedWeightUpdater, TensorWeightUpdater
 from .runtime import apply_fsdp2, create_device_mesh, get_torch_dtype
 from .scheduler import get_lr_scheduler
 
@@ -268,64 +264,36 @@ class FSDP2Backend(TrainBackend):
         step: int,
         policy_version: int,
     ) -> PolicyArtifactRef | None:
+        model = self._model()
+        full_state = get_model_state_dict(
+            model,
+            options=StateDictOptions(
+                full_state_dict=True,
+                cpu_offload=True,
+            ),
+        )
         if self._rank() != 0:
             return None
-        checkpoint = self.save_checkpoint(
+
+        artifact_dir = self._artifact_dir(step=step, policy_version=policy_version)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        export_model = self._build_export_model_shell()
+        export_model.save_pretrained(
+            artifact_dir,
+            state_dict=full_state,
+            safe_serialization=False,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            self._cfg().model.tokenizer_name_or_path,
+            trust_remote_code=True,
+        )
+        tokenizer.save_pretrained(artifact_dir)
+        return PolicyArtifactRef(
             step=step,
             policy_version=policy_version,
-            save_optimizer=False,
+            path=str(artifact_dir),
         )
-        return PolicyArtifactRef(
-            step=checkpoint.step,
-            policy_version=checkpoint.policy_version,
-            path=checkpoint.path,
-        )
-
-    def push_tensor_update(
-        self,
-        session: TensorUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        rollout_workers, rollout_engines = self._session_targets(session)
-        updater = TensorWeightUpdater(
-            self._cfg(),
-            self._model(),
-            rank=self._rank(),
-            world_size=self._world_size(),
-            device=self._device(),
-            master_addr=self._master_addr(),
-            session=session,
-        )
-        updater.connect_rollout_engines(
-            rollout_workers=rollout_workers,
-            rollout_engines=rollout_engines,
-        )
-        updater.update_weights(policy_version=policy_version)
-
-    def push_distributed_update(
-        self,
-        session: DistributedUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        rollout_workers, rollout_engines = self._session_targets(session)
-        updater = DistributedWeightUpdater(
-            self._cfg(),
-            self._model(),
-            rank=self._rank(),
-            world_size=self._world_size(),
-            device=self._device(),
-            master_addr=self._master_addr(),
-            session=session,
-        )
-        updater.connect_rollout_engines(
-            rollout_workers=rollout_workers,
-            rollout_engines=rollout_engines,
-        )
-        updater.update_weights(policy_version=policy_version)
 
     def sleep(self) -> None:
         model = self._model()
@@ -619,6 +587,23 @@ class FSDP2Backend(TrainBackend):
             return None
         return candidates[-1]
 
+    def _artifact_dir(self, *, step: int, policy_version: int) -> Path:
+        checkpoints_dir = Path(self._cfg().train.checkpoints_dir)
+        return checkpoints_dir / (
+            f"policy_step_{step:08d}.version_{policy_version:08d}"
+        )
+
+    def _build_export_model_shell(self) -> torch.nn.Module:
+        cfg = AutoConfig.from_pretrained(
+            self._cfg().model.model_name_or_path,
+            trust_remote_code=True,
+        )
+        with torch.device("meta"):
+            return AutoModelForCausalLM.from_config(
+                cfg,
+                trust_remote_code=True,
+            )
+
     def _build_lr_scheduler(self) -> torch.optim.lr_scheduler.LRScheduler:
         optimizer = self._optimizer()
         fsdp_cfg = self._backend_cfg
@@ -633,16 +618,6 @@ class FSDP2Backend(TrainBackend):
             min_lr=scheduler_cfg.min_lr,
             min_lr_rate=scheduler_cfg.min_lr_rate,
         )
-
-    def _session_targets(self, session) -> tuple[list[object], list[object]]:
-        rollout_workers = session.transport_metadata.get("rollout_workers", [])
-        rollout_engines = session.transport_metadata.get("rollout_engines", [])
-        if len(rollout_workers) != len(rollout_engines):
-            raise ValueError(
-                "session transport metadata must provide rollout_workers and "
-                "rollout_engines with matching lengths"
-            )
-        return list(rollout_workers), list(rollout_engines)
 
     def _gradient_accumulation_steps(self) -> int:
         return self._cfg().train.gradient_accumulation_steps

@@ -4,12 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from openforge.configs.rollout import RolloutEndpoint
-from openforge.policy.types import (
-    DistributedUpdateSession,
-    PolicyArtifactRef,
-    TensorUpdateSession,
-    WeightBucketMeta,
-)
+from openforge.policy.types import PolicyArtifactRef
 from openforge.rollout.runtime import RolloutRuntime
 
 from .engine_runtime import SGLangEngineRuntime
@@ -24,15 +19,11 @@ class SGLangRuntime(RolloutRuntime):
     def __init__(self, spec: SGLangEngineSpec) -> None:
         self.spec = spec
         self._runtime = SGLangEngineRuntime(spec)
-        self._active_update_group_name: str | None = None
-        self._active_session_id: str | None = None
-        self._paused_for_weight_update = False
 
     def start(self) -> None:
         self._runtime.start()
 
     def stop(self) -> None:
-        self.abort_update(session_id=self._active_session_id or "")
         self._runtime.stop()
 
     def restart(
@@ -87,121 +78,14 @@ class SGLangRuntime(RolloutRuntime):
         return self._runtime.get_weight_version()
 
     def load_policy_artifact(self, artifact: PolicyArtifactRef) -> None:
-        self.restart(
+        self._runtime.update_weights_from_disk(
             model_path=artifact.path,
-            policy_version=artifact.policy_version,
+            weight_version=str(artifact.policy_version),
         )
-
-    def begin_tensor_update(self, session: TensorUpdateSession) -> None:
-        self.pause_generation(mode="abort")
-        self._paused_for_weight_update = True
-        try:
-            if not self.flush_cache():
-                raise RuntimeError("sglang engine did not flush cache before update")
-            self.spec.policy_version = session.policy_version
-            self._active_session_id = session.session_id
-        except Exception:
-            self.abort_update(session_id=session.session_id)
-            raise
-
-    def apply_tensor_bucket(
-        self,
-        *,
-        serialized_named_tensors: list[str],
-        load_format: str,
-        policy_version: int,
-    ) -> None:
-        self._runtime.update_weights_from_tensor(
-            serialized_named_tensors=serialized_named_tensors,
-            load_format=load_format,
-            flush_cache=False,
-            weight_version=str(policy_version),
-        )
-        self.spec.policy_version = policy_version
-
-    def finish_tensor_update(self, session: TensorUpdateSession) -> None:
-        try:
-            if not self.flush_cache():
-                raise RuntimeError("sglang engine did not flush cache after update")
-            self.spec.policy_version = session.policy_version
-        finally:
-            if self._paused_for_weight_update:
-                self.continue_generation()
-                self._paused_for_weight_update = False
-            self._active_session_id = None
-
-    def begin_distributed_update(self, session: DistributedUpdateSession) -> None:
-        self.pause_generation(mode="abort")
-        self._paused_for_weight_update = True
-        try:
-            if not self.flush_cache():
-                raise RuntimeError("sglang engine did not flush cache before update")
-            self._runtime.init_weights_update_group(
-                master_address=session.master_addr,
-                master_port=session.master_port,
-                rank_offset=session.rank_offsets[self.spec.engine_id],
-                world_size=session.world_size,
-                group_name=session.group_name,
-                backend=session.backend,
-            )
-            self._active_update_group_name = session.group_name
-            self._active_session_id = session.session_id
-        except Exception:
-            self.abort_update(session_id=session.session_id)
-            raise
-
-    def apply_distributed_bucket(
-        self,
-        *,
-        bucket: WeightBucketMeta,
-        load_format: str,
-        policy_version: int,
-        group_name: str,
-    ) -> None:
-        self._runtime.update_weights_from_distributed(
-            names=bucket.names,
-            dtypes=bucket.dtypes,
-            shapes=bucket.shapes,
-            group_name=group_name,
-            flush_cache=False,
-            weight_version=str(policy_version),
-            load_format=load_format,
-        )
-        self.spec.policy_version = policy_version
-
-    def finish_distributed_update(self, session: DistributedUpdateSession) -> None:
-        try:
-            if self._active_update_group_name is not None:
-                self._runtime.destroy_weights_update_group(
-                    group_name=self._active_update_group_name
-                )
-            self.spec.policy_version = session.policy_version
-        finally:
-            self._active_update_group_name = None
-            if self._paused_for_weight_update:
-                self.continue_generation()
-                self._paused_for_weight_update = False
-            self._active_session_id = None
-
-    def abort_update(self, *, session_id: str) -> None:
-        if (
-            self._active_session_id is not None
-            and session_id
-            and self._active_session_id != session_id
-        ):
-            return
-        if self._active_update_group_name is not None:
-            try:
-                self._runtime.destroy_weights_update_group(
-                    group_name=self._active_update_group_name
-                )
-            except Exception:
-                pass
-            self._active_update_group_name = None
-        if self._paused_for_weight_update:
-            try:
-                self.continue_generation()
-            except Exception:
-                pass
-            self._paused_for_weight_update = False
-        self._active_session_id = None
+        self.spec.model_path = artifact.path
+        self.spec.tokenizer_path = artifact.path
+        self.spec.policy_version = artifact.policy_version
+        self.spec.server_args["model_path"] = artifact.path
+        self.spec.server_args["tokenizer_path"] = artifact.path
+        self.spec.server_args["served_model_name"] = Path(artifact.path).name
+        self.spec.server_args["weight_version"] = str(artifact.policy_version)

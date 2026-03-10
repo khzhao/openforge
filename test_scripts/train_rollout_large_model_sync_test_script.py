@@ -1,33 +1,35 @@
 #!/usr/bin/env python3
 # Copyright 2026 openforge
 
-"""Run a real large-model train -> rollout weight-sync integration test.
+"""Run a real large-model train -> rollout artifact-sync integration test.
 
 This script uses the current refactored train and rollout modules directly:
 
 1. Launch one `TrainWorkerGroup` with the FSDP2 backend.
 2. Launch one `RolloutWorkerGroup` with a real SGLang runtime.
-3. Run one or more real optimizer steps on the training side.
-4. Push the live weight update through either the tensor or distributed path.
-5. Verify the rollout engine changed weights exactly once via SGLang's
-   `weights_checker`, then confirm a second identical sync is idempotent.
+3. Run real inference against the rollout engine.
+4. Run one or more real optimizer steps on the training side.
+5. Export a disk-backed policy artifact from train rank 0.
+6. Load that artifact into the rollout engine, verify the version changed, and
+   run inference again.
 
 Example:
     python test_scripts/train_rollout_large_model_sync_test_script.py \
-        --model-path Qwen/Qwen2.5-0.5B-Instruct \
-        --update-mode tensor
+        --model-path Qwen/Qwen2.5-0.5B-Instruct
 """
 
 import argparse
 import json
 import sys
 from dataclasses import asdict
+from http import HTTPStatus
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from unittest import mock
 
 import ray
+import requests
 import torch
 from tensordict import TensorDict
 from transformers import AutoTokenizer
@@ -86,8 +88,8 @@ class ConfigurableRolloutWorker(RolloutWorker):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Launch real train and rollout workers, sync live weights, and verify "
-            "the update against a larger model through SGLang's weights_checker."
+            "Launch real train and rollout workers, sync a policy artifact, "
+            "and verify the rollout engine loads the new checkpoint."
         ),
     )
     parser.add_argument(
@@ -121,6 +123,41 @@ def parse_args() -> argparse.Namespace:
         help="Minimum number of prompt tokens enforced in the synthetic batch.",
     )
     parser.add_argument(
+        "--inference-prompt",
+        type=str,
+        default="Write one short sentence about reinforcement learning systems.",
+        help="Prompt used for live rollout inference requests.",
+    )
+    parser.add_argument(
+        "--inference-max-new-tokens",
+        type=int,
+        default=24,
+        help="max_new_tokens used for live rollout inference requests.",
+    )
+    parser.add_argument(
+        "--inference-temperature",
+        type=float,
+        default=0.0,
+        help="temperature used for live rollout inference requests.",
+    )
+    parser.add_argument(
+        "--inference-top-p",
+        type=float,
+        default=1.0,
+        help="top_p used for live rollout inference requests.",
+    )
+    parser.add_argument(
+        "--inference-timeout-seconds",
+        type=float,
+        default=60.0,
+        help="HTTP timeout used for live rollout inference requests.",
+    )
+    parser.add_argument(
+        "--skip-inference",
+        action="store_true",
+        help="Skip live /generate checks and only verify rollout control-plane behavior.",
+    )
+    parser.add_argument(
         "--train-world-size",
         type=int,
         default=None,
@@ -140,12 +177,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Policy version written into the rollout runtime during sync.",
-    )
-    parser.add_argument(
-        "--update-mode",
-        choices=("tensor", "distributed"),
-        default="tensor",
-        help="Weight-sync path to exercise.",
     )
     parser.add_argument(
         "--learning-rate",
@@ -484,29 +515,89 @@ def print_json(label: str, payload: Any) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
 
 
-def perform_weight_sync(
+def decode_json(raw_body: str) -> Any:
+    if not raw_body:
+        return None
+    try:
+        return json.loads(raw_body)
+    except json.JSONDecodeError:
+        return raw_body
+
+
+def post_json(
+    base_url: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float,
+) -> tuple[int, Any]:
+    try:
+        response = requests.post(
+            f"{base_url.rstrip('/')}{path}",
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise OSError(f"request POST {path} failed: {exc}") from exc
+
+    raw_body = response.text
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise RuntimeError(
+            f"request POST {path} failed with status {response.status_code}: "
+            f"{raw_body.strip()}"
+        ) from exc
+    return response.status_code, decode_json(raw_body)
+
+
+def build_generate_payload(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "text": args.inference_prompt,
+        "sampling_params": {
+            "max_new_tokens": args.inference_max_new_tokens,
+            "temperature": args.inference_temperature,
+            "top_p": args.inference_top_p,
+        },
+        "stream": False,
+    }
+
+
+def run_rollout_inference(
+    endpoint_url: str | None,
+    args: argparse.Namespace,
+    *,
+    label: str,
+) -> Any:
+    if endpoint_url is None:
+        raise RuntimeError("rollout endpoint did not expose a URL for inference")
+    payload = build_generate_payload(args)
+    print_json(f"{label}_request", payload)
+    status, response = post_json(
+        endpoint_url,
+        "/generate",
+        payload,
+        timeout=max(args.inference_timeout_seconds, args.request_timeout_seconds),
+    )
+    if status != HTTPStatus.OK:
+        raise RuntimeError(f"/generate returned unexpected status {status}")
+    print_json(f"{label}_response", response)
+    return response
+
+
+def perform_artifact_sync(
     train_group: TrainWorkerGroup,
     rollout_group: RolloutWorkerGroup,
     *,
-    update_mode: str,
     step: int,
     policy_version: int,
 ) -> list[object]:
-    if update_mode == "tensor":
-        session = rollout_group.open_tensor_update(policy_version=policy_version)
-        train_group.push_tensor_update(
-            session,
-            step=step,
-            policy_version=policy_version,
-        )
-    else:
-        session = rollout_group.open_distributed_update(policy_version=policy_version)
-        train_group.push_distributed_update(
-            session,
-            step=step,
-            policy_version=policy_version,
-        )
-    return rollout_group.commit_update(session)
+    artifact = train_group.export_policy_artifact(
+        step=step,
+        policy_version=policy_version,
+    )
+    print_json("policy_artifact", asdict(artifact))
+    return rollout_group.load_policy_artifact(artifact)
 
 
 def rollout_client(endpoint_url: str | None) -> SGLangControlClient:
@@ -544,7 +635,7 @@ def main() -> int:
         print(f"artifacts_dir={artifacts_dir}")
         print(f"model_path={args.model_path}")
         print(f"tokenizer_path={tokenizer_path}")
-        print(f"update_mode={args.update_mode}")
+        print("sync_mode=artifact")
         print(f"train_world_size={args.train_world_size}")
         print(f"cluster_gpus={cluster_gpus}")
         print(f"cluster_cpus={cluster_cpus}")
@@ -596,6 +687,12 @@ def main() -> int:
                     f"initial_rollout_weight_version="
                     f"{client.get_weight_version(timeout=args.request_timeout_seconds)!r}"
                 )
+                if not args.skip_inference:
+                    run_rollout_inference(
+                        endpoint.url,
+                        args,
+                        label="rollout_generate_before_training",
+                    )
 
                 master_port = get_free_port(start=29500)
                 train_group = TrainWorkerGroup(
@@ -623,10 +720,9 @@ def main() -> int:
                 )
                 print_json("weights_checker_snapshot_before", snapshot_before)
 
-                synced_endpoints = perform_weight_sync(
+                synced_endpoints = perform_artifact_sync(
                     train_group,
                     rollout_group,
-                    update_mode=args.update_mode,
                     step=args.train_steps,
                     policy_version=args.policy_version,
                 )
@@ -650,6 +746,12 @@ def main() -> int:
                     raise RuntimeError(
                         "rollout weight_version did not match the requested policy version: "
                         f"{updated_weight_version!r} != {args.policy_version!r}"
+                    )
+                if not args.skip_inference:
+                    run_rollout_inference(
+                        synced_endpoint.url,
+                        args,
+                        label="rollout_generate_after_first_sync",
                     )
 
                 compare_error: str | None = None
@@ -677,10 +779,9 @@ def main() -> int:
                     snapshot_after_first_sync,
                 )
 
-                synced_endpoints = perform_weight_sync(
+                synced_endpoints = perform_artifact_sync(
                     train_group,
                     rollout_group,
-                    update_mode=args.update_mode,
                     step=args.train_steps,
                     policy_version=args.policy_version,
                 )
@@ -702,8 +803,14 @@ def main() -> int:
                     "weights_checker_compare_after_idempotent_sync",
                     compare_after_idempotent_sync,
                 )
+                if not args.skip_inference:
+                    run_rollout_inference(
+                        synced_endpoint.url,
+                        args,
+                        label="rollout_generate_after_idempotent_sync",
+                    )
 
-                print("SUCCESS: train -> rollout live weight sync verified.")
+                print("SUCCESS: train -> rollout artifact sync verified.")
                 return 0
             finally:
                 if train_group is not None:

@@ -5,11 +5,7 @@ from contextlib import AbstractContextManager
 
 from tensordict import TensorDict
 
-from openforge.policy.types import (
-    DistributedUpdateSession,
-    PolicyArtifactRef,
-    TensorUpdateSession,
-)
+from openforge.policy.types import PolicyArtifactRef
 from openforge.train.types import CheckpointInfo, TrainStepResult, TrainWorkerSpec
 
 __all__ = ["TrainBackend"]
@@ -70,26 +66,6 @@ class TrainBackend(ABC):
         policy_version: int,
     ) -> PolicyArtifactRef | None:
         """Publish a train checkpoint as an artifact reference for rollout loading."""
-
-    @abstractmethod
-    def push_tensor_update(
-        self,
-        session: TensorUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        """Push a direct tensor update into an already-open rollout session."""
-
-    @abstractmethod
-    def push_distributed_update(
-        self,
-        session: DistributedUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        """Push a direct distributed update into an already-open rollout session."""
 
     @abstractmethod
     def sleep(self) -> None:

@@ -7,12 +7,7 @@ import ray
 import requests
 
 from openforge.configs.rollout import RolloutEndpoint
-from openforge.policy.types import (
-    DistributedUpdateSession,
-    PolicyArtifactRef,
-    TensorUpdateSession,
-    WeightBucketMeta,
-)
+from openforge.policy.types import PolicyArtifactRef
 from openforge.rollout.runtime import RolloutRuntime
 from openforge.rollout.sglang.runtime import SGLangRuntime
 from openforge.rollout.sglang.spec import SGLangEngineSpec
@@ -75,60 +70,6 @@ class RolloutWorker:
         self._sync_runtime_state()
         return self.endpoint()
 
-    def begin_tensor_update(self, session: TensorUpdateSession) -> None:
-        self._runtime().begin_tensor_update(session)
-        self.policy_version = session.policy_version
-
-    def apply_tensor_bucket(
-        self,
-        *,
-        serialized_named_tensors: list[str],
-        load_format: str,
-        policy_version: int,
-    ) -> None:
-        self._runtime().apply_tensor_bucket(
-            serialized_named_tensors=serialized_named_tensors,
-            load_format=load_format,
-            policy_version=policy_version,
-        )
-        self.policy_version = policy_version
-
-    def finish_tensor_update(self, session: TensorUpdateSession) -> RolloutEndpoint:
-        self._runtime().finish_tensor_update(session)
-        self._sync_runtime_state()
-        return self.endpoint()
-
-    def begin_distributed_update(self, session: DistributedUpdateSession) -> None:
-        self._runtime().begin_distributed_update(session)
-
-    def apply_distributed_bucket(
-        self,
-        *,
-        bucket: WeightBucketMeta,
-        policy_version: int,
-        load_format: str,
-        group_name: str,
-    ) -> None:
-        self._runtime().apply_distributed_bucket(
-            bucket=bucket,
-            policy_version=policy_version,
-            load_format=load_format,
-            group_name=group_name,
-        )
-        self.policy_version = policy_version
-
-    def finish_distributed_update(
-        self,
-        session: DistributedUpdateSession,
-    ) -> RolloutEndpoint:
-        self._runtime().finish_distributed_update(session)
-        self.policy_version = session.policy_version
-        self._sync_runtime_state()
-        return self.endpoint()
-
-    def abort_update(self, *, session_id: str) -> None:
-        self._runtime().abort_update(session_id=session_id)
-
     def shutdown(self) -> None:
         runtime = self.runtime
         if runtime is not None:
@@ -174,26 +115,6 @@ class RolloutWorker:
             "ep_size": parallelism.expert_parallel_size,
         }
 
-        if self.engine.role in {"prefill", "decode"}:
-            server_args["disaggregation_mode"] = self.engine.role
-
-        if self.engine.role == "prefill":
-            decode_parallelism = self._role_parallelism("decode")
-            assert self.bootstrap_port is not None
-            server_args["disaggregation_bootstrap_port"] = self.bootstrap_port
-            server_args["disaggregation_decode_tp"] = (
-                decode_parallelism.tensor_parallel_size
-            )
-            server_args["disaggregation_decode_dp"] = (
-                decode_parallelism.data_parallel_size
-            )
-
-        if self.engine.role == "decode":
-            prefill_parallelism = self._role_parallelism("prefill")
-            server_args["disaggregation_prefill_pp"] = (
-                prefill_parallelism.pipeline_parallel_size
-            )
-
         return SGLangEngineSpec(
             engine_id=self.engine.engine_id,
             name=self._engine_name(),
@@ -225,9 +146,3 @@ class RolloutWorker:
 
     def _engine_name(self) -> str:
         return f"{self.engine.group_name}-{self.engine.replica_index}"
-
-    def _role_parallelism(self, role: str):
-        for group in self.spec.cfg.rollout.engines:
-            if group.role == role:
-                return group.parallelism
-        raise ValueError(f"Missing rollout role {role} required for pd topology")

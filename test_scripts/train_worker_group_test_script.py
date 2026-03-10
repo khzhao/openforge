@@ -16,11 +16,7 @@ import torch
 from tensordict import TensorDict
 
 from openforge.configs.models import OpenForgeConfig
-from openforge.policy.types import (
-    DistributedUpdateSession,
-    PolicyArtifactRef,
-    TensorUpdateSession,
-)
+from openforge.policy.types import PolicyArtifactRef
 from openforge.train.backend import TrainBackend
 from openforge.train.group import TrainWorkerGroup
 from openforge.train.types import (
@@ -232,26 +228,6 @@ class FakeBackend:
             path=f"/tmp/export_step_{step}_policy_{policy_version}.pt",
         )
 
-    def push_tensor_update(
-        self,
-        session: TensorUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        self.calls.append(("push_tensor_update", session.session_id, step, policy_version))
-
-    def push_distributed_update(
-        self,
-        session: DistributedUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        self.calls.append(
-            ("push_distributed_update", session.session_id, step, policy_version)
-        )
-
     def sleep(self) -> None:
         self.calls.append("sleep")
 
@@ -347,12 +323,6 @@ class FakeGroupWorker:
         self.export_policy_artifact = FakeRemoteMethod(
             lambda *, step, policy_version: artifact
         )
-        self.push_tensor_update = FakeRemoteMethod(
-            lambda session, *, step, policy_version: (rank, session, step, policy_version)
-        )
-        self.push_distributed_update = FakeRemoteMethod(
-            lambda session, *, step, policy_version: (rank, session, step, policy_version)
-        )
         self.sleep = FakeRemoteMethod(lambda: rank)
         self.wakeup = FakeRemoteMethod(lambda: rank)
         self.clear_memory = FakeRemoteMethod(lambda: rank)
@@ -368,24 +338,6 @@ def test_train_worker_local() -> None:
         master_addr="127.0.0.1",
         master_port=29599,
     )
-    tensor_session = TensorUpdateSession(
-        session_id="tensor-1",
-        policy_version=5,
-        load_format="flattened_bucket",
-        engine_ids=[0],
-    )
-    distributed_session = DistributedUpdateSession(
-        session_id="dist-1",
-        policy_version=6,
-        load_format="flattened_bucket",
-        engine_ids=[0],
-        master_addr="127.0.0.1",
-        master_port=29600,
-        group_name="dist-group",
-        world_size=2,
-        backend="gloo",
-        rank_offsets={0: 1},
-    )
 
     with mock.patch("openforge.train.worker.FSDP2Backend", FakeBackend):
         worker = TrainWorker()
@@ -394,8 +346,6 @@ def test_train_worker_local() -> None:
         checkpoint = worker.save_checkpoint(step=3, policy_version=11)
         restored = worker.load_checkpoint()
         artifact = worker.export_policy_artifact(step=9, policy_version=15)
-        worker.push_tensor_update(tensor_session, step=9, policy_version=15)
-        worker.push_distributed_update(distributed_session, step=9, policy_version=15)
         worker.sleep()
         worker.wakeup()
         worker.clear_memory()
@@ -541,14 +491,6 @@ def fake_export_policy_artifact(self: TrainWorker, *, step: int, policy_version:
     )
 
 
-def fake_push_tensor_update(self: TrainWorker, session, *, step: int, policy_version: int):
-    _ = session, step, policy_version
-
-
-def fake_push_distributed_update(self: TrainWorker, session, *, step: int, policy_version: int):
-    _ = session, step, policy_version
-
-
 def fake_sleep(self: TrainWorker) -> None:
     self._state = replace(self._state, sleeping=True)
 
@@ -646,26 +588,6 @@ def test_train_worker_group_creates_workers_and_placement_groups() -> None:
 def test_train_worker_group_ray(artifacts_dir: Path) -> None:
     cfg = make_config(world_size=4, cpus_per_worker=1)
     batches = [[make_batch(num_tokens=4 + rank)] for rank in range(4)]
-    tensor_session = TensorUpdateSession(
-        session_id="tensor-2",
-        policy_version=10,
-        load_format="flattened_bucket",
-        engine_ids=[0],
-        transport_metadata={"rollout_workers": [], "rollout_engines": []},
-    )
-    distributed_session = DistributedUpdateSession(
-        session_id="dist-2",
-        policy_version=11,
-        load_format="flattened_bucket",
-        engine_ids=[0],
-        master_addr="127.0.0.1",
-        master_port=29601,
-        group_name="dist-group-2",
-        world_size=2,
-        backend="gloo",
-        rank_offsets={0: 1},
-        transport_metadata={"rollout_workers": [], "rollout_engines": []},
-    )
 
     with ExitStack() as stack:
         stack.enter_context(mock.patch.object(TrainWorker, "initialize", fake_initialize))
@@ -674,8 +596,6 @@ def test_train_worker_group_ray(artifacts_dir: Path) -> None:
         stack.enter_context(mock.patch.object(TrainWorker, "save_checkpoint", fake_save_checkpoint))
         stack.enter_context(mock.patch.object(TrainWorker, "load_checkpoint", fake_load_checkpoint))
         stack.enter_context(mock.patch.object(TrainWorker, "export_policy_artifact", fake_export_policy_artifact))
-        stack.enter_context(mock.patch.object(TrainWorker, "push_tensor_update", fake_push_tensor_update))
-        stack.enter_context(mock.patch.object(TrainWorker, "push_distributed_update", fake_push_distributed_update))
         stack.enter_context(mock.patch.object(TrainWorker, "sleep", fake_sleep))
         stack.enter_context(mock.patch.object(TrainWorker, "wakeup", fake_wakeup))
         stack.enter_context(mock.patch.object(TrainWorker, "clear_memory", fake_clear_memory))
@@ -713,9 +633,6 @@ def test_train_worker_group_ray(artifacts_dir: Path) -> None:
 
                 artifact = group.export_policy_artifact(step=14, policy_version=35)
                 assert artifact.path.endswith("policy_35.pt")
-
-                group.push_tensor_update(tensor_session, step=14, policy_version=35)
-                group.push_distributed_update(distributed_session, step=15, policy_version=36)
                 group.sleep()
                 group.wakeup()
                 group.clear_memory()

@@ -62,6 +62,35 @@ class SGLangControlClient:
         version = payload.get("weight_version")
         return None if version is None else str(version)
 
+    def update_weights_from_disk(
+        self,
+        *,
+        model_path: str,
+        load_format: str | None = None,
+        flush_cache: bool = True,
+        abort_all_requests: bool = False,
+        weight_version: str | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        payload = {
+            "model_path": model_path,
+            "load_format": load_format,
+            "flush_cache": flush_cache,
+            "abort_all_requests": abort_all_requests,
+            "weight_version": weight_version,
+        }
+        _, body = self._request(
+            "POST",
+            "/update_weights_from_disk",
+            payload=payload,
+            timeout=timeout,
+        )
+        if not isinstance(body, dict):
+            raise RuntimeError(
+                "sglang /update_weights_from_disk did not return a JSON object"
+            )
+        return body
+
     def check_weights(
         self,
         *,
@@ -76,119 +105,6 @@ class SGLangControlClient:
         )
         if not isinstance(body, dict):
             raise RuntimeError("sglang /weights_checker did not return a JSON object")
-        return body
-
-    def init_weights_update_group(
-        self,
-        *,
-        master_address: str,
-        master_port: int,
-        rank_offset: int,
-        world_size: int,
-        group_name: str,
-        backend: str,
-        timeout: float = 30.0,
-    ) -> dict[str, Any]:
-        payload = {
-            "master_address": master_address,
-            "master_port": master_port,
-            "rank_offset": rank_offset,
-            "world_size": world_size,
-            "group_name": group_name,
-            "backend": backend,
-        }
-        _, body = self._request(
-            "POST",
-            "/init_weights_update_group",
-            payload=payload,
-            timeout=timeout,
-        )
-        if not isinstance(body, dict):
-            raise RuntimeError(
-                "sglang /init_weights_update_group did not return a JSON object"
-            )
-        return body
-
-    def destroy_weights_update_group(
-        self,
-        *,
-        group_name: str,
-        timeout: float = 30.0,
-    ) -> dict[str, Any]:
-        _, body = self._request(
-            "POST",
-            "/destroy_weights_update_group",
-            payload={"group_name": group_name},
-            timeout=timeout,
-        )
-        if not isinstance(body, dict):
-            raise RuntimeError(
-                "sglang /destroy_weights_update_group did not return a JSON object"
-            )
-        return body
-
-    def update_weights_from_distributed(
-        self,
-        *,
-        names: list[str],
-        dtypes: list[str],
-        shapes: list[list[int]],
-        group_name: str,
-        flush_cache: bool = True,
-        abort_all_requests: bool = False,
-        weight_version: str | None = None,
-        load_format: str | None = None,
-        timeout: float = 30.0,
-    ) -> dict[str, Any]:
-        payload = {
-            "names": names,
-            "dtypes": dtypes,
-            "shapes": shapes,
-            "group_name": group_name,
-            "flush_cache": flush_cache,
-            "abort_all_requests": abort_all_requests,
-            "weight_version": weight_version,
-            "load_format": load_format,
-        }
-        _, body = self._request(
-            "POST",
-            "/update_weights_from_distributed",
-            payload=payload,
-            timeout=timeout,
-        )
-        if not isinstance(body, dict):
-            raise RuntimeError(
-                "sglang /update_weights_from_distributed did not return a JSON object"
-            )
-        return body
-
-    def update_weights_from_tensor(
-        self,
-        *,
-        serialized_named_tensors: list[str],
-        load_format: str | None = None,
-        flush_cache: bool = True,
-        abort_all_requests: bool = False,
-        weight_version: str | None = None,
-        timeout: float = 30.0,
-    ) -> dict[str, Any]:
-        payload = {
-            "serialized_named_tensors": serialized_named_tensors,
-            "load_format": load_format,
-            "flush_cache": flush_cache,
-            "abort_all_requests": abort_all_requests,
-            "weight_version": weight_version,
-        }
-        _, body = self._request(
-            "POST",
-            "/update_weights_from_tensor",
-            payload=payload,
-            timeout=timeout,
-        )
-        if not isinstance(body, dict):
-            raise RuntimeError(
-                "sglang /update_weights_from_tensor did not return a JSON object"
-            )
         return body
 
     def pause_generation(

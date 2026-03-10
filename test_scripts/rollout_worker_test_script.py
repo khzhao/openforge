@@ -10,12 +10,7 @@ from typing import Any
 from unittest import mock
 
 from openforge.configs.models import OpenForgeConfig
-from openforge.policy.types import (
-    DistributedUpdateSession,
-    PolicyArtifactRef,
-    TensorUpdateSession,
-    WeightBucketMeta,
-)
+from openforge.policy.types import PolicyArtifactRef
 from openforge.rollout.sglang.client import SGLangControlClient
 from openforge.rollout.sglang.runtime import SGLangRuntime
 from openforge.rollout.sglang.spec import SGLangEngineSpec
@@ -27,71 +22,7 @@ from script_test_utils import assert_raises, run_named_tests
 
 def make_config(
     checkpoints_dir: str,
-    *,
-    engine_topology: str = "regular",
 ) -> OpenForgeConfig:
-    rollout_engines: list[dict[str, Any]]
-    if engine_topology == "pd":
-        rollout_engines = [
-            {
-                "name": "prefill",
-                "role": "prefill",
-                "replicas": 1,
-                "gpus_per_engine": 1,
-                "cpus_per_engine": 0,
-                "parallelism": {
-                    "data_parallel_size": 1,
-                    "pipeline_parallel_size": 1,
-                    "tensor_parallel_size": 1,
-                    "context_parallel_size": 1,
-                    "expert_parallel_size": 1,
-                },
-                "placement": {
-                    "node_pool": "default",
-                    "strategy": "PACK",
-                },
-            },
-            {
-                "name": "decode",
-                "role": "decode",
-                "replicas": 1,
-                "gpus_per_engine": 1,
-                "cpus_per_engine": 0,
-                "parallelism": {
-                    "data_parallel_size": 1,
-                    "pipeline_parallel_size": 1,
-                    "tensor_parallel_size": 1,
-                    "context_parallel_size": 1,
-                    "expert_parallel_size": 1,
-                },
-                "placement": {
-                    "node_pool": "default",
-                    "strategy": "PACK",
-                },
-            },
-        ]
-    else:
-        rollout_engines = [
-            {
-                "name": "regular",
-                "role": "regular",
-                "replicas": 1,
-                "gpus_per_engine": 1,
-                "cpus_per_engine": 0,
-                "parallelism": {
-                    "data_parallel_size": 1,
-                    "pipeline_parallel_size": 1,
-                    "tensor_parallel_size": 1,
-                    "context_parallel_size": 1,
-                    "expert_parallel_size": 1,
-                },
-                "placement": {
-                    "node_pool": "default",
-                    "strategy": "PACK",
-                },
-            }
-        ]
-
     return OpenForgeConfig.model_validate(
         {
             "data": {"backend": "test"},
@@ -175,8 +106,27 @@ def make_config(
                     "no_stop_trim": False,
                     "spaces_between_words": True,
                 },
-                "engine_topology": engine_topology,
-                "engines": rollout_engines,
+                "engine_topology": "regular",
+                "engines": [
+                    {
+                        "name": "regular",
+                        "role": "regular",
+                        "replicas": 1,
+                        "gpus_per_engine": 1,
+                        "cpus_per_engine": 0,
+                        "parallelism": {
+                            "data_parallel_size": 1,
+                            "pipeline_parallel_size": 1,
+                            "tensor_parallel_size": 1,
+                            "context_parallel_size": 1,
+                            "expert_parallel_size": 1,
+                        },
+                        "placement": {
+                            "node_pool": "default",
+                            "strategy": "PACK",
+                        },
+                    }
+                ],
             },
         }
     )
@@ -189,13 +139,6 @@ class FakeRuntime:
         self.spec = spec
         self.started = False
         self.stopped = False
-        self.tensor_begin_calls: list[Any] = []
-        self.tensor_apply_calls: list[Any] = []
-        self.tensor_finish_calls: list[Any] = []
-        self.dist_begin_calls: list[Any] = []
-        self.dist_apply_calls: list[Any] = []
-        self.dist_finish_calls: list[Any] = []
-        self.abort_calls: list[str] = []
         self.load_calls: list[Any] = []
         FakeRuntime.created.append(self)
 
@@ -250,31 +193,6 @@ class FakeRuntime:
         self.spec.model_path = artifact.path
         self.spec.policy_version = artifact.policy_version
 
-    def begin_tensor_update(self, session: TensorUpdateSession) -> None:
-        self.tensor_begin_calls.append(session)
-
-    def apply_tensor_bucket(self, **kwargs: Any) -> None:
-        self.tensor_apply_calls.append(kwargs)
-        self.spec.policy_version = kwargs["policy_version"]
-
-    def finish_tensor_update(self, session: TensorUpdateSession) -> None:
-        self.tensor_finish_calls.append(session)
-        self.spec.policy_version = session.policy_version
-
-    def begin_distributed_update(self, session: DistributedUpdateSession) -> None:
-        self.dist_begin_calls.append(session)
-
-    def apply_distributed_bucket(self, **kwargs: Any) -> None:
-        self.dist_apply_calls.append(kwargs)
-        self.spec.policy_version = kwargs["policy_version"]
-
-    def finish_distributed_update(self, session: DistributedUpdateSession) -> None:
-        self.dist_finish_calls.append(session)
-        self.spec.policy_version = session.policy_version
-
-    def abort_update(self, *, session_id: str) -> None:
-        self.abort_calls.append(session_id)
-
 
 def make_spec(*, port: int = 32000, model_path: str = "/tmp/model") -> SGLangEngineSpec:
     return SGLangEngineSpec(
@@ -316,120 +234,7 @@ def test_rollout_worker_initialize_and_load_artifact() -> None:
     assert updated.policy_version == 7
     assert updated.model_path == "/tmp/policy.pt"
 
-
-def test_rollout_worker_applies_tensor_and_distributed_sessions() -> None:
-    FakeRuntime.created.clear()
-    with TemporaryDirectory(prefix="openforge_rollout_worker_") as temp_dir:
-        cfg = make_config(temp_dir)
-        engine = cfg.rollout.resolve(cfg.cluster).engines[0]
-        spec = RolloutWorkerSpec(
-            cfg=cfg,
-            engine=engine,
-            host="10.0.0.9",
-            port=30000,
-        )
-        worker = RolloutWorker()
-        tensor_session = TensorUpdateSession(
-            session_id="tensor-1",
-            policy_version=5,
-            load_format="flattened_bucket",
-            engine_ids=[engine.engine_id],
-        )
-        dist_session = DistributedUpdateSession(
-            session_id="dist-1",
-            policy_version=6,
-            load_format="flattened_bucket",
-            engine_ids=[engine.engine_id],
-            master_addr="10.0.0.2",
-            master_port=41234,
-            group_name="rollout-sync-6",
-            world_size=2,
-            backend="gloo",
-            rank_offsets={engine.engine_id: 1},
-        )
-
-        with mock.patch.object(rollout_worker_module, "SGLangRuntime", FakeRuntime):
-            worker.initialize(spec)
-            worker.begin_tensor_update(tensor_session)
-            worker.apply_tensor_bucket(
-                serialized_named_tensors=["bucket-a"],
-                load_format="flattened_bucket",
-                policy_version=5,
-            )
-            tensor_endpoint = worker.finish_tensor_update(tensor_session)
-
-            worker.begin_distributed_update(dist_session)
-            worker.apply_distributed_bucket(
-                bucket=WeightBucketMeta(
-                    names=["w1"],
-                    dtypes=["float16"],
-                    shapes=[[2, 3]],
-                ),
-                policy_version=6,
-                load_format="flattened_bucket",
-                group_name="rollout-sync-6",
-            )
-            dist_endpoint = worker.finish_distributed_update(dist_session)
-            worker.abort_update(session_id="dist-1")
-
-    runtime = FakeRuntime.created[0]
-    assert runtime.tensor_begin_calls[0].session_id == "tensor-1"
-    assert runtime.tensor_apply_calls[0]["policy_version"] == 5
-    assert tensor_endpoint.policy_version == 5
-    assert runtime.dist_begin_calls[0].session_id == "dist-1"
-    assert runtime.dist_apply_calls[0]["group_name"] == "rollout-sync-6"
-    assert dist_endpoint.policy_version == 6
-    assert runtime.abort_calls == ["dist-1"]
-
-
-def test_rollout_worker_builds_pd_specs_and_checks_health() -> None:
-    with TemporaryDirectory(prefix="openforge_rollout_worker_pd_") as temp_dir:
-        cfg = make_config(temp_dir, engine_topology="pd")
-        resolved = cfg.rollout.resolve(cfg.cluster).engines
-        prefill_engine = next(engine for engine in resolved if engine.role == "prefill")
-        decode_engine = next(engine for engine in resolved if engine.role == "decode")
-
-        prefill_worker = RolloutWorker()
-        prefill_worker.spec = RolloutWorkerSpec(
-            cfg=cfg,
-            engine=prefill_engine,
-            host="10.0.0.11",
-            port=31000,
-            bootstrap_port=31001,
-            policy_version=7,
-        )
-        prefill_worker.engine = prefill_engine
-        prefill_worker.host = "10.0.0.11"
-        prefill_worker.port = 31000
-        prefill_worker.bootstrap_port = 31001
-        prefill_worker.model_path = "prefill-model"
-        prefill_worker.policy_version = 7
-        prefill_spec = prefill_worker._build_runtime_spec()
-
-        decode_worker = RolloutWorker()
-        decode_worker.spec = RolloutWorkerSpec(
-            cfg=cfg,
-            engine=decode_engine,
-            host="10.0.0.12",
-            port=32000,
-            bootstrap_port=None,
-            policy_version=None,
-        )
-        decode_worker.engine = decode_engine
-        decode_worker.host = "10.0.0.12"
-        decode_worker.port = 32000
-        decode_worker.bootstrap_port = None
-        decode_worker.model_path = "decode-model"
-        decode_worker.policy_version = None
-        decode_spec = decode_worker._build_runtime_spec()
-
-    assert prefill_spec.server_args["disaggregation_mode"] == "prefill"
-    assert prefill_spec.server_args["disaggregation_bootstrap_port"] == 31001
-    assert prefill_spec.server_args["disaggregation_decode_tp"] == 1
-    assert prefill_spec.server_args["disaggregation_decode_dp"] == 1
-    assert decode_spec.server_args["disaggregation_mode"] == "decode"
-    assert decode_spec.server_args["disaggregation_prefill_pp"] == 1
-
+def test_rollout_worker_builds_regular_specs_and_checks_health() -> None:
     regular_cfg = make_config("/tmp")
     regular_engine = regular_cfg.rollout.resolve(regular_cfg.cluster).engines[0]
     worker = RolloutWorker()
@@ -445,18 +250,17 @@ def test_rollout_worker_builds_pd_specs_and_checks_health() -> None:
     worker.bootstrap_port = None
     worker.model_path = "regular-model"
     worker.policy_version = None
-    worker.runtime = None
+    regular_spec = worker._build_runtime_spec()
 
+    assert regular_spec.role == "regular"
+    assert regular_spec.server_args["dp_size"] == 1
+    assert regular_spec.server_args["tp_size"] == 1
+
+    worker.runtime = None
     assert_raises(
         RuntimeError,
         worker._runtime,
         match="has not been initialized",
-    )
-    assert_raises(
-        ValueError,
-        worker._role_parallelism,
-        "decode",
-        match="Missing rollout role decode",
     )
 
     worker.runtime = mock.Mock(
@@ -509,12 +313,8 @@ def run_suite(artifacts_dir: Path) -> int:
                 test_rollout_worker_initialize_and_load_artifact,
             ),
             (
-                "rollout_worker_applies_tensor_and_distributed_sessions",
-                test_rollout_worker_applies_tensor_and_distributed_sessions,
-            ),
-            (
-                "rollout_worker_builds_pd_specs_and_checks_health",
-                test_rollout_worker_builds_pd_specs_and_checks_health,
+                "rollout_worker_builds_regular_specs_and_checks_health",
+                test_rollout_worker_builds_regular_specs_and_checks_health,
             ),
         ],
         summary_label="RolloutWorker",

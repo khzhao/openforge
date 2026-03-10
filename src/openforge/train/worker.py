@@ -6,11 +6,7 @@ from typing import Sequence
 
 from tensordict import TensorDict
 
-from openforge.policy.types import (
-    DistributedUpdateSession,
-    PolicyArtifactRef,
-    TensorUpdateSession,
-)
+from openforge.policy.types import PolicyArtifactRef
 from openforge.train.fsdp2.backend import FSDP2Backend
 from openforge.train.types import (
     CheckpointInfo,
@@ -127,32 +123,6 @@ class TrainWorker:
                 f"PolicyArtifactRef | None, got {type(artifact).__name__}"
             )
         return artifact
-
-    def push_tensor_update(
-        self,
-        session: TensorUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        self.backend.push_tensor_update(
-            session,
-            step=step,
-            policy_version=policy_version,
-        )
-
-    def push_distributed_update(
-        self,
-        session: DistributedUpdateSession,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> None:
-        self.backend.push_distributed_update(
-            session,
-            step=step,
-            policy_version=policy_version,
-        )
 
     def sleep(self) -> None:
         self.backend.sleep()

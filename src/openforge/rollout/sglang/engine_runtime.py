@@ -5,6 +5,7 @@ import os
 import time
 from collections.abc import Callable
 from multiprocessing.process import BaseProcess
+from pathlib import Path
 from typing import Any
 
 from .client import SGLangControlClient
@@ -99,6 +100,34 @@ class SGLangEngineRuntime:
     def get_weight_version(self) -> str | None:
         return self.client.get_weight_version(timeout=self.request_timeout_seconds)
 
+    def update_weights_from_disk(
+        self,
+        *,
+        model_path: str,
+        load_format: str | None = None,
+        flush_cache: bool = True,
+        abort_all_requests: bool = False,
+        weight_version: str | None = None,
+    ) -> dict[str, Any]:
+        payload = self.client.update_weights_from_disk(
+            model_path=model_path,
+            load_format=load_format,
+            flush_cache=flush_cache,
+            abort_all_requests=abort_all_requests,
+            weight_version=weight_version,
+            timeout=max(self.request_timeout_seconds, 30.0),
+        )
+        self.spec.model_path = model_path
+        self.spec.server_args["model_path"] = model_path
+        self.spec.server_args["served_model_name"] = Path(model_path).name
+        if weight_version is not None:
+            try:
+                self.spec.policy_version = int(weight_version)
+                self.spec.server_args["weight_version"] = weight_version
+            except ValueError:
+                pass
+        return payload
+
     def check_weights(self, *, action: str) -> dict[str, Any]:
         return self.client.check_weights(
             action=action,
@@ -116,80 +145,6 @@ class SGLangEngineRuntime:
 
     def continue_generation(self) -> Any:
         return self.client.continue_generation(timeout=self.request_timeout_seconds)
-
-    def init_weights_update_group(
-        self,
-        *,
-        master_address: str,
-        master_port: int,
-        rank_offset: int,
-        world_size: int,
-        group_name: str,
-        backend: str,
-    ) -> dict[str, Any]:
-        return self.client.init_weights_update_group(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=rank_offset,
-            world_size=world_size,
-            group_name=group_name,
-            backend=backend,
-            timeout=max(self.request_timeout_seconds, 30.0),
-        )
-
-    def destroy_weights_update_group(self, *, group_name: str) -> dict[str, Any]:
-        return self.client.destroy_weights_update_group(
-            group_name=group_name,
-            timeout=max(self.request_timeout_seconds, 30.0),
-        )
-
-    def update_weights_from_distributed(
-        self,
-        *,
-        names: list[str],
-        dtypes: list[str],
-        shapes: list[list[int]],
-        group_name: str,
-        flush_cache: bool = True,
-        abort_all_requests: bool = False,
-        weight_version: str | None = None,
-        load_format: str | None = None,
-    ) -> dict[str, Any]:
-        policy_version = self._require_policy_version(weight_version)
-        payload = self.client.update_weights_from_distributed(
-            names=names,
-            dtypes=dtypes,
-            shapes=shapes,
-            group_name=group_name,
-            flush_cache=flush_cache,
-            abort_all_requests=abort_all_requests,
-            weight_version=weight_version,
-            load_format=load_format,
-            timeout=max(self.request_timeout_seconds, 30.0),
-        )
-        self.spec.policy_version = policy_version
-        return payload
-
-    def update_weights_from_tensor(
-        self,
-        *,
-        serialized_named_tensors: list[str],
-        load_format: str | None = None,
-        flush_cache: bool = True,
-        abort_all_requests: bool = False,
-        weight_version: str | None = None,
-    ) -> dict[str, Any]:
-        policy_version = self._require_policy_version(weight_version)
-        payload = self.client.update_weights_from_tensor(
-            serialized_named_tensors=serialized_named_tensors,
-            load_format=load_format,
-            flush_cache=flush_cache,
-            abort_all_requests=abort_all_requests,
-            weight_version=weight_version,
-            timeout=max(self.request_timeout_seconds, 30.0),
-        )
-        self.spec.policy_version = policy_version
-        return payload
 
     def _wait_until_ready(self) -> None:
         deadline = time.monotonic() + HEALTHCHECK_TIMEOUT_SECONDS
@@ -221,14 +176,3 @@ class SGLangEngineRuntime:
         raise TimeoutError(
             f"rollout engine {self.spec.name} never acknowledged flush_cache"
         )
-
-    @staticmethod
-    def _require_policy_version(weight_version: str | None) -> int:
-        if weight_version is None:
-            raise ValueError("weight_version is required for SGLang weight updates")
-        try:
-            return int(weight_version)
-        except ValueError as exc:
-            raise ValueError(
-                f"weight_version must be an integer string, got {weight_version!r}"
-            ) from exc
