@@ -5,11 +5,16 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any
 
+from openforge.configs.models import OpenForgeConfig
+from openforge.configs.topology import ParallelismConfig
 from openforge.policy.types import PolicyArtifactRef
 
 from .client import SGLangControlClient
-from .spec import SGLangEngineSpec
-from .utils import kill_sglang_process_tree, launch_sglang_process
+from .utils import (
+    generate_sglang_server_args,
+    kill_sglang_process_tree,
+    launch_sglang_process,
+)
 
 HEALTHCHECK_TIMEOUT_SECONDS = 300.0
 HEALTHCHECK_POLL_INTERVAL_SECONDS = 1.0
@@ -21,19 +26,67 @@ class SGLangEngineRuntime:
 
     def __init__(
         self,
-        spec: SGLangEngineSpec,
         *,
+        name: str,
+        host: str,
+        port: int,
+        model_path: str,
+        parallelism: ParallelismConfig | None = None,
+        server_args: dict[str, Any] | None = None,
+        enable_memory_saver: bool = False,
+        policy_version: int | None = None,
         request_timeout_seconds: float = 5.0,
     ) -> None:
-        self.spec = spec
+        self.name = name
+        self.host = host
+        self.port = port
+        self.model_path = model_path
+        self.parallelism = parallelism or ParallelismConfig()
+        self.server_args = dict(server_args or {})
+        self.enable_memory_saver = enable_memory_saver
+        self.policy_version = policy_version
+        self.client = SGLangControlClient(self.url)
         self.request_timeout_seconds = request_timeout_seconds
         self.process: BaseProcess | None = None
-        self.client = SGLangControlClient(spec.url)
 
-    def start(self) -> None:
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    def start(
+        self,
+        *,
+        cfg: OpenForgeConfig,
+        engine_replica_index: int,
+        num_nodes: int,
+        node_rank: int,
+        dist_init_addr: str,
+        nccl_port: int,
+        colocated: bool = False,
+        override_server_args: dict[str, Any] | None = None,
+    ) -> None:
         if self.process is not None and self.process.is_alive():
             return
-        self.process = launch_sglang_process(dict(self.spec.server_args))
+        launch_server_args = dict(self.server_args)
+        if override_server_args is not None:
+            launch_server_args.update(override_server_args)
+        self.process = launch_sglang_process(
+            generate_sglang_server_args(
+                cfg,
+                engine_replica_index,
+                colocated,
+                model_path=self.model_path,
+                host=self.host,
+                port=self.port,
+                num_nodes=num_nodes,
+                node_rank=node_rank,
+                dist_init_addr=dist_init_addr,
+                nccl_port=nccl_port,
+                parallelism_config=self.parallelism,
+                enable_memory_saver=self.enable_memory_saver,
+                override_server_args=launch_server_args or None,
+            )
+        )
         self._wait_until_ready()
 
     def stop(self) -> None:
@@ -92,13 +145,10 @@ class SGLangEngineRuntime:
             weight_version=weight_version,
             timeout=max(self.request_timeout_seconds, 30.0),
         )
-        self.spec.model_path = model_path
-        self.spec.server_args["model_path"] = model_path
-        self.spec.server_args["served_model_name"] = Path(model_path).name
+        self.model_path = model_path
         if weight_version is not None:
             try:
-                self.spec.policy_version = int(weight_version)
-                self.spec.server_args["weight_version"] = weight_version
+                self.policy_version = int(weight_version)
             except ValueError:
                 pass
         return payload
@@ -150,15 +200,13 @@ class SGLangEngineRuntime:
             process = self.process
             if process is not None and not process.is_alive():
                 raise RuntimeError(
-                    f"rollout engine {self.spec.name} exited before becoming healthy"
+                    f"rollout engine {self.name} exited before becoming healthy"
                 )
             if self.client.health_generate(timeout=self.request_timeout_seconds):
                 self._wait_for_flush_cache()
                 return
             time.sleep(HEALTHCHECK_POLL_INTERVAL_SECONDS)
-        raise TimeoutError(
-            f"rollout engine {self.spec.name} did not become healthy in time"
-        )
+        raise TimeoutError(f"rollout engine {self.name} did not become healthy in time")
 
     def _wait_for_flush_cache(self) -> None:
         deadline = time.monotonic() + HEALTHCHECK_TIMEOUT_SECONDS
@@ -166,11 +214,9 @@ class SGLangEngineRuntime:
             process = self.process
             if process is not None and not process.is_alive():
                 raise RuntimeError(
-                    f"rollout engine {self.spec.name} exited before cache flush"
+                    f"rollout engine {self.name} exited before cache flush"
                 )
             if self.client.flush_cache(timeout=self.request_timeout_seconds):
                 return
             time.sleep(HEALTHCHECK_POLL_INTERVAL_SECONDS)
-        raise TimeoutError(
-            f"rollout engine {self.spec.name} never acknowledged flush_cache"
-        )
+        raise TimeoutError(f"rollout engine {self.name} never acknowledged flush_cache")
