@@ -1,6 +1,7 @@
 # Copyright 2026 openforge
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import Field, model_validator
@@ -31,6 +32,7 @@ class ModelConfig(OpenForgeBaseModel):
     model_name_or_path: str
     tokenizer_name_or_path: str
     reference_model_name_or_path: str | None = None
+    attn_implementation: Literal["flash_attention_2", "eager", "sdpa"] = "sdpa"
 
 
 class OpenForgeConfig(OpenForgeBaseModel):

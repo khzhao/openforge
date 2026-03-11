@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Iterator
+from typing import Iterator, Literal
 
 import torch
 import torch.distributed as dist
@@ -75,9 +75,14 @@ class FSDP2Engine:
         # 3. Create or initialize the model + optimizer + scheduler
         model_name_or_path = self.cfg.model.model_name_or_path
         ref_model_name_or_path = self.cfg.model.reference_model_name_or_path
+        attn_implementation = self.cfg.model.attn_implementation
 
-        self.main_model = self._create_model(model_name_or_path, is_eval_only=False)
-        self.ref_model = self._create_model(ref_model_name_or_path, is_eval_only=True)
+        self.main_model = self._create_model(
+            model_name_or_path, attn_implementation, is_eval_only=False
+        )
+        self.ref_model = self._create_model(
+            ref_model_name_or_path, attn_implementation, is_eval_only=True
+        )
         self.optimizer = self._create_optimizer()
         self.scheduler = self._create_scheduler()
         self.grad_scaler = self._create_grad_scaler()
@@ -217,6 +222,7 @@ class FSDP2Engine:
     def _create_model(
         self,
         model_name_or_path: str | None,
+        attn_implementation: Literal["flash_attention_2", "eager", "sdpa"],
         is_eval_only: bool = False,
     ) -> FSDPModule | None:
         if model_name_or_path is None:
@@ -237,6 +243,7 @@ class FSDP2Engine:
         # 2. Create the model with the right parameters and set train/eval mode.
         model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
+            attn_implementation=attn_implementation,
             trust_remote_code=True,
         )
         if not is_eval_only and fsdp_cfg.gradient_checkpointing:
