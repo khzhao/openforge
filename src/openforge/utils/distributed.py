@@ -4,6 +4,8 @@ from datetime import timedelta
 from typing import Any
 
 import torch
+import torch.distributed as dist
+from packaging.version import parse as V
 from torch.distributed.distributed_c10d import (
     Backend,
     PrefixStore,
@@ -13,6 +15,26 @@ from torch.distributed.distributed_c10d import (
     default_pg_timeout,
     rendezvous,
 )
+
+GLOO_GROUP = None
+
+
+def init_gloo_group():
+    """Initialize Gloo group for distributed communication."""
+    global GLOO_GROUP
+    if GLOO_GROUP is None:
+        GLOO_GROUP = dist.new_group(backend="gloo")
+    return GLOO_GROUP
+
+
+def get_gloo_group():
+    """Get the Gloo group for distributed communication."""
+    global GLOO_GROUP
+    if GLOO_GROUP is None:
+        raise RuntimeError(
+            "Gloo group has not been initialized. Call _init_gloo_group() first."
+        )
+    return GLOO_GROUP
 
 
 # Copied from PyTorch to allow creating multiple main groups.
@@ -24,10 +46,10 @@ def init_process_group(
     world_size: int = -1,
     rank: int = -1,
     store: Store | None = None,
-    group_name: str | None = None,
+    group_name: str = None,
     pg_options: Any | None = None,
 ):
-    """Initialize a main process group."""
+    """Initialize a custom process group."""
     assert (store is None) or (init_method is None), (
         "Cannot specify both init_method and store."
     )
@@ -60,7 +82,7 @@ def init_process_group(
     # https://github.com/pytorch/pytorch/commit/a0c7029a75628cd5fa8df83c0de0ea98ee7fd844
     # We need to determine the appropriate parameter name based on PyTorch version
     pg_options_param_name = (
-        "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+        "backend_options" if V(torch.__version__) >= V("2.6") else "pg_options"
     )
     pg, _ = _new_process_group_helper(
         world_size,
@@ -74,4 +96,5 @@ def init_process_group(
     )
 
     _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
+
     return pg
