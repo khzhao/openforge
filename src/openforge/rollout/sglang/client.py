@@ -15,47 +15,21 @@ class SGLangControlClient:
         base_url: str,
         *,
         api_key: str | None = None,
-        admin_api_key: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.admin_api_key = admin_api_key
 
     def health_generate(self, *, timeout: float = 1.0) -> bool:
-        try:
-            status, _ = self._request(
-                "GET",
-                "/health_generate",
-                timeout=timeout,
-                raise_for_status=False,
-            )
-        except OSError:
-            return False
-        return status == HTTPStatus.OK
+        return self._ok("GET", "/health_generate", timeout=timeout)
 
     def flush_cache(self, *, timeout: float = 5.0) -> bool:
-        try:
-            status, _ = self._request(
-                "GET",
-                "/flush_cache",
-                timeout=timeout,
-                raise_for_status=False,
-            )
-        except OSError:
-            return False
-        return status == HTTPStatus.OK
+        return self._ok("GET", "/flush_cache", timeout=timeout)
 
     def get_model_info(self, *, timeout: float = 5.0) -> dict[str, Any]:
-        _, payload = self._request("GET", "/model_info", timeout=timeout)
-        if not isinstance(payload, dict):
-            raise RuntimeError("sglang /model_info did not return a JSON object")
-        return payload
+        return self._request_json_dict("GET", "/model_info", timeout=timeout)
 
     def get_server_info(self, *, timeout: float = 5.0) -> dict[str, Any]:
-        _, payload = self._request("GET", "/server_info", timeout=timeout)
-        if not isinstance(payload, dict):
-            raise RuntimeError("sglang /server_info did not return a JSON object")
-        return payload
+        return self._request_json_dict("GET", "/server_info", timeout=timeout)
 
     def get_weight_version(self, *, timeout: float = 5.0) -> str | None:
         payload = self.get_model_info(timeout=timeout)
@@ -68,15 +42,12 @@ class SGLangControlClient:
         payload: dict[str, Any],
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        _, body = self._request(
+        return self._request_json_dict(
             "POST",
             "/generate",
             payload=payload,
             timeout=timeout,
         )
-        if not isinstance(body, dict):
-            raise RuntimeError("sglang /generate did not return a JSON object")
-        return body
 
     def update_weights_from_disk(
         self,
@@ -95,17 +66,12 @@ class SGLangControlClient:
             "abort_all_requests": abort_all_requests,
             "weight_version": weight_version,
         }
-        _, body = self._request(
+        return self._request_json_dict(
             "POST",
             "/update_weights_from_disk",
             payload=payload,
             timeout=timeout,
         )
-        if not isinstance(body, dict):
-            raise RuntimeError(
-                "sglang /update_weights_from_disk did not return a JSON object"
-            )
-        return body
 
     def check_weights(
         self,
@@ -113,14 +79,36 @@ class SGLangControlClient:
         action: str,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        _, body = self._request(
+        return self._request_json_dict(
             "POST",
             "/weights_checker",
             payload={"action": action},
             timeout=timeout,
         )
+
+    def _ok(self, method: str, path: str, *, timeout: float) -> bool:
+        try:
+            status, _ = self._request(
+                method,
+                path,
+                timeout=timeout,
+                raise_for_status=False,
+            )
+        except OSError:
+            return False
+        return status == HTTPStatus.OK
+
+    def _request_json_dict(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        timeout: float,
+    ) -> dict[str, Any]:
+        _, body = self._request(method, path, payload=payload, timeout=timeout)
         if not isinstance(body, dict):
-            raise RuntimeError("sglang /weights_checker did not return a JSON object")
+            raise RuntimeError(f"sglang {path} did not return a JSON object")
         return body
 
     def _request(
@@ -132,7 +120,7 @@ class SGLangControlClient:
         timeout: float,
         raise_for_status: bool = True,
     ) -> tuple[int, Any]:
-        headers = self._headers(path)
+        headers = self._headers()
         request_kwargs: dict[str, Any] = {
             "headers": headers,
             "timeout": timeout,
@@ -159,13 +147,9 @@ class SGLangControlClient:
                 ) from exc
         return response.status_code, self._decode_body(raw_body)
 
-    def _headers(self, path: str) -> dict[str, str]:
+    def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
-        token = (
-            self.api_key
-            if path == "/health_generate"
-            else (self.admin_api_key or self.api_key)
-        )
+        token = self.api_key
         if token is None:
             return headers
         headers["Authorization"] = f"Bearer {token}"
