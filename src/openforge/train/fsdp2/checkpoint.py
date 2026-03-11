@@ -284,7 +284,7 @@ def save_backend_checkpoint(
     save_optimizer: bool = True,
 ) -> CheckpointInfo:
     """Save a checkpoint for an initialized FSDP2 engine."""
-    checkpoints_dir = Path(backend.cfg.train.checkpoints_dir)
+    checkpoints_dir = Path(backend.cfg.train.checkpoints)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     path = checkpoints_dir / f"step_{step:08d}"
     save_checkpoint(
@@ -313,7 +313,7 @@ def load_backend_checkpoint(
     load_optimizer: bool = True,
 ) -> CheckpointInfo | None:
     """Load a checkpoint for an initialized FSDP2 engine if one exists."""
-    checkpoints_dir = Path(backend.cfg.train.checkpoints_dir)
+    checkpoints_dir = Path(backend.cfg.train.checkpoints)
     path = _resolve_checkpoint_path(checkpoints_dir, latest=latest, step=step)
     if path is None:
         return None

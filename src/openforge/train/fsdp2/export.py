@@ -27,7 +27,7 @@ def export_policy_artifact(
     if backend.rank != 0:
         return None
 
-    checkpoints_dir = Path(backend.cfg.train.checkpoints_dir)
+    checkpoints_dir = Path(backend.cfg.train.checkpoints)
     artifact_dir = checkpoints_dir / (
         f"policy_step_{step:08d}.version_{policy_version:08d}"
     )

@@ -78,7 +78,6 @@ class ResolvedTrainWorker:
     """Concrete per-rank worker allocation derived from TrainConfig."""
 
     rank: int
-    node_pool: str
     cpus: int
     placement: PlacementConfig
 
@@ -87,10 +86,9 @@ class ResolvedTrainWorker:
 class ResolvedTrainTopology:
     """Concrete training world expansion for runtime code."""
 
-    node_pool: str
     placement: PlacementConfig
     cpus_per_worker: int
-    parallelism: ParallelismConfig
+    parallel: ParallelismConfig
     num_nodes: int
     num_gpus_per_node: int
     num_cpus_per_node: int
@@ -113,15 +111,15 @@ class TrainConfig(OpenForgeBaseModel):
     """Configuration for the training process."""
 
     backend: Literal["fsdp2", "megatron"]
-    backend_config: FSDP2Config | MegatronConfig
+    config: FSDP2Config | MegatronConfig
 
     global_batch_size: int
     mini_batch_size: int
     micro_batch_size: int
-    checkpoints_dir: str
+    checkpoints: str
 
     cpus_per_worker: int
-    parallelism: ParallelismConfig
+    parallel: ParallelismConfig
     placement: PlacementConfig
 
     @model_validator(mode="after")
@@ -140,61 +138,56 @@ class TrainConfig(OpenForgeBaseModel):
             raise ValueError("cpus_per_worker must be >= 0")
 
         if self.backend == "fsdp2":
-            if not isinstance(self.backend_config, FSDP2Config):
+            if not isinstance(self.config, FSDP2Config):
                 raise ValueError(
-                    "backend_config must be FSDP2Config when backend is fsdp2"
+                    "train.config must be FSDP2Config when backend is fsdp2"
                 )
             if (
-                self.parallelism.pipeline_parallel_size > 1
-                or self.parallelism.tensor_parallel_size > 1
-                or self.parallelism.context_parallel_size > 1
-                or self.parallelism.expert_parallel_size > 1
+                self.parallel.pipeline_parallel_size > 1
+                or self.parallel.tensor_parallel_size > 1
+                or self.parallel.context_parallel_size > 1
+                or self.parallel.expert_parallel_size > 1
             ):
                 raise ValueError(
                     "FSDP2 does not support pipeline, tensor, context, or expert parallelism"
                 )
 
-        if self.backend == "megatron" and not isinstance(
-            self.backend_config, MegatronConfig
-        ):
+        if self.backend == "megatron" and not isinstance(self.config, MegatronConfig):
             raise ValueError(
-                "backend_config must be MegatronConfig when backend is megatron"
+                "train.config must be MegatronConfig when backend is megatron"
             )
         return self
 
     def resolve(self, cluster: ClusterConfig) -> ResolvedTrainTopology:
-        pool = cluster.get_pool(self.placement.node_pool)
         total_gpus = self.total_gpus
         total_cpus = self.total_cpus
 
-        if total_gpus > pool.total_gpus:
+        if total_gpus > cluster.total_gpus:
             raise ValueError(
-                f"train topology requests {total_gpus} GPUs from node pool "
-                f"{pool.node_pool}, but only {pool.total_gpus} are available"
+                "train topology requests "
+                f"{total_gpus} GPUs, but only {cluster.total_gpus} are available"
             )
-        if total_cpus > pool.total_cpus:
+        if total_cpus > cluster.total_cpus:
             raise ValueError(
-                f"train topology requests {total_cpus} CPUs from node pool "
-                f"{pool.node_pool}, but only {pool.total_cpus} are available"
+                "train topology requests "
+                f"{total_cpus} CPUs, but only {cluster.total_cpus} are available"
             )
 
         workers = [
             ResolvedTrainWorker(
                 rank=rank,
-                node_pool=pool.node_pool,
                 cpus=self.cpus_per_worker,
                 placement=self.placement,
             )
-            for rank in range(self.parallelism.world_size)
+            for rank in range(self.parallel.world_size)
         ]
         return ResolvedTrainTopology(
-            node_pool=pool.node_pool,
             placement=self.placement,
             cpus_per_worker=self.cpus_per_worker,
-            parallelism=self.parallelism,
-            num_nodes=pool.num_nodes,
-            num_gpus_per_node=pool.num_gpus_per_node,
-            num_cpus_per_node=pool.num_cpus_per_node,
+            parallel=self.parallel,
+            num_nodes=cluster.num_nodes,
+            num_gpus_per_node=cluster.gpus_per_node,
+            num_cpus_per_node=cluster.cpus_per_node,
             workers=workers,
         )
 
@@ -204,7 +197,7 @@ class TrainConfig(OpenForgeBaseModel):
 
     @property
     def num_workers(self) -> int:
-        return self.parallelism.world_size
+        return self.parallel.world_size
 
     @property
     def total_gpus(self) -> int:

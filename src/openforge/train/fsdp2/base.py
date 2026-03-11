@@ -66,8 +66,8 @@ class FSDP2Engine:
             f"World size mismatch: {dist.get_world_size()} != {self.world_size}"
         )
         self.device_mesh = create_device_mesh(
-            dp_size=self.cfg.train.parallelism.data_parallel_size,
-            fsdp_size=self.cfg.train.parallelism.fsdp_parallel_size,
+            dp_size=self.cfg.train.parallel.data_parallel_size,
+            fsdp_size=self.cfg.train.parallel.fsdp_parallel_size,
             world_size=self.world_size,
             device_type=self.device.type,
         )
@@ -149,7 +149,7 @@ class FSDP2Engine:
             loss.backward()
 
     def step_optimizer(self) -> dict[str, float]:
-        optim_cfg = self.cfg.train.backend_config.optim
+        optim_cfg = self.cfg.train.config.optim
 
         # 1. Unscale the gradients if necessary
         if self.use_grad_scaler:
@@ -204,7 +204,7 @@ class FSDP2Engine:
     ) -> torch.Tensor:
         with torch.autocast(
             device_type=self.device.type,
-            dtype=get_torch_dtype(self.cfg.train.backend_config.amp.precision),
+            dtype=get_torch_dtype(self.cfg.train.config.amp.precision),
             enabled=self.amp_enabled,
         ):
             logits = model(
@@ -223,7 +223,7 @@ class FSDP2Engine:
             return None
 
         # 1. Get Offload / Mixed Precision Policy
-        fsdp_cfg = self.cfg.train.backend_config
+        fsdp_cfg = self.cfg.train.config
         mp_policy = MixedPrecisionPolicy(
             param_dtype=get_torch_dtype(fsdp_cfg.mixed_precision.param_dtype),
             reduce_dtype=get_torch_dtype(fsdp_cfg.mixed_precision.reduce_dtype),
@@ -261,7 +261,7 @@ class FSDP2Engine:
         return model
 
     def _create_optimizer(self) -> optim.Optimizer:
-        optim_cfg = self.cfg.train.backend_config.optim
+        optim_cfg = self.cfg.train.config.optim
         return optim.AdamW(
             self.main_model.parameters(),
             lr=optim_cfg.lr,
@@ -271,7 +271,7 @@ class FSDP2Engine:
         )
 
     def _create_scheduler(self) -> optim.lr_scheduler.LRScheduler:
-        fsdp_cfg = self.cfg.train.backend_config
+        fsdp_cfg = self.cfg.train.config
         return get_lr_scheduler(
             scheduler_type=fsdp_cfg.scheduler.type,
             optimizer=self.optimizer,
@@ -283,7 +283,7 @@ class FSDP2Engine:
         )
 
     def _create_grad_scaler(self) -> torch.amp.GradScaler:
-        amp_cfg = self.cfg.train.backend_config.amp
+        amp_cfg = self.cfg.train.config.amp
         self.amp_enabled = bool(amp_cfg.enabled and self.device.type == "cuda")
         self.use_grad_scaler = (
             self.amp_enabled

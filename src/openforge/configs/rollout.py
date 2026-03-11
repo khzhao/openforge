@@ -10,7 +10,6 @@ from .cluster import ClusterConfig
 from .topology import ParallelismConfig, PlacementConfig
 
 RolloutRole = Literal["regular"]
-EngineTopology = Literal["regular"]
 
 
 @dataclass(slots=True)
@@ -65,33 +64,33 @@ class RolloutEngineGroupConfig(OpenForgeBaseModel):
     name: str
     role: RolloutRole
     replicas: int
-    gpus_per_engine: int
-    cpus_per_engine: int
-    parallelism: ParallelismConfig
+    num_gpus: int
+    num_cpus: int
+    parallel: ParallelismConfig
     placement: PlacementConfig
 
     @model_validator(mode="after")
     def _validate_group(self) -> "RolloutEngineGroupConfig":
         if self.replicas <= 0:
             raise ValueError("replicas must be > 0")
-        if self.gpus_per_engine <= 0:
-            raise ValueError("gpus_per_engine must be > 0")
-        if self.cpus_per_engine < 0:
-            raise ValueError("cpus_per_engine must be >= 0")
-        if self.gpus_per_engine != self.parallelism.world_size:
+        if self.num_gpus <= 0:
+            raise ValueError("num_gpus must be > 0")
+        if self.num_cpus < 0:
+            raise ValueError("num_cpus must be >= 0")
+        if self.num_gpus != self.parallel.world_size:
             raise ValueError(
-                "gpus_per_engine must match rollout engine parallelism world size "
-                f"({self.parallelism.world_size})"
+                "rollout.num_gpus must match rollout parallel world size "
+                f"({self.parallel.world_size})"
             )
         return self
 
     @property
     def total_gpus(self) -> int:
-        return self.replicas * self.gpus_per_engine
+        return self.replicas * self.num_gpus
 
     @property
     def total_cpus(self) -> int:
-        return self.replicas * self.cpus_per_engine
+        return self.replicas * self.num_cpus
 
 
 @dataclass(slots=True)
@@ -102,9 +101,9 @@ class ResolvedRolloutEngine:
     group_name: str
     role: RolloutRole
     replica_index: int
-    gpus_per_engine: int
-    cpus_per_engine: int
-    parallelism: ParallelismConfig
+    num_gpus: int
+    num_cpus: int
+    parallel: ParallelismConfig
     placement: PlacementConfig
 
 
@@ -112,16 +111,15 @@ class ResolvedRolloutEngine:
 class ResolvedRolloutTopology:
     """Expanded rollout topology for runtime code."""
 
-    engine_topology: EngineTopology
     engines: list[ResolvedRolloutEngine]
 
     @property
     def total_gpus(self) -> int:
-        return sum(engine.gpus_per_engine for engine in self.engines)
+        return sum(engine.num_gpus for engine in self.engines)
 
     @property
     def total_cpus(self) -> int:
-        return sum(engine.cpus_per_engine for engine in self.engines)
+        return sum(engine.num_cpus for engine in self.engines)
 
 
 class RolloutConfig(OpenForgeBaseModel):
@@ -129,7 +127,6 @@ class RolloutConfig(OpenForgeBaseModel):
 
     backend: Literal["sglang"]
     request: SGLangRequestConfig
-    engine_topology: EngineTopology
     engines: list[RolloutEngineGroupConfig]
 
     @model_validator(mode="after")
@@ -149,36 +146,31 @@ class RolloutConfig(OpenForgeBaseModel):
     def resolve(self, cluster: ClusterConfig) -> ResolvedRolloutTopology:
         engines: list[ResolvedRolloutEngine] = []
         engine_id = 0
-        usage_by_node_pool: dict[str, dict[str, int]] = {}
+        total_gpus = 0
+        total_cpus = 0
 
         for group in self.engines:
-            node_pool = cluster.get_pool(group.placement.node_pool)
-            if group.gpus_per_engine > node_pool.num_gpus_per_node:
+            if group.num_gpus > cluster.gpus_per_node:
                 raise ValueError(
-                    f"rollout engine {group.name} requests {group.gpus_per_engine} GPUs "
-                    f"per engine, but node pool {node_pool.node_pool} only has "
-                    f"{node_pool.num_gpus_per_node} GPUs per node"
+                    f"rollout engine {group.name} requests {group.num_gpus} GPUs "
+                    f"per engine, but each node only has {cluster.gpus_per_node} GPUs"
                 )
-            if group.cpus_per_engine > node_pool.num_cpus_per_node:
+            if group.num_cpus > cluster.cpus_per_node:
                 raise ValueError(
-                    f"rollout engine {group.name} requests {group.cpus_per_engine} CPUs "
-                    f"per engine, but node pool {node_pool.node_pool} only has "
-                    f"{node_pool.num_cpus_per_node} CPUs per node"
+                    f"rollout engine {group.name} requests {group.num_cpus} CPUs "
+                    f"per engine, but each node only has {cluster.cpus_per_node} CPUs"
                 )
-            usage = usage_by_node_pool.setdefault(
-                node_pool.node_pool, {"gpus": 0, "cpus": 0}
-            )
-            usage["gpus"] += group.total_gpus
-            usage["cpus"] += group.total_cpus
-            if usage["gpus"] > node_pool.total_gpus:
+            total_gpus += group.total_gpus
+            total_cpus += group.total_cpus
+            if total_gpus > cluster.total_gpus:
                 raise ValueError(
-                    f"rollout topology requests {usage['gpus']} GPUs from node pool "
-                    f"{node_pool.node_pool}, but only {node_pool.total_gpus} are available"
+                    "rollout topology requests "
+                    f"{total_gpus} GPUs, but only {cluster.total_gpus} are available"
                 )
-            if usage["cpus"] > node_pool.total_cpus:
+            if total_cpus > cluster.total_cpus:
                 raise ValueError(
-                    f"rollout topology requests {usage['cpus']} CPUs from node pool "
-                    f"{node_pool.node_pool}, but only {node_pool.total_cpus} are available"
+                    "rollout topology requests "
+                    f"{total_cpus} CPUs, but only {cluster.total_cpus} are available"
                 )
 
             for replica_index in range(group.replicas):
@@ -188,18 +180,15 @@ class RolloutConfig(OpenForgeBaseModel):
                         group_name=group.name,
                         role=group.role,
                         replica_index=replica_index,
-                        gpus_per_engine=group.gpus_per_engine,
-                        cpus_per_engine=group.cpus_per_engine,
-                        parallelism=group.parallelism,
+                        num_gpus=group.num_gpus,
+                        num_cpus=group.num_cpus,
+                        parallel=group.parallel,
                         placement=group.placement,
                     )
                 )
                 engine_id += 1
 
-        return ResolvedRolloutTopology(
-            engine_topology=self.engine_topology,
-            engines=engines,
-        )
+        return ResolvedRolloutTopology(engines=engines)
 
     @property
     def num_engines(self) -> int:

@@ -16,14 +16,13 @@ algo:
   kl_coef: 0.0
 
 cluster:
-  - node_pool: default
-    num_nodes: 1
-    num_gpus_per_node: 8
-    num_cpus_per_node: 32
+  num_nodes: 1
+  gpus_per_node: 4
+  cpus_per_node: 16
 
 train:
   backend: fsdp2
-  backend_config:
+  config:
     gradient_checkpointing: false
     reshard_after_forward: false
     mixed_precision:
@@ -52,17 +51,16 @@ train:
   global_batch_size: 64
   mini_batch_size: 16
   micro_batch_size: 4
-  checkpoints_dir: /tmp/openforge-checkpoints
+  checkpoints: /tmp/openforge-checkpoints
   cpus_per_worker: 2
-  parallelism:
+  parallel:
     data_parallel_size: 1
-    fsdp_parallel_size: 4
+    fsdp_parallel_size: 3
     pipeline_parallel_size: 1
     tensor_parallel_size: 1
     context_parallel_size: 1
     expert_parallel_size: 1
   placement:
-    node_pool: default
     strategy: PACK
 
 rollout:
@@ -77,14 +75,13 @@ rollout:
     skip_special_tokens: true
     no_stop_trim: false
     spaces_between_words: true
-  engine_topology: regular
   engines:
     - name: regular
       role: regular
       replicas: 1
-      gpus_per_engine: 1
-      cpus_per_engine: 0
-      parallelism:
+      num_gpus: 1
+      num_cpus: 0
+      parallel:
         data_parallel_size: 1
         fsdp_parallel_size: 1
         pipeline_parallel_size: 1
@@ -92,5 +89,4 @@ rollout:
         context_parallel_size: 1
         expert_parallel_size: 1
       placement:
-        node_pool: default
         strategy: PACK

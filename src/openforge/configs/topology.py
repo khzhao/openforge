@@ -20,6 +20,7 @@ class ParallelismConfig(OpenForgeBaseModel):
     data_parallel_size: int = 1
     # FSDP2 parallelism and should only be set when using FSDP2 backend
     fsdp_parallel_size: int = 1
+    # P/T/C/E parallelism should only be set when using Megatron backend
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     context_parallel_size: int = 1
@@ -60,5 +61,4 @@ class ParallelismConfig(OpenForgeBaseModel):
 class PlacementConfig(OpenForgeBaseModel):
     """Placement target for a workload fragment."""
 
-    node_pool: str
     strategy: PlacementStrategy = PlacementStrategy.PACK
