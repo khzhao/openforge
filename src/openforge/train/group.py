@@ -36,12 +36,11 @@ class TrainWorkerGroup:
         self._master_addr = master_addr
         self._master_port = master_port
 
-        resolved = cfg.train.resolve(cfg.cluster)
-        self._num_nodes = resolved.num_nodes
-        self._num_gpus_per_node = resolved.num_gpus_per_node
+        self._num_nodes = cfg.cluster.num_nodes
+        self._num_gpus_per_node = cfg.cluster.gpus_per_node
         self._num_gpus_per_worker = 1
-        self._num_cpus_per_worker = resolved.cpus_per_worker
-        self._world_size = resolved.world_size
+        self._num_cpus_per_worker = cfg.train.cpus_per_worker
+        self._world_size = cfg.train.num_workers
         self._workers: list[ray.actor.ActorHandle] = []
 
         self._pg = self._create_placement_group(strategy)

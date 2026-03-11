@@ -54,10 +54,31 @@ class OpenForgeConfig(OpenForgeBaseModel):
 
     @model_validator(mode="after")
     def _validate_cluster_allocations(self) -> "OpenForgeConfig":
-        train_topology = self.train.resolve(self.cluster)
-        rollout_topology = self.rollout.resolve(self.cluster)
-        total_gpus = train_topology.total_gpus + rollout_topology.total_gpus
-        total_cpus = train_topology.total_cpus + rollout_topology.total_cpus
+        total_gpus = self.train.total_gpus + self.rollout.total_gpus
+        total_cpus = self.train.total_cpus + self.rollout.total_cpus
+
+        if self.train.total_gpus > self.cluster.total_gpus:
+            raise ValueError(
+                "train topology requests "
+                f"{self.train.total_gpus} GPUs, but only {self.cluster.total_gpus} are available"
+            )
+        if self.train.total_cpus > self.cluster.total_cpus:
+            raise ValueError(
+                "train topology requests "
+                f"{self.train.total_cpus} CPUs, but only {self.cluster.total_cpus} are available"
+            )
+
+        for engine in self.rollout.engines:
+            if engine.num_gpus > self.cluster.gpus_per_node:
+                raise ValueError(
+                    f"rollout engine {engine.name} requests {engine.num_gpus} GPUs "
+                    f"per engine, but each node only has {self.cluster.gpus_per_node} GPUs"
+                )
+            if engine.num_cpus > self.cluster.cpus_per_node:
+                raise ValueError(
+                    f"rollout engine {engine.name} requests {engine.num_cpus} CPUs "
+                    f"per engine, but each node only has {self.cluster.cpus_per_node} CPUs"
+                )
 
         if total_gpus > self.cluster.total_gpus:
             raise ValueError(

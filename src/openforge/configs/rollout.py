@@ -6,7 +6,6 @@ from typing import Literal
 from pydantic import model_validator
 
 from .base import OpenForgeBaseModel, Reward
-from .cluster import ClusterConfig
 from .topology import ParallelismConfig, PlacementConfig
 
 RolloutRole = Literal["regular"]
@@ -93,35 +92,6 @@ class RolloutEngineGroupConfig(OpenForgeBaseModel):
         return self.replicas * self.num_cpus
 
 
-@dataclass(slots=True)
-class ResolvedRolloutEngine:
-    """Concrete rollout engine instance derived from user intent."""
-
-    engine_id: int
-    group_name: str
-    role: RolloutRole
-    replica_index: int
-    num_gpus: int
-    num_cpus: int
-    parallel: ParallelismConfig
-    placement: PlacementConfig
-
-
-@dataclass(slots=True)
-class ResolvedRolloutTopology:
-    """Expanded rollout topology for runtime code."""
-
-    engines: list[ResolvedRolloutEngine]
-
-    @property
-    def total_gpus(self) -> int:
-        return sum(engine.num_gpus for engine in self.engines)
-
-    @property
-    def total_cpus(self) -> int:
-        return sum(engine.num_cpus for engine in self.engines)
-
-
 class RolloutConfig(OpenForgeBaseModel):
     """Configuration for the rollout process."""
 
@@ -143,53 +113,14 @@ class RolloutConfig(OpenForgeBaseModel):
             raise ValueError("rollout engines must all use role=regular")
         return self
 
-    def resolve(self, cluster: ClusterConfig) -> ResolvedRolloutTopology:
-        engines: list[ResolvedRolloutEngine] = []
-        engine_id = 0
-        total_gpus = 0
-        total_cpus = 0
-
-        for group in self.engines:
-            if group.num_gpus > cluster.gpus_per_node:
-                raise ValueError(
-                    f"rollout engine {group.name} requests {group.num_gpus} GPUs "
-                    f"per engine, but each node only has {cluster.gpus_per_node} GPUs"
-                )
-            if group.num_cpus > cluster.cpus_per_node:
-                raise ValueError(
-                    f"rollout engine {group.name} requests {group.num_cpus} CPUs "
-                    f"per engine, but each node only has {cluster.cpus_per_node} CPUs"
-                )
-            total_gpus += group.total_gpus
-            total_cpus += group.total_cpus
-            if total_gpus > cluster.total_gpus:
-                raise ValueError(
-                    "rollout topology requests "
-                    f"{total_gpus} GPUs, but only {cluster.total_gpus} are available"
-                )
-            if total_cpus > cluster.total_cpus:
-                raise ValueError(
-                    "rollout topology requests "
-                    f"{total_cpus} CPUs, but only {cluster.total_cpus} are available"
-                )
-
-            for replica_index in range(group.replicas):
-                engines.append(
-                    ResolvedRolloutEngine(
-                        engine_id=engine_id,
-                        group_name=group.name,
-                        role=group.role,
-                        replica_index=replica_index,
-                        num_gpus=group.num_gpus,
-                        num_cpus=group.num_cpus,
-                        parallel=group.parallel,
-                        placement=group.placement,
-                    )
-                )
-                engine_id += 1
-
-        return ResolvedRolloutTopology(engines=engines)
-
     @property
     def num_engines(self) -> int:
         return sum(group.replicas for group in self.engines)
+
+    @property
+    def total_gpus(self) -> int:
+        return sum(group.total_gpus for group in self.engines)
+
+    @property
+    def total_cpus(self) -> int:
+        return sum(group.total_cpus for group in self.engines)

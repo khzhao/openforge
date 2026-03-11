@@ -1,12 +1,10 @@
 # Copyright 2026 openforge
 
-from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import model_validator
 
 from .base import OpenForgeBaseModel
-from .cluster import ClusterConfig
 from .topology import ParallelismConfig, PlacementConfig
 
 
@@ -73,40 +71,6 @@ class MegatronConfig(OpenForgeBaseModel):
         raise NotImplementedError("Megatron backend is not implemented yet")
 
 
-@dataclass(slots=True)
-class ResolvedTrainWorker:
-    """Concrete per-rank worker allocation derived from TrainConfig."""
-
-    rank: int
-    cpus: int
-    placement: PlacementConfig
-
-
-@dataclass(slots=True)
-class ResolvedTrainTopology:
-    """Concrete training world expansion for runtime code."""
-
-    placement: PlacementConfig
-    cpus_per_worker: int
-    parallel: ParallelismConfig
-    num_nodes: int
-    num_gpus_per_node: int
-    num_cpus_per_node: int
-    workers: list[ResolvedTrainWorker]
-
-    @property
-    def world_size(self) -> int:
-        return len(self.workers)
-
-    @property
-    def total_gpus(self) -> int:
-        return self.world_size
-
-    @property
-    def total_cpus(self) -> int:
-        return self.world_size * self.cpus_per_worker
-
-
 class TrainConfig(OpenForgeBaseModel):
     """Configuration for the training process."""
 
@@ -157,39 +121,6 @@ class TrainConfig(OpenForgeBaseModel):
                 "train.config must be MegatronConfig when backend is megatron"
             )
         return self
-
-    def resolve(self, cluster: ClusterConfig) -> ResolvedTrainTopology:
-        total_gpus = self.total_gpus
-        total_cpus = self.total_cpus
-
-        if total_gpus > cluster.total_gpus:
-            raise ValueError(
-                "train topology requests "
-                f"{total_gpus} GPUs, but only {cluster.total_gpus} are available"
-            )
-        if total_cpus > cluster.total_cpus:
-            raise ValueError(
-                "train topology requests "
-                f"{total_cpus} CPUs, but only {cluster.total_cpus} are available"
-            )
-
-        workers = [
-            ResolvedTrainWorker(
-                rank=rank,
-                cpus=self.cpus_per_worker,
-                placement=self.placement,
-            )
-            for rank in range(self.parallel.world_size)
-        ]
-        return ResolvedTrainTopology(
-            placement=self.placement,
-            cpus_per_worker=self.cpus_per_worker,
-            parallel=self.parallel,
-            num_nodes=cluster.num_nodes,
-            num_gpus_per_node=cluster.gpus_per_node,
-            num_cpus_per_node=cluster.cpus_per_node,
-            workers=workers,
-        )
 
     @property
     def gradient_accumulation_steps(self) -> int:
