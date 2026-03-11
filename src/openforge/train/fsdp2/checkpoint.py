@@ -23,6 +23,8 @@ from torch.optim.lr_scheduler import LRScheduler
 from openforge.train.types import CheckpointInfo
 from openforge.utils.memory import clear_memory
 
+from .base import FSDP2Engine
+
 _CHECKPOINT_KEY = "fsdp_checkpoint"
 _DCP_CHECKPOINT_DIRNAME = "dcp_checkpoint"
 _METADATA_FILENAME = "trainer_state.pt"
@@ -275,12 +277,13 @@ def _resolve_checkpoint_path(
 
 
 def save_backend_checkpoint(
-    backend: "FSDP2Engine",
+    backend: FSDP2Engine,
     *,
     step: int,
     policy_version: int,
     save_optimizer: bool = True,
 ) -> CheckpointInfo:
+    """Save a checkpoint for an initialized FSDP2 engine."""
     checkpoints_dir = Path(backend.cfg.train.checkpoints_dir)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     path = checkpoints_dir / f"step_{step:08d}"
@@ -303,12 +306,13 @@ def save_backend_checkpoint(
 
 
 def load_backend_checkpoint(
-    backend: "FSDP2Engine",
+    backend: FSDP2Engine,
     *,
     latest: bool = True,
     step: int | None = None,
     load_optimizer: bool = True,
 ) -> CheckpointInfo | None:
+    """Load a checkpoint for an initialized FSDP2 engine if one exists."""
     checkpoints_dir = Path(backend.cfg.train.checkpoints_dir)
     path = _resolve_checkpoint_path(checkpoints_dir, latest=latest, step=step)
     if path is None:

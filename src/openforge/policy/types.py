@@ -14,3 +14,4 @@ class PolicyArtifactRef:
     step: int
     policy_version: int
     path: str
+    load_format: str | None = "safetensors"

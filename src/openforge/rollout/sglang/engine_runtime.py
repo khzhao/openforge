@@ -8,6 +8,8 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any
 
+from openforge.policy.types import PolicyArtifactRef
+
 from .client import SGLangControlClient
 from .spec import SGLangEngineSpec
 
@@ -93,6 +95,9 @@ class SGLangEngineRuntime:
     def get_server_info(self) -> dict[str, Any]:
         return self.client.get_server_info(timeout=self.request_timeout_seconds)
 
+    def get_model_info(self) -> dict[str, Any]:
+        return self.client.get_model_info(timeout=self.request_timeout_seconds)
+
     def get_weight_version(self) -> str | None:
         return self.client.get_weight_version(timeout=self.request_timeout_seconds)
 
@@ -133,6 +138,38 @@ class SGLangEngineRuntime:
                 self.spec.server_args["weight_version"] = weight_version
             except ValueError:
                 pass
+        return payload
+
+    def load_policy_artifact(
+        self,
+        artifact: PolicyArtifactRef,
+        *,
+        flush_cache: bool = True,
+        abort_all_requests: bool = False,
+    ) -> dict[str, Any]:
+        artifact_path = Path(artifact.path)
+        if not artifact_path.is_dir():
+            raise FileNotFoundError(
+                f"policy artifact path does not exist or is not a directory: {artifact.path}"
+            )
+
+        payload = self.update_weights_from_disk(
+            model_path=str(artifact_path),
+            load_format=artifact.load_format,
+            flush_cache=flush_cache,
+            abort_all_requests=abort_all_requests,
+            weight_version=str(artifact.policy_version),
+        )
+        model_info = self.get_model_info()
+        loaded_weight_version = model_info.get("weight_version")
+        if loaded_weight_version is not None and (
+            str(loaded_weight_version) != str(artifact.policy_version)
+        ):
+            raise RuntimeError(
+                "sglang reported weight_version "
+                f"{loaded_weight_version!r} after loading artifact version "
+                f"{artifact.policy_version!r}"
+            )
         return payload
 
     def check_weights(self, *, action: str) -> dict[str, Any]:
