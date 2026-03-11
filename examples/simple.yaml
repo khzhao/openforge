@@ -75,13 +75,13 @@ rollout:
     skip_special_tokens: true
     no_stop_trim: false
     spaces_between_words: true
-  engines:
+  engine_groups:
     - name: regular
       role: regular
       replicas: 1
-      num_gpus: 1
-      num_cpus: 0
-      parallel:
+      num_gpus_per_replica: 1
+      num_cpus_per_replica: 0
+      parallelism:
         data_parallel_size: 1
         fsdp_parallel_size: 1
         pipeline_parallel_size: 1

@@ -33,10 +33,10 @@ class RolloutEndpoint:
     """Routable rollout endpoint or underlying engine endpoint."""
 
     name: str
-    role: str
+    role: RolloutRole
     host: str
     port: int | None
-    bootstrap_port: int | None
+    disaggregation_bootstrap_port: int | None
     url: str | None
     healthy: bool
     policy_version: int | None
@@ -58,38 +58,38 @@ class SGLangRequestConfig(OpenForgeBaseModel):
 
 
 class RolloutEngineGroupConfig(OpenForgeBaseModel):
-    """A homogeneous group of rollout engines with the same role and shape."""
+    """A homogeneous rollout engine group with shared resources and placement."""
 
     name: str
     role: RolloutRole
     replicas: int
-    num_gpus: int
-    num_cpus: int
-    parallel: ParallelismConfig
+    num_gpus_per_replica: int
+    num_cpus_per_replica: int
+    parallelism: ParallelismConfig
     placement: PlacementConfig
 
     @model_validator(mode="after")
     def _validate_group(self) -> "RolloutEngineGroupConfig":
         if self.replicas <= 0:
             raise ValueError("replicas must be > 0")
-        if self.num_gpus <= 0:
-            raise ValueError("num_gpus must be > 0")
-        if self.num_cpus < 0:
-            raise ValueError("num_cpus must be >= 0")
-        if self.num_gpus != self.parallel.world_size:
+        if self.num_gpus_per_replica <= 0:
+            raise ValueError("num_gpus_per_replica must be > 0")
+        if self.num_cpus_per_replica < 0:
+            raise ValueError("num_cpus_per_replica must be >= 0")
+        if self.num_gpus_per_replica != self.parallelism.world_size:
             raise ValueError(
-                "rollout.num_gpus must match rollout parallel world size "
-                f"({self.parallel.world_size})"
+                "rollout.num_gpus_per_replica must match rollout parallelism world "
+                f"size ({self.parallelism.world_size})"
             )
         return self
 
     @property
     def total_gpus(self) -> int:
-        return self.replicas * self.num_gpus
+        return self.replicas * self.num_gpus_per_replica
 
     @property
     def total_cpus(self) -> int:
-        return self.replicas * self.num_cpus
+        return self.replicas * self.num_cpus_per_replica
 
 
 class RolloutConfig(OpenForgeBaseModel):
@@ -97,30 +97,34 @@ class RolloutConfig(OpenForgeBaseModel):
 
     backend: Literal["sglang"]
     request: SGLangRequestConfig
-    engines: list[RolloutEngineGroupConfig]
+    engine_groups: list[RolloutEngineGroupConfig]
 
     @model_validator(mode="after")
     def _validate_rollout_config(self) -> "RolloutConfig":
-        if not self.engines:
-            raise ValueError("rollout.engines must not be empty")
+        if not self.engine_groups:
+            raise ValueError("rollout.engine_groups must not be empty")
 
-        names = [engine.name for engine in self.engines]
+        names = [group.name for group in self.engine_groups]
         if len(names) != len(set(names)):
-            raise ValueError("rollout engine names must be unique")
+            raise ValueError("rollout.engine_groups must have unique names")
 
-        roles = {engine.role for engine in self.engines}
+        roles = {group.role for group in self.engine_groups}
         if not roles.issubset({"regular"}):
-            raise ValueError("rollout engines must all use role=regular")
+            raise ValueError("rollout.engine_groups must all use role=regular")
         return self
 
     @property
-    def num_engines(self) -> int:
-        return sum(group.replicas for group in self.engines)
+    def num_engine_replicas(self) -> int:
+        return sum(group.replicas for group in self.engine_groups)
+
+    @property
+    def num_engine_groups(self) -> int:
+        return len(self.engine_groups)
 
     @property
     def total_gpus(self) -> int:
-        return sum(group.total_gpus for group in self.engines)
+        return sum(group.total_gpus for group in self.engine_groups)
 
     @property
     def total_cpus(self) -> int:
-        return sum(group.total_cpus for group in self.engines)
+        return sum(group.total_cpus for group in self.engine_groups)

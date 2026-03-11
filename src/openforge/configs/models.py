@@ -68,16 +68,18 @@ class OpenForgeConfig(OpenForgeBaseModel):
                 f"{self.train.total_cpus} CPUs, but only {self.cluster.total_cpus} are available"
             )
 
-        for engine in self.rollout.engines:
-            if engine.num_gpus > self.cluster.gpus_per_node:
+        for engine_group in self.rollout.engine_groups:
+            if engine_group.num_gpus_per_replica > self.cluster.gpus_per_node:
                 raise ValueError(
-                    f"rollout engine {engine.name} requests {engine.num_gpus} GPUs "
-                    f"per engine, but each node only has {self.cluster.gpus_per_node} GPUs"
+                    f"rollout engine group {engine_group.name} requests "
+                    f"{engine_group.num_gpus_per_replica} GPUs per replica, "
+                    f"but each node only has {self.cluster.gpus_per_node} GPUs"
                 )
-            if engine.num_cpus > self.cluster.cpus_per_node:
+            if engine_group.num_cpus_per_replica > self.cluster.cpus_per_node:
                 raise ValueError(
-                    f"rollout engine {engine.name} requests {engine.num_cpus} CPUs "
-                    f"per engine, but each node only has {self.cluster.cpus_per_node} CPUs"
+                    f"rollout engine group {engine_group.name} requests "
+                    f"{engine_group.num_cpus_per_replica} CPUs per replica, "
+                    f"but each node only has {self.cluster.cpus_per_node} CPUs"
                 )
 
         if total_gpus > self.cluster.total_gpus:
