@@ -275,23 +275,23 @@ def _resolve_checkpoint_path(
 
 
 def save_backend_checkpoint(
-    backend: "FSDP2Backend",
+    backend: "FSDP2Engine",
     *,
     step: int,
     policy_version: int,
     save_optimizer: bool = True,
 ) -> CheckpointInfo:
-    checkpoints_dir = Path(backend._cfg().train.checkpoints_dir)
+    checkpoints_dir = Path(backend.cfg.train.checkpoints_dir)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     path = checkpoints_dir / f"step_{step:08d}"
     save_checkpoint(
-        model=cast(FSDPModule, backend._model()),
-        optimizer=backend._optimizer(),
-        lr_scheduler=backend._scheduler(),
+        model=cast(FSDPModule, backend.main_model),
+        optimizer=backend.optimizer,
+        lr_scheduler=backend.scheduler,
         save_dir=str(path),
         step=step,
         policy_version=policy_version,
-        grad_scaler=backend._grad_scaler(),
+        grad_scaler=backend.grad_scaler,
         save_optimizer=save_optimizer,
         save_full_weights=False,
     )
@@ -303,23 +303,23 @@ def save_backend_checkpoint(
 
 
 def load_backend_checkpoint(
-    backend: "FSDP2Backend",
+    backend: "FSDP2Engine",
     *,
     latest: bool = True,
     step: int | None = None,
     load_optimizer: bool = True,
 ) -> CheckpointInfo | None:
-    checkpoints_dir = Path(backend._cfg().train.checkpoints_dir)
+    checkpoints_dir = Path(backend.cfg.train.checkpoints_dir)
     path = _resolve_checkpoint_path(checkpoints_dir, latest=latest, step=step)
     if path is None:
         return None
 
     metadata = load_checkpoint(
-        model=cast(FSDPModule, backend._model()),
-        optimizer=backend._optimizer(),
-        lr_scheduler=backend._scheduler(),
+        model=cast(FSDPModule, backend.main_model),
+        optimizer=backend.optimizer,
+        lr_scheduler=backend.scheduler,
         load_dir=str(path),
-        grad_scaler=backend._grad_scaler(),
+        grad_scaler=backend.grad_scaler,
         load_optimizer=load_optimizer,
     )
     loaded_step = int(metadata["step"])

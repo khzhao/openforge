@@ -6,8 +6,9 @@ from typing import Iterator
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-from tensordict import TensorDict
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     FSDPModule,
@@ -21,14 +22,15 @@ from openforge.utils.torch import get_torch_dtype
 
 from .lr_scheduler import get_lr_scheduler
 from .memory import offload_optimizer, offload_params, onload_optimizer, onload_params
-from .runtime import apply_fsdp2, create_device_mesh
+from .utils import apply_fsdp2, create_device_mesh
 
 
 class FSDP2Engine:
     """FSDP2Engine for training. Essentially a wrapper around PyTorch FSDP2."""
 
-    def __init__(self, spec: TrainWorkerSpec) -> None:
-        self.initialize(spec)
+    def __init__(self, spec: TrainWorkerSpec | None = None) -> None:
+        if spec is not None:
+            self.initialize(spec)
 
     def initialize(self, spec: TrainWorkerSpec) -> None:
         self.spec = spec
@@ -44,28 +46,31 @@ class FSDP2Engine:
             assert torch.cuda.device_count() == 1, "Expected only 1 GPU per worker"
             torch.cuda.set_device(0)
             self.device = torch.device("cuda", 0)
-        self.device_mesh = create_device_mesh(
-            dp_size=self.cfg.train.parallelism.data_parallel_size,
-            fsdp_size=self.cfg.train.parallelism.fsdp_parallel_size,
-            world_size=self.world_size,
-            device_type=self.device.type,
-        )
 
         # 2. Initialize the process group
         if not dist.is_initialized():
-            assert dist.get_rank() == self.rank, (
-                f"Rank mismatch: {dist.get_rank()} != {self.rank}"
-            )
-            assert dist.get_world_size() == self.world_size, (
-                f"World size mismatch: {dist.get_world_size()} != {self.world_size}"
-            )
+            device_id = self.device if self.device.type == "cuda" else None
             dist.init_process_group(
                 backend="nccl" if torch.cuda.is_available() else "gloo",
                 rank=self.rank,
                 world_size=self.world_size,
                 init_method=f"tcp://{self.master_addr}:{self.master_port}",
                 timeout=timedelta(seconds=30),
+                device_id=device_id,
             )
+
+        assert dist.get_rank() == self.rank, (
+            f"Rank mismatch: {dist.get_rank()} != {self.rank}"
+        )
+        assert dist.get_world_size() == self.world_size, (
+            f"World size mismatch: {dist.get_world_size()} != {self.world_size}"
+        )
+        self.device_mesh = create_device_mesh(
+            dp_size=self.cfg.train.parallelism.data_parallel_size,
+            fsdp_size=self.cfg.train.parallelism.fsdp_parallel_size,
+            world_size=self.world_size,
+            device_type=self.device.type,
+        )
 
         # 3. Create or initialize the model + optimizer + scheduler
         model_name_or_path = self.cfg.model.model_name_or_path
@@ -92,22 +97,101 @@ class FSDP2Engine:
         finally:
             model.set_requires_gradient_sync(True)
 
-    def forward(self, batch: TensorDict) -> None:
-        pass
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor | None]:
+        tokens = batch["tokens"].to(self.device).long()
+        loss_mask = batch["loss_mask"].to(self.device).float()
+        rewards = batch["rewards"].to(self.device).float()
+        position_ids = batch["position_ids"].to(self.device).long()
 
-    def backward(self) -> None:
-        pass
+        # 1. Compute log probabilities for the available models
+        curr_log_probs = self._compute_log_probs(
+            model=self.main_model,
+            tokens=tokens,
+            position_ids=position_ids,
+        )
+        if self.ref_model is not None:
+            ref_log_probs = self._compute_log_probs(
+                model=self.ref_model,
+                tokens=tokens,
+                position_ids=position_ids,
+            )
 
-    def step_optimizer(self) -> None:
-        pass
+        # 2. Compute the loss and log probs for model and ref model
+        targets = tokens[1:]
+        curr_log_probs = curr_log_probs.gather(
+            dim=-1, index=targets.unsqueeze(-1)
+        ).squeeze(-1)
+        loss = (
+            -(rewards[1:] * curr_log_probs) * loss_mask
+        ).sum() / loss_mask.sum().clamp_min(1.0)
+        outputs = {
+            "curr_log_probs": curr_log_probs.detach(),
+            "ref_log_probs": None,
+            "loss": loss,
+        }
+
+        if self.ref_model is not None:
+            ref_log_probs = ref_log_probs.gather(
+                dim=-1, index=targets.unsqueeze(-1)
+            ).squeeze(-1)
+            loss = loss + self.cfg.algo.kl_coef * (
+                (curr_log_probs - ref_log_probs) * loss_mask
+            ).sum() / loss_mask.sum().clamp_min(1.0)
+            outputs["ref_log_probs"] = ref_log_probs.detach()
+            outputs["loss"] = loss
+        return outputs
+
+    def backward(self, forward_out: dict[str, torch.Tensor]) -> None:
+        loss = forward_out["loss"] / self.cfg.train.gradient_accumulation_steps
+        if self.use_grad_scaler:
+            self.grad_scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+    def step_optimizer(self) -> dict[str, float]:
+        optim_cfg = self.cfg.train.backend_config.optim
+
+        # 1. Unscale the gradients if necessary
+        if self.use_grad_scaler:
+            self.grad_scaler.unscale_(self.optimizer)
+
+        # 2. Clip the gradients
+        nn.utils.clip_grad_norm_(
+            self.main_model.parameters(),
+            optim_cfg.max_grad_norm,
+        )
+
+        # 3. Step the optimizer and scheduler
+        if self.use_grad_scaler:
+            self.grad_scaler.step(self.optimizer)
+            self.grad_scaler.update()
+        else:
+            self.optimizer.step()
+        self.scheduler.step()
+
+        # 4. Return the metrics
+        metrics = {
+            "lr": float(self.optimizer.param_groups[0]["lr"]),
+            "global_step": -1.0,
+            "gradient_accumulation_steps": float(
+                self.cfg.train.gradient_accumulation_steps
+            ),
+        }
+        if self.use_grad_scaler:
+            metrics["grad_scale"] = float(self.grad_scaler.get_scale())
+        return metrics
 
     def sleep(self) -> None:
-        offload_params(self.main_model)
+        offload_params(self.main_model, offload_grad=True)
+        if self.ref_model is not None:
+            offload_params(self.ref_model, offload_grad=False)
         offload_optimizer(self.optimizer)
         self.sleeping = True
 
     def wakeup(self) -> None:
-        onload_params(self.main_model, self.device)
+        onload_params(self.main_model, self.device, onload_grad=True)
+        if self.ref_model is not None:
+            onload_params(self.ref_model, self.device, onload_grad=False)
         onload_optimizer(self.optimizer, self.device)
         self.sleeping = False
 
@@ -115,11 +199,26 @@ class FSDP2Engine:
         if dist.is_initialized():
             dist.destroy_process_group()
 
+    def _compute_log_probs(
+        self, *, model: FSDPModule, tokens: torch.Tensor, position_ids: torch.Tensor
+    ) -> torch.Tensor:
+        with torch.autocast(
+            device_type=self.device.type,
+            dtype=get_torch_dtype(self.cfg.train.backend_config.amp.precision),
+            enabled=self.amp_enabled,
+        ):
+            logits = model(
+                input_ids=tokens.unsqueeze(0),
+                position_ids=position_ids.unsqueeze(0),
+            ).logits[0, :-1, :]
+        log_probs = F.log_softmax(logits, dim=-1)
+        return log_probs
+
     def _create_model(
         self,
         model_name_or_path: str | None,
         is_eval_only: bool = False,
-    ) -> FSDPModule:
+    ) -> FSDPModule | None:
         if model_name_or_path is None:
             return None
 
@@ -135,11 +234,18 @@ class FSDP2Engine:
             else OffloadPolicy()
         )
 
-        # 2. Create the model with the right parameters and set train/eval mode
+        # 2. Create the model with the right parameters and set train/eval mode.
         model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             trust_remote_code=True,
         )
+        if not is_eval_only and fsdp_cfg.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+        if is_eval_only:
+            model.eval()
+        else:
+            model.train()
+
         model = apply_fsdp2(
             model=model,
             device_mesh=self.device_mesh,
@@ -152,10 +258,6 @@ class FSDP2Engine:
         if is_eval_only:
             model.requires_grad_(False)
             model.eval()
-        else:
-            if fsdp_cfg.gradient_checkpointing:
-                model.gradient_checkpointing_enable()
-            model.train()
         return model
 
     def _create_optimizer(self) -> optim.Optimizer:
@@ -182,11 +284,19 @@ class FSDP2Engine:
 
     def _create_grad_scaler(self) -> torch.amp.GradScaler:
         amp_cfg = self.cfg.train.backend_config.amp
-        amp_enabled = bool(amp_cfg.enabled and self.device.type == "cuda")
-        use_grad_scaler = (
-            amp_enabled and amp_cfg.use_grad_scaler and amp_cfg.precision == "float16"
+        self.amp_enabled = bool(amp_cfg.enabled and self.device.type == "cuda")
+        self.use_grad_scaler = (
+            self.amp_enabled
+            and amp_cfg.use_grad_scaler
+            and amp_cfg.precision == "float16"
         )
         return torch.amp.GradScaler(
             self.device.type,
-            enabled=use_grad_scaler,
+            enabled=self.use_grad_scaler,
         )
+
+    def _finalize(self):
+        onload_params(self.main_model, self.device, onload_grad=True)
+        if self.ref_model is not None:
+            onload_params(self.ref_model, self.device, onload_grad=False)
+        onload_optimizer(self.optimizer, self.device)

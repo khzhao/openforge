@@ -7,7 +7,7 @@ from typing import Sequence
 from tensordict import TensorDict
 
 from openforge.policy.types import PolicyArtifactRef
-from openforge.train.fsdp2.backend import FSDP2Backend
+from openforge.train.fsdp2.base import FSDP2Engine
 from openforge.train.fsdp2.checkpoint import (
     load_backend_checkpoint,
     save_backend_checkpoint,
@@ -35,16 +35,15 @@ class TrainWorker:
         self.spec = spec
 
         if spec.cfg.train.backend == "fsdp2":
-            self.backend = FSDP2Backend()
+            self.backend = FSDP2Engine(spec)
         else:
             raise ValueError(f"Unsupported backend: {spec.cfg.train.backend}")
 
-        self.backend.initialize(spec)
         self._state = TrainWorkerState(
             rank=spec.rank,
             world_size=spec.world_size,
             backend=spec.cfg.train.backend,
-            device=self.backend.device,
+            device=str(self.backend.device),
             initialized=True,
             sleeping=False,
         )
@@ -68,13 +67,20 @@ class TrainWorker:
                 forward_out = backend.forward(batch)
                 backend.backward(forward_out)
 
-        result = backend.step_optimizer(global_step=global_step)
-        if not isinstance(result, TrainStepResult):
+        metrics = backend.step_optimizer()
+        if not isinstance(metrics, dict):
             raise TypeError(
-                "TrainBackend.step_optimizer must return TrainStepResult, "
-                f"got {type(result).__name__}"
+                "FSDP2Engine.step_optimizer must return dict[str, float], "
+                f"got {type(metrics).__name__}"
             )
-        return result
+        return TrainStepResult(
+            rank=self.spec.rank,
+            global_step=global_step,
+            metrics={
+                **metrics,
+                "global_step": -1.0 if global_step is None else float(global_step),
+            },
+        )
 
     def save_checkpoint(
         self,

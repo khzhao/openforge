@@ -4,6 +4,8 @@ import torch
 from torch.distributed.fsdp import FSDPModule
 from torch.optim import Optimizer
 
+from openforge.utils.memory import clear_memory
+
 
 @torch.no_grad()
 def offload_params(
@@ -19,8 +21,7 @@ def offload_params(
                 continue
             parameter.grad = grad.detach().to("cpu", non_blocking=True)
             del grad
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    clear_memory(sync=True)
 
 
 @torch.no_grad()
@@ -38,8 +39,7 @@ def onload_params(
                 continue
             parameter.grad = grad.detach().to(device, non_blocking=True)
             del grad
-    if device.type == "cuda":
-        torch.cuda.synchronize(device=device)
+    clear_memory(sync=True)
 
 
 @torch.no_grad()
@@ -64,5 +64,4 @@ def _move_optimizer_state(optimizer: Optimizer, device: torch.device) -> None:
                 continue
             state[key] = value.detach().to(device, non_blocking=True)
             del value
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    clear_memory(sync=True)
