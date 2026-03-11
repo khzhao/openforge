@@ -3,7 +3,6 @@
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import timedelta
-from pathlib import Path
 from typing import cast
 
 import torch
@@ -11,7 +10,6 @@ import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
-    get_model_state_dict,
     set_model_state_dict,
 )
 from torch.distributed.fsdp import (
@@ -20,13 +18,12 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     OffloadPolicy,
 )
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM
 
 from openforge.configs.models import OpenForgeConfig
 from openforge.configs.train import FSDP2Config
-from openforge.policy.types import PolicyArtifactRef
 from openforge.train.backend import TrainBackend
-from openforge.train.types import CheckpointInfo, TrainStepResult, TrainWorkerSpec
+from openforge.train.types import TrainStepResult, TrainWorkerSpec
 
 from .memory import offload_optimizer, offload_params, onload_optimizer, onload_params
 from .runtime import apply_fsdp2, create_device_mesh, get_torch_dtype
@@ -187,114 +184,6 @@ class FSDP2Backend(TrainBackend):
             metrics=metrics,
         )
 
-    def save_checkpoint(
-        self,
-        *,
-        step: int,
-        policy_version: int,
-        save_optimizer: bool = True,
-    ) -> CheckpointInfo:
-        cfg = self._cfg()
-        model = self._model()
-        optimizer = self._optimizer()
-        scheduler = self._scheduler()
-        scaler = self._grad_scaler()
-        rank = self._rank()
-
-        ckpt_dir = Path(cfg.train.checkpoints_dir)
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        path = ckpt_dir / f"step_{step:08d}.rank_{rank:05d}.pt"
-
-        payload: dict[str, object] = {
-            "step": step,
-            "policy_version": policy_version,
-            "model_state": model.state_dict(),
-        }
-        if save_optimizer:
-            payload["optimizer_state"] = optimizer.state_dict()
-            payload["scheduler_state"] = scheduler.state_dict()
-            if scaler.is_enabled():
-                payload["grad_scaler_state"] = scaler.state_dict()
-
-        torch.save(payload, path)
-        return CheckpointInfo(
-            step=step,
-            policy_version=policy_version,
-            path=str(path),
-        )
-
-    def load_checkpoint(
-        self,
-        *,
-        latest: bool = True,
-        step: int | None = None,
-        load_optimizer: bool = True,
-    ) -> CheckpointInfo | None:
-        cfg = self._cfg()
-        model = self._model()
-        optimizer = self._optimizer()
-        scheduler = self._scheduler()
-        scaler = self._grad_scaler()
-
-        ckpt_dir = Path(cfg.train.checkpoints_dir)
-        path = self._resolve_checkpoint_path(ckpt_dir, latest=latest, step=step)
-        if path is None:
-            return None
-
-        payload = torch.load(path, map_location="cpu")
-        model.load_state_dict(payload["model_state"])
-        if load_optimizer and "optimizer_state" in payload:
-            optimizer.load_state_dict(payload["optimizer_state"])
-        if load_optimizer and "scheduler_state" in payload:
-            scheduler.load_state_dict(payload["scheduler_state"])
-        if load_optimizer and scaler.is_enabled() and "grad_scaler_state" in payload:
-            scaler.load_state_dict(payload["grad_scaler_state"])
-
-        loaded_step = int(payload["step"])
-        loaded_policy_version = int(payload.get("policy_version", loaded_step))
-        return CheckpointInfo(
-            step=loaded_step,
-            policy_version=loaded_policy_version,
-            path=str(path),
-        )
-
-    def export_policy_artifact(
-        self,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> PolicyArtifactRef | None:
-        model = self._model()
-        full_state = get_model_state_dict(
-            model,
-            options=StateDictOptions(
-                full_state_dict=True,
-                cpu_offload=True,
-            ),
-        )
-        if self._rank() != 0:
-            return None
-
-        artifact_dir = self._artifact_dir(step=step, policy_version=policy_version)
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-
-        export_model = self._build_export_model_shell()
-        export_model.save_pretrained(
-            artifact_dir,
-            state_dict=full_state,
-            safe_serialization=False,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(
-            self._cfg().model.tokenizer_name_or_path,
-            trust_remote_code=True,
-        )
-        tokenizer.save_pretrained(artifact_dir)
-        return PolicyArtifactRef(
-            step=step,
-            policy_version=policy_version,
-            path=str(artifact_dir),
-        )
-
     def sleep(self) -> None:
         model = self._model()
         optimizer = self._optimizer()
@@ -312,7 +201,7 @@ class FSDP2Backend(TrainBackend):
             offload_params(model, offload_grad=False)
             offload_optimizer(optimizer)
             self._distributed_barrier()
-        self.clear_memory()
+        self._clear_memory()
         self._sleeping = True
 
     def wakeup(self) -> None:
@@ -329,10 +218,10 @@ class FSDP2Backend(TrainBackend):
             onload_optimizer(optimizer, device)
             self._reshard_model(model)
             self._distributed_barrier()
-        self.clear_memory()
+        self._clear_memory()
         self._sleeping = False
 
-    def clear_memory(self) -> None:
+    def _clear_memory(self) -> None:
         if self._device().type == "cuda":
             torch.cuda.empty_cache()
 
@@ -572,46 +461,6 @@ class FSDP2Backend(TrainBackend):
             else OffloadPolicy()
         )
         return mesh, mp_policy, offload_policy
-
-    def _resolve_checkpoint_path(
-        self,
-        checkpoints_dir: Path,
-        *,
-        latest: bool,
-        step: int | None,
-    ) -> Path | None:
-        rank = self._rank()
-        if not checkpoints_dir.exists():
-            return None
-
-        if step is not None:
-            candidate = checkpoints_dir / f"step_{step:08d}.rank_{rank:05d}.pt"
-            return candidate if candidate.exists() else None
-
-        if not latest:
-            return None
-
-        candidates = sorted(checkpoints_dir.glob(f"step_*.rank_{rank:05d}.pt"))
-        if not candidates:
-            return None
-        return candidates[-1]
-
-    def _artifact_dir(self, *, step: int, policy_version: int) -> Path:
-        checkpoints_dir = Path(self._cfg().train.checkpoints_dir)
-        return checkpoints_dir / (
-            f"policy_step_{step:08d}.version_{policy_version:08d}"
-        )
-
-    def _build_export_model_shell(self) -> torch.nn.Module:
-        cfg = AutoConfig.from_pretrained(
-            self._cfg().model.model_name_or_path,
-            trust_remote_code=True,
-        )
-        with torch.device("meta"):
-            return AutoModelForCausalLM.from_config(
-                cfg,
-                trust_remote_code=True,
-            )
 
     def _build_lr_scheduler(self) -> torch.optim.lr_scheduler.LRScheduler:
         optimizer = self._optimizer()

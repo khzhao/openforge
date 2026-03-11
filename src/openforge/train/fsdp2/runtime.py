@@ -2,7 +2,6 @@
 
 from typing import Literal, Sequence
 
-import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -38,11 +37,6 @@ def create_device_mesh(
         mesh_shape=(dp_size, fsdp_size),
         mesh_dim_names=("dp", "fsdp"),
     )
-
-
-def get_torch_dtype(dtype: str) -> torch.dtype:
-    """Get the torch dtype from a string."""
-    return getattr(torch, dtype)
 
 
 def apply_fsdp2(

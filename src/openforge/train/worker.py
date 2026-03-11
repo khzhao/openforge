@@ -8,6 +8,13 @@ from tensordict import TensorDict
 
 from openforge.policy.types import PolicyArtifactRef
 from openforge.train.fsdp2.backend import FSDP2Backend
+from openforge.train.fsdp2.checkpoint import (
+    load_backend_checkpoint,
+    save_backend_checkpoint,
+)
+from openforge.train.fsdp2.export import (
+    export_policy_artifact as export_fsdp2_policy_artifact,
+)
 from openforge.train.types import (
     CheckpointInfo,
     TrainStepResult,
@@ -76,14 +83,15 @@ class TrainWorker:
         policy_version: int,
         save_optimizer: bool = True,
     ) -> CheckpointInfo:
-        result = self.backend.save_checkpoint(
+        result = save_backend_checkpoint(
+            self.backend,
             step=step,
             policy_version=policy_version,
             save_optimizer=save_optimizer,
         )
         if not isinstance(result, CheckpointInfo):
             raise TypeError(
-                "TrainBackend.save_checkpoint must return CheckpointInfo, "
+                "save_backend_checkpoint must return CheckpointInfo, "
                 f"got {type(result).__name__}"
             )
         return result
@@ -95,7 +103,8 @@ class TrainWorker:
         step: int | None = None,
         load_optimizer: bool = True,
     ) -> CheckpointInfo | None:
-        result = self.backend.load_checkpoint(
+        result = load_backend_checkpoint(
+            self.backend,
             latest=latest,
             step=step,
             load_optimizer=load_optimizer,
@@ -103,7 +112,7 @@ class TrainWorker:
         if result is None or isinstance(result, CheckpointInfo):
             return result
         raise TypeError(
-            "TrainBackend.load_checkpoint must return CheckpointInfo | None, "
+            "load_backend_checkpoint must return CheckpointInfo | None, "
             f"got {type(result).__name__}"
         )
 
@@ -113,13 +122,14 @@ class TrainWorker:
         step: int,
         policy_version: int,
     ) -> PolicyArtifactRef | None:
-        artifact = self.backend.export_policy_artifact(
+        artifact = export_fsdp2_policy_artifact(
+            self.backend,
             step=step,
             policy_version=policy_version,
         )
         if artifact is not None and not isinstance(artifact, PolicyArtifactRef):
             raise TypeError(
-                "TrainBackend.export_policy_artifact must return "
+                "export_policy_artifact helper must return "
                 f"PolicyArtifactRef | None, got {type(artifact).__name__}"
             )
         return artifact
@@ -131,9 +141,6 @@ class TrainWorker:
     def wakeup(self) -> None:
         self.backend.wakeup()
         self._state = replace(self._state, sleeping=False)
-
-    def clear_memory(self) -> None:
-        self.backend.clear_memory()
 
     def status(self) -> TrainWorkerState:
         return replace(self._state)

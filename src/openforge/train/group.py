@@ -153,9 +153,6 @@ class TrainWorkerGroup:
     def wakeup(self) -> None:
         ray.get([worker.wakeup.remote() for worker in self._workers])
 
-    def clear_memory(self) -> None:
-        ray.get([worker.clear_memory.remote() for worker in self._workers])
-
     def shutdown(self) -> None:
         ray.get([worker.shutdown.remote() for worker in self._workers])
         self._workers.clear()

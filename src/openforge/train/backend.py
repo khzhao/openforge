@@ -5,8 +5,7 @@ from contextlib import AbstractContextManager
 
 from tensordict import TensorDict
 
-from openforge.policy.types import PolicyArtifactRef
-from openforge.train.types import CheckpointInfo, TrainStepResult, TrainWorkerSpec
+from openforge.train.types import TrainStepResult, TrainWorkerSpec
 
 __all__ = ["TrainBackend"]
 
@@ -39,45 +38,12 @@ class TrainBackend(ABC):
         """Apply optimizer step and return per-rank step metadata."""
 
     @abstractmethod
-    def save_checkpoint(
-        self,
-        *,
-        step: int,
-        policy_version: int,
-        save_optimizer: bool = True,
-    ) -> CheckpointInfo:
-        """Save a checkpoint and return metadata for the created artifact."""
-
-    @abstractmethod
-    def load_checkpoint(
-        self,
-        *,
-        latest: bool = True,
-        step: int | None = None,
-        load_optimizer: bool = True,
-    ) -> CheckpointInfo | None:
-        """Load a checkpoint and return metadata for the checkpoint that was loaded."""
-
-    @abstractmethod
-    def export_policy_artifact(
-        self,
-        *,
-        step: int,
-        policy_version: int,
-    ) -> PolicyArtifactRef | None:
-        """Publish a train checkpoint as an artifact reference for rollout loading."""
-
-    @abstractmethod
     def sleep(self) -> None:
         """Move runtime state to a low-memory idle state."""
 
     @abstractmethod
     def wakeup(self) -> None:
         """Restore runtime state from idle to active training."""
-
-    @abstractmethod
-    def clear_memory(self) -> None:
-        """Release temporary allocator state and other non-persistent memory."""
 
     @abstractmethod
     def shutdown(self) -> None:
