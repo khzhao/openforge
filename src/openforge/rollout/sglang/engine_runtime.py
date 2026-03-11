@@ -1,9 +1,6 @@
 # Copyright 2026 openforge
 
-import multiprocessing
-import os
 import time
-from collections.abc import Callable
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any
@@ -12,41 +9,11 @@ from openforge.policy.types import PolicyArtifactRef
 
 from .client import SGLangControlClient
 from .spec import SGLangEngineSpec
+from .utils import kill_sglang_process_tree, launch_sglang_process
 
 HEALTHCHECK_TIMEOUT_SECONDS = 300.0
 HEALTHCHECK_POLL_INTERVAL_SECONDS = 1.0
 PROCESS_TERMINATION_TIMEOUT_SECONDS = 30.0
-
-
-def _serve_sglang(server_args_payload: dict[str, Any]) -> None:
-    from sglang.srt.entrypoints.http_server import launch_server
-    from sglang.srt.server_args import ServerArgs
-    from sglang.srt.utils import kill_process_tree
-
-    server_args = ServerArgs(**server_args_payload)
-    if getattr(server_args, "host", None) is not None:
-        server_args.host = str(server_args.host).strip("[]")
-
-    try:
-        launch_server(server_args)
-    finally:
-        kill_process_tree(os.getpid(), include_parent=False)
-
-
-def _launch_sglang_process(server_args_payload: dict[str, Any]) -> BaseProcess:
-    ctx = multiprocessing.get_context("spawn")
-    process = ctx.Process(target=_serve_sglang, args=(server_args_payload,))
-    process.start()
-    return process
-
-
-def _kill_process_tree(pid: int) -> bool:
-    try:
-        from sglang.srt.utils import kill_process_tree
-    except Exception:
-        return False
-    kill_process_tree(pid, include_parent=True)
-    return True
 
 
 class SGLangEngineRuntime:
@@ -57,20 +24,16 @@ class SGLangEngineRuntime:
         spec: SGLangEngineSpec,
         *,
         request_timeout_seconds: float = 5.0,
-        process_launcher: Callable[
-            [dict[str, Any]], BaseProcess
-        ] = _launch_sglang_process,
     ) -> None:
         self.spec = spec
         self.request_timeout_seconds = request_timeout_seconds
-        self._process_launcher = process_launcher
         self.process: BaseProcess | None = None
         self.client = SGLangControlClient(spec.url)
 
     def start(self) -> None:
         if self.process is not None and self.process.is_alive():
             return
-        self.process = self._process_launcher(dict(self.spec.server_args))
+        self.process = launch_sglang_process(dict(self.spec.server_args))
         self._wait_until_ready()
 
     def stop(self) -> None:
@@ -78,7 +41,7 @@ class SGLangEngineRuntime:
         if process is None:
             return
         if process.is_alive():
-            if not _kill_process_tree(process.pid):
+            if not kill_sglang_process_tree(process.pid):
                 process.terminate()
             process.join(timeout=PROCESS_TERMINATION_TIMEOUT_SECONDS)
             if process.is_alive():
