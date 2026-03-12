@@ -17,6 +17,7 @@ from torch.distributed.fsdp import (
 )
 from transformers import AutoModelForCausalLM
 
+from openforge.train.backend import TrainBackend
 from openforge.train.types import TrainWorkerSpec
 from openforge.utils.torch import get_torch_dtype
 
@@ -25,7 +26,7 @@ from .memory import offload_optimizer, offload_params, onload_optimizer, onload_
 from .utils import apply_fsdp2, create_device_mesh
 
 
-class FSDP2Engine:
+class FSDP2Engine(TrainBackend):
     """FSDP2Engine for training. Essentially a wrapper around PyTorch FSDP2."""
 
     def __init__(self, spec: TrainWorkerSpec | None = None) -> None:
@@ -87,8 +88,8 @@ class FSDP2Engine:
         self.scheduler = self._create_scheduler()
         self.grad_scaler = self._create_grad_scaler()
 
-        # 4. Miscellaneous components
-        self.sleeping = False
+        # 4. Finalize components
+        self._finalize()
 
     def zero_grad(self) -> None:
         self.optimizer.zero_grad(set_to_none=True)
@@ -248,10 +249,6 @@ class FSDP2Engine:
         )
         if not is_eval_only and fsdp_cfg.gradient_checkpointing:
             model.gradient_checkpointing_enable()
-        if is_eval_only:
-            model.eval()
-        else:
-            model.train()
 
         model = apply_fsdp2(
             model=model,
@@ -261,10 +258,11 @@ class FSDP2Engine:
             reshard_after_forward=fsdp_cfg.reshard_after_forward,
             shard_modules=fsdp_cfg.shard_modules,
         )
-
         if is_eval_only:
             model.requires_grad_(False)
             model.eval()
+        else:
+            model.train()
         return model
 
     def _create_optimizer(self) -> optim.Optimizer:
@@ -307,3 +305,4 @@ class FSDP2Engine:
         if self.ref_model is not None:
             onload_params(self.ref_model, self.device, onload_grad=False)
         onload_optimizer(self.optimizer, self.device)
+        self.sleeping = False

@@ -46,7 +46,7 @@ def init_process_group(
     world_size: int = -1,
     rank: int = -1,
     store: Store | None = None,
-    group_name: str = None,
+    group_name: str | None = None,
     pg_options: Any | None = None,
 ):
     """Initialize a custom process group."""
