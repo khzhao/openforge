@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from openforge.configs.models import OpenForgeConfig
 
 __all__ = [
-    "CheckpointInfo",
     "TrainStepResult",
     "TrainWorkerSpec",
     "TrainWorkerState",
@@ -31,7 +30,6 @@ class TrainWorkerState:
     world_size: int
     backend: str
     device: str
-    initialized: bool
     sleeping: bool
 
 
@@ -42,12 +40,3 @@ class TrainStepResult:
     rank: int
     global_step: int | None
     metrics: dict[str, float]
-
-
-@dataclass(slots=True)
-class CheckpointInfo:
-    """Metadata describing one checkpoint."""
-
-    step: int
-    policy_version: int
-    path: str

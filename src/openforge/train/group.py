@@ -47,12 +47,13 @@ class TrainWorkerGroup:
             )
             for rank in range(self.world_size)
         ]
-        return ray.get(
+        states = ray.get(
             [
                 worker.initialize.remote(spec)
                 for worker, spec in zip(self.workers, specs, strict=True)
             ]
         )
+        return states
 
     def states(self) -> list[TrainWorkerState]:
         return ray.get([worker.status.remote() for worker in self.workers])
@@ -83,6 +84,66 @@ class TrainWorkerGroup:
 
     def wakeup(self) -> None:
         ray.get([worker.wakeup.remote() for worker in self.workers])
+
+    def build_tensor_buckets(self, *, bucket_bytes: int) -> list[str]:
+        results = ray.get(
+            [
+                worker.build_tensor_buckets.remote(bucket_bytes=bucket_bytes)
+                for worker in self.workers
+            ]
+        )
+        result = results[0]
+        assert result is not None, "publisher rank returned no tensor buckets"
+        return result
+
+    def export_checkpoint(self, *, policy_version: int) -> str:
+        results = ray.get(
+            [
+                worker.export_checkpoint.remote(policy_version=policy_version)
+                for worker in self.workers
+            ]
+        )
+        result = results[0]
+        assert result is not None, "publisher rank returned no checkpoint path"
+        return result
+
+    def prepare_distributed_update(
+        self,
+        *,
+        bucket_bytes: int,
+        world_size: int,
+    ) -> dict[str, object]:
+        results = ray.get(
+            [
+                worker.prepare_distributed_update.remote(
+                    bucket_bytes=bucket_bytes,
+                    world_size=world_size,
+                )
+                for worker in self.workers
+            ]
+        )
+        result = results[0]
+        assert result is not None, "publisher rank returned no distributed update plan"
+        return result
+
+    def connect_distributed_update(self, *, plan: dict[str, object]) -> None:
+        ray.get(self.workers[0].connect_distributed_update.remote(plan=plan))
+
+    def broadcast_distributed_bucket(
+        self,
+        *,
+        plan: dict[str, object],
+        bucket_index: int,
+    ) -> None:
+        ray.get(
+            self.workers[0].broadcast_distributed_bucket.remote(
+                plan=plan,
+                bucket_index=bucket_index,
+            )
+        )
+
+    def finish_distributed_update(self, *, plan: dict[str, object]) -> None:
+        ray.get(self.workers[0].finish_distributed_update.remote(plan=plan))
 
     def shutdown(self) -> None:
         ray.get([worker.shutdown.remote() for worker in self.workers])
