@@ -2,12 +2,10 @@
 
 import time
 from multiprocessing.process import BaseProcess
-from pathlib import Path
 from typing import Any
 
 from openforge.configs.models import OpenForgeConfig
 from openforge.configs.topology import ParallelismConfig
-from openforge.policy.types import PolicyArtifactRef
 
 from .client import SGLangControlClient
 from .utils import (
@@ -128,6 +126,21 @@ class SGLangEngineRuntime:
             timeout=self.request_timeout_seconds if timeout is None else timeout,
         )
 
+    def pause_generation(
+        self,
+        *,
+        mode: str = "abort",
+    ) -> dict[str, Any]:
+        return self.client.pause_generation(
+            mode=mode,
+            timeout=max(self.request_timeout_seconds, 30.0),
+        )
+
+    def continue_generation(self) -> dict[str, Any]:
+        return self.client.continue_generation(
+            timeout=max(self.request_timeout_seconds, 30.0),
+        )
+
     def update_weights_from_disk(
         self,
         *,
@@ -136,6 +149,11 @@ class SGLangEngineRuntime:
         flush_cache: bool = True,
         abort_all_requests: bool = False,
         weight_version: str | None = None,
+        is_async: bool = False,
+        torch_empty_cache: bool = False,
+        keep_pause: bool = False,
+        recapture_cuda_graph: bool = False,
+        token_step: int = 0,
     ) -> dict[str, Any]:
         payload = self.client.update_weights_from_disk(
             model_path=model_path,
@@ -143,47 +161,92 @@ class SGLangEngineRuntime:
             flush_cache=flush_cache,
             abort_all_requests=abort_all_requests,
             weight_version=weight_version,
+            is_async=is_async,
+            torch_empty_cache=torch_empty_cache,
+            keep_pause=keep_pause,
+            recapture_cuda_graph=recapture_cuda_graph,
+            token_step=token_step,
             timeout=max(self.request_timeout_seconds, 30.0),
         )
         self.model_path = model_path
-        if weight_version is not None:
-            try:
-                self.policy_version = int(weight_version)
-            except ValueError:
-                pass
+        self._maybe_set_policy_version(weight_version)
         return payload
 
-    def load_policy_artifact(
+    def update_weights_from_tensor(
         self,
-        artifact: PolicyArtifactRef,
         *,
+        serialized_named_tensors: list[str],
+        load_format: str | None = None,
         flush_cache: bool = True,
         abort_all_requests: bool = False,
+        weight_version: str | None = None,
     ) -> dict[str, Any]:
-        artifact_path = Path(artifact.path)
-        if not artifact_path.is_dir():
-            raise FileNotFoundError(
-                f"policy artifact path does not exist or is not a directory: {artifact.path}"
-            )
-
-        payload = self.update_weights_from_disk(
-            model_path=str(artifact_path),
-            load_format=artifact.load_format,
+        payload = self.client.update_weights_from_tensor(
+            serialized_named_tensors=serialized_named_tensors,
+            load_format=load_format,
             flush_cache=flush_cache,
             abort_all_requests=abort_all_requests,
-            weight_version=str(artifact.policy_version),
+            weight_version=weight_version,
+            timeout=max(self.request_timeout_seconds, 30.0),
         )
-        model_info = self.get_model_info()
-        loaded_weight_version = model_info.get("weight_version")
-        if loaded_weight_version is not None and (
-            str(loaded_weight_version) != str(artifact.policy_version)
-        ):
-            raise RuntimeError(
-                "sglang reported weight_version "
-                f"{loaded_weight_version!r} after loading artifact version "
-                f"{artifact.policy_version!r}"
-            )
+        self._maybe_set_policy_version(weight_version)
         return payload
+
+    def init_weights_update_group(
+        self,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str = "weight_update_group",
+        *,
+        backend: str = "nccl",
+    ) -> dict[str, Any]:
+        return self.client.init_weights_update_group(
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=rank_offset,
+            world_size=world_size,
+            group_name=group_name,
+            backend=backend,
+            timeout=max(self.request_timeout_seconds, 30.0),
+        )
+
+    def update_weights_from_distributed(
+        self,
+        *,
+        names: list[str],
+        dtypes: list[str],
+        shapes: list[list[int]],
+        group_name: str = "weight_update_group",
+        flush_cache: bool = True,
+        abort_all_requests: bool = False,
+        weight_version: str | None = None,
+        load_format: str | None = None,
+    ) -> dict[str, Any]:
+        payload = self.client.update_weights_from_distributed(
+            names=names,
+            dtypes=dtypes,
+            shapes=shapes,
+            group_name=group_name,
+            flush_cache=flush_cache,
+            abort_all_requests=abort_all_requests,
+            weight_version=weight_version,
+            load_format=load_format,
+            timeout=max(self.request_timeout_seconds, 30.0),
+        )
+        self._maybe_set_policy_version(weight_version)
+        return payload
+
+    def destroy_weights_update_group(
+        self,
+        *,
+        group_name: str = "weight_update_group",
+    ) -> dict[str, Any]:
+        return self.client.destroy_weights_update_group(
+            group_name=group_name,
+            timeout=max(self.request_timeout_seconds, 30.0),
+        )
 
     def check_weights(self, *, action: str) -> dict[str, Any]:
         return self.client.check_weights(
@@ -193,6 +256,14 @@ class SGLangEngineRuntime:
 
     def flush_cache(self) -> bool:
         return self.client.flush_cache(timeout=self.request_timeout_seconds)
+
+    def _maybe_set_policy_version(self, weight_version: str | None) -> None:
+        if weight_version is None:
+            return
+        try:
+            self.policy_version = int(weight_version)
+        except ValueError:
+            pass
 
     def _wait_until_ready(self) -> None:
         deadline = time.monotonic() + HEALTHCHECK_TIMEOUT_SECONDS

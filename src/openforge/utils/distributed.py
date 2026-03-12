@@ -39,7 +39,7 @@ def get_gloo_group():
 
 # Copied from PyTorch to allow creating multiple main groups.
 # https://github.com/pytorch/pytorch/blob/main/torch/distributed/distributed_c10d.py
-def init_process_group(
+def init_custom_process_group(
     backend: str | Backend = None,
     init_method: str | None = None,
     timeout: timedelta | None = None,
@@ -48,7 +48,7 @@ def init_process_group(
     store: Store | None = None,
     group_name: str | None = None,
     pg_options: Any | None = None,
-):
+) -> dist.ProcessGroup:
     """Initialize a custom process group."""
     assert (store is None) or (init_method is None), (
         "Cannot specify both init_method and store."

@@ -49,6 +49,31 @@ class SGLangControlClient:
             timeout=timeout,
         )
 
+    def pause_generation(
+        self,
+        *,
+        mode: str = "abort",
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return self._request_json_dict(
+            "POST",
+            "/pause_generation",
+            payload={"mode": mode},
+            timeout=timeout,
+        )
+
+    def continue_generation(
+        self,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return self._request_json_dict(
+            "POST",
+            "/continue_generation",
+            payload={},
+            timeout=timeout,
+        )
+
     def update_weights_from_disk(
         self,
         *,
@@ -57,6 +82,11 @@ class SGLangControlClient:
         flush_cache: bool = True,
         abort_all_requests: bool = False,
         weight_version: str | None = None,
+        is_async: bool = False,
+        torch_empty_cache: bool = False,
+        keep_pause: bool = False,
+        recapture_cuda_graph: bool = False,
+        token_step: int = 0,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
         payload = {
@@ -65,11 +95,109 @@ class SGLangControlClient:
             "flush_cache": flush_cache,
             "abort_all_requests": abort_all_requests,
             "weight_version": weight_version,
+            "is_async": is_async,
+            "torch_empty_cache": torch_empty_cache,
+            "keep_pause": keep_pause,
+            "recapture_cuda_graph": recapture_cuda_graph,
+            "token_step": token_step,
         }
         return self._request_json_dict(
             "POST",
             "/update_weights_from_disk",
             payload=payload,
+            timeout=timeout,
+        )
+
+    def update_weights_from_tensor(
+        self,
+        *,
+        serialized_named_tensors: list[str],
+        load_format: str | None = None,
+        flush_cache: bool = True,
+        abort_all_requests: bool = False,
+        weight_version: str | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        payload = {
+            "serialized_named_tensors": serialized_named_tensors,
+            "load_format": load_format,
+            "flush_cache": flush_cache,
+            "abort_all_requests": abort_all_requests,
+            "weight_version": weight_version,
+        }
+        return self._request_json_dict(
+            "POST",
+            "/update_weights_from_tensor",
+            payload=payload,
+            timeout=timeout,
+        )
+
+    def init_weights_update_group(
+        self,
+        *,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str = "weight_update_group",
+        backend: str = "nccl",
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        payload = {
+            "master_address": master_address,
+            "master_port": master_port,
+            "rank_offset": rank_offset,
+            "world_size": world_size,
+            "group_name": group_name,
+            "backend": backend,
+        }
+        return self._request_json_dict(
+            "POST",
+            "/init_weights_update_group",
+            payload=payload,
+            timeout=timeout,
+        )
+
+    def update_weights_from_distributed(
+        self,
+        *,
+        names: list[str],
+        dtypes: list[str],
+        shapes: list[list[int]],
+        group_name: str = "weight_update_group",
+        flush_cache: bool = True,
+        abort_all_requests: bool = False,
+        weight_version: str | None = None,
+        load_format: str | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        payload = {
+            "names": names,
+            "dtypes": dtypes,
+            "shapes": shapes,
+            "group_name": group_name,
+            "flush_cache": flush_cache,
+            "abort_all_requests": abort_all_requests,
+            "weight_version": weight_version,
+            "load_format": load_format,
+        }
+        return self._request_json_dict(
+            "POST",
+            "/update_weights_from_distributed",
+            payload=payload,
+            timeout=timeout,
+        )
+
+    def destroy_weights_update_group(
+        self,
+        *,
+        group_name: str = "weight_update_group",
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return self._request_json_dict(
+            "POST",
+            "/destroy_weights_update_group",
+            payload={"group_name": group_name},
             timeout=timeout,
         )
 
