@@ -207,12 +207,20 @@ class SGLangControlClient:
         action: str,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        return self._request_json_dict(
+        status_code, body = self._request(
             "POST",
             "/weights_checker",
             payload={"action": action},
             timeout=timeout,
+            raise_for_status=False,
         )
+        if status_code not in (HTTPStatus.OK, HTTPStatus.BAD_REQUEST):
+            raise RuntimeError(
+                f"sglang request POST /weights_checker failed with status {status_code}: {body!r}"
+            )
+        if not isinstance(body, dict):
+            raise RuntimeError("sglang /weights_checker did not return a JSON object")
+        return body
 
     def _ok(self, method: str, path: str, *, timeout: float) -> bool:
         try:

@@ -166,7 +166,7 @@ class SGLangEngineRuntime:
             keep_pause=keep_pause,
             recapture_cuda_graph=recapture_cuda_graph,
             token_step=token_step,
-            timeout=max(self.request_timeout_seconds, 30.0),
+            timeout=self._weight_update_timeout(),
         )
         self.model_path = model_path
         self._maybe_set_policy_version(weight_version)
@@ -187,7 +187,7 @@ class SGLangEngineRuntime:
             flush_cache=flush_cache,
             abort_all_requests=abort_all_requests,
             weight_version=weight_version,
-            timeout=max(self.request_timeout_seconds, 30.0),
+            timeout=self._weight_update_timeout(),
         )
         self._maybe_set_policy_version(weight_version)
         return payload
@@ -209,7 +209,7 @@ class SGLangEngineRuntime:
             world_size=world_size,
             group_name=group_name,
             backend=backend,
-            timeout=max(self.request_timeout_seconds, 30.0),
+            timeout=self._weight_update_timeout(),
         )
 
     def update_weights_from_distributed(
@@ -233,7 +233,7 @@ class SGLangEngineRuntime:
             abort_all_requests=abort_all_requests,
             weight_version=weight_version,
             load_format=load_format,
-            timeout=max(self.request_timeout_seconds, 30.0),
+            timeout=self._weight_update_timeout(),
         )
         self._maybe_set_policy_version(weight_version)
         return payload
@@ -245,7 +245,7 @@ class SGLangEngineRuntime:
     ) -> dict[str, Any]:
         return self.client.destroy_weights_update_group(
             group_name=group_name,
-            timeout=max(self.request_timeout_seconds, 30.0),
+            timeout=self._weight_update_timeout(),
         )
 
     def check_weights(self, *, action: str) -> dict[str, Any]:
@@ -264,6 +264,9 @@ class SGLangEngineRuntime:
             self.policy_version = int(weight_version)
         except ValueError:
             pass
+
+    def _weight_update_timeout(self) -> float:
+        return max(self.request_timeout_seconds, 300.0)
 
     def _wait_until_ready(self) -> None:
         deadline = time.monotonic() + HEALTHCHECK_TIMEOUT_SECONDS

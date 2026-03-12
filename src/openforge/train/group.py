@@ -3,6 +3,7 @@
 from typing import Sequence
 
 import ray
+import torch
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from tensordict import TensorDict
@@ -85,7 +86,11 @@ class TrainWorkerGroup:
     def wakeup(self) -> None:
         ray.get([worker.wakeup.remote() for worker in self.workers])
 
-    def build_tensor_buckets(self, *, bucket_bytes: int) -> list[str]:
+    def build_tensor_buckets(
+        self,
+        *,
+        bucket_bytes: int,
+    ) -> list[list[tuple[str, torch.Tensor]]]:
         results = ray.get(
             [
                 worker.build_tensor_buckets.remote(bucket_bytes=bucket_bytes)
@@ -95,6 +100,46 @@ class TrainWorkerGroup:
         result = results[0]
         assert result is not None, "publisher rank returned no tensor buckets"
         return result
+
+    def push_weights_to_rollouts_from_tensor(
+        self,
+        *,
+        rollout_workers: Sequence[object],
+        policy_version: int,
+        bucket_bytes: int,
+    ) -> bool:
+        if self.world_size <= 1 or not torch.cuda.is_available():
+            return False
+
+        rollout_world_sizes = ray.get(
+            [worker.distributed_world_size.remote() for worker in rollout_workers]
+        )
+        if self.world_size != sum(int(size) for size in rollout_world_sizes):
+            return False
+
+        train_node_ips = ray.get([worker.node_ip_address.remote() for worker in self.workers])
+        rollout_node_ips = ray.get(
+            [worker.node_ip_address.remote() for worker in rollout_workers]
+        )
+        if (
+            len(set(train_node_ips)) != 1
+            or len(set(rollout_node_ips)) != 1
+            or train_node_ips[0] != rollout_node_ips[0]
+        ):
+            return False
+
+        ray.get(
+            [
+                worker.push_weights_to_rollouts_from_tensor.remote(
+                    rollout_workers=rollout_workers,
+                    rollout_world_sizes=rollout_world_sizes,
+                    policy_version=policy_version,
+                    bucket_bytes=bucket_bytes,
+                )
+                for worker in self.workers
+            ]
+        )
+        return True
 
     def export_checkpoint(self, *, policy_version: int) -> str:
         results = ray.get(
@@ -106,44 +151,6 @@ class TrainWorkerGroup:
         result = results[0]
         assert result is not None, "publisher rank returned no checkpoint path"
         return result
-
-    def prepare_distributed_update(
-        self,
-        *,
-        bucket_bytes: int,
-        world_size: int,
-    ) -> dict[str, object]:
-        results = ray.get(
-            [
-                worker.prepare_distributed_update.remote(
-                    bucket_bytes=bucket_bytes,
-                    world_size=world_size,
-                )
-                for worker in self.workers
-            ]
-        )
-        result = results[0]
-        assert result is not None, "publisher rank returned no distributed update plan"
-        return result
-
-    def connect_distributed_update(self, *, plan: dict[str, object]) -> None:
-        ray.get(self.workers[0].connect_distributed_update.remote(plan=plan))
-
-    def broadcast_distributed_bucket(
-        self,
-        *,
-        plan: dict[str, object],
-        bucket_index: int,
-    ) -> None:
-        ray.get(
-            self.workers[0].broadcast_distributed_bucket.remote(
-                plan=plan,
-                bucket_index=bucket_index,
-            )
-        )
-
-    def finish_distributed_update(self, *, plan: dict[str, object]) -> None:
-        ray.get(self.workers[0].finish_distributed_update.remote(plan=plan))
 
     def shutdown(self) -> None:
         ray.get([worker.shutdown.remote() for worker in self.workers])

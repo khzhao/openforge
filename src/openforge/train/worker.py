@@ -1,12 +1,12 @@
 # Copyright 2026 openforge
 
-import os
 import uuid
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
+import ray
 import torch
 import torch.distributed as dist
 from huggingface_hub import save_torch_state_dict
@@ -15,13 +15,15 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
 )
+from torch.distributed.tensor import DTensor, Replicate
 from transformers import AutoTokenizer
 
 from openforge.train.fsdp2.base import FSDP2Engine
 from openforge.train.types import TrainStepResult, TrainWorkerSpec, TrainWorkerState
-from openforge.utils.distributed import init_custom_process_group
-from openforge.utils.networking import get_free_port
-from openforge.utils.torch import get_torch_dtype_name
+from openforge.utils.distributed import init_gloo_group
+from openforge.utils.packed import serialize_tensor_bucket
+from openforge.utils.ray import get_current_ray_node_ip_address
+from openforge.utils.torch import get_torch_dtype
 
 __all__ = ["TrainWorker"]
 
@@ -38,10 +40,6 @@ class TrainWorker:
 
         self.spec = spec
         self.engine = FSDP2Engine(spec)
-        self.distributed_update_buckets: dict[
-            str, list[list[tuple[str, torch.Tensor]]]
-        ] = {}
-        self.distributed_update_groups: dict[str, dist.ProcessGroup] = {}
         self.state = TrainWorkerState(
             rank=spec.rank,
             world_size=spec.world_size,
@@ -89,11 +87,15 @@ class TrainWorker:
     def status(self) -> TrainWorkerState:
         return self.state
 
-    def build_tensor_buckets(self, *, bucket_bytes: int) -> list[str] | None:
+    def build_tensor_buckets(
+        self,
+        *,
+        bucket_bytes: int,
+    ) -> list[list[tuple[str, torch.Tensor]]] | None:
         named_buckets = self._build_named_tensor_buckets(bucket_bytes=bucket_bytes)
         if self.spec.rank != 0:
             return None
-        return [self._serialize_tensor_bucket(bucket) for bucket in named_buckets]
+        return named_buckets
 
     def export_checkpoint(self, *, policy_version: int) -> str | None:
         state_dict = get_model_state_dict(
@@ -119,77 +121,82 @@ class TrainWorker:
         ).save_pretrained(checkpoint_dir)
         return str(checkpoint_dir)
 
-    def prepare_distributed_update(
+    @staticmethod
+    def node_ip_address() -> str:
+        return get_current_ray_node_ip_address()
+
+    def push_weights_to_rollouts_from_tensor(
         self,
         *,
+        rollout_workers: Sequence[Any],
+        rollout_world_sizes: Sequence[int],
+        policy_version: int,
         bucket_bytes: int,
-        world_size: int,
-    ) -> dict[str, object] | None:
-        named_buckets = self._build_named_tensor_buckets(bucket_bytes=bucket_bytes)
-        if self.spec.rank != 0:
-            return None
-
-        group_name = f"openforge-weight-update-{uuid.uuid4().hex[:10]}"
-        master_port = get_free_port(start=max(self.spec.master_port + 100, 20000))
-        self.distributed_update_buckets[group_name] = named_buckets
-        return {
-            "group_name": group_name,
-            "master_addr": self.spec.master_addr,
-            "master_port": master_port,
-            "world_size": world_size,
-            "bucket_metas": [
-                self._build_bucket_meta(bucket) for bucket in named_buckets
-            ],
-        }
-
-    def connect_distributed_update(self, *, plan: dict[str, object]) -> None:
-        if self.spec.rank != 0:
-            return
-        if self.engine.device.type != "cuda":
-            raise RuntimeError("distributed weight update requires CUDA")
-
-        os.environ["NCCL_CUMEM_ENABLE"] = "0"
-        os.environ["NCCL_NVLS_ENABLE"] = "0"
-        torch.cuda.set_device(self.engine.device)
-        group_name = str(plan["group_name"])
-        self.distributed_update_groups[group_name] = init_custom_process_group(
-            backend="nccl",
-            init_method=f"tcp://{plan['master_addr']}:{plan['master_port']}",
-            world_size=int(plan["world_size"]),
-            rank=0,
-            group_name=group_name,
-        )
-
-    def broadcast_distributed_bucket(
-        self,
-        *,
-        plan: dict[str, object],
-        bucket_index: int,
     ) -> None:
-        if self.spec.rank != 0:
-            return
+        serialized_buckets = self._build_rank_local_serialized_tensor_buckets(
+            bucket_bytes=bucket_bytes
+        )
+        gloo_group = init_gloo_group()
+        bucket_counts = [None] * self.spec.world_size
+        dist.all_gather_object(bucket_counts, len(serialized_buckets), group=gloo_group)
+        if any(count != bucket_counts[0] for count in bucket_counts):
+            raise RuntimeError(
+                f"tensor sync bucket count mismatch across train ranks: {bucket_counts}"
+            )
 
-        group_name = str(plan["group_name"])
-        process_group = self.distributed_update_groups[group_name]
-        for _name, tensor in self.distributed_update_buckets[group_name][bucket_index]:
-            device_tensor = tensor.to(self.engine.device).contiguous()
-            dist.broadcast(device_tensor, src=0, group=process_group)
+        for bucket_index, serialized_bucket in enumerate(serialized_buckets):
+            gathered_buckets = [None] * self.spec.world_size if self.spec.rank == 0 else None
+            dist.gather_object(
+                obj=serialized_bucket,
+                object_gather_list=gathered_buckets,
+                dst=0,
+                group=gloo_group,
+            )
 
-    def finish_distributed_update(self, *, plan: dict[str, object]) -> None:
-        if self.spec.rank != 0:
-            return
+            bucket_error = None
+            if self.spec.rank == 0:
+                try:
+                    assert gathered_buckets is not None
+                    flush_cache = bucket_index == len(serialized_buckets) - 1
+                    refs = []
+                    rank_offset = 0
+                    for rollout_worker, rollout_world_size in zip(
+                        rollout_workers,
+                        rollout_world_sizes,
+                        strict=True,
+                    ):
+                        next_rank_offset = rank_offset + int(rollout_world_size)
+                        refs.append(
+                            rollout_worker.update_weights_from_tensor.remote(
+                                serialized_named_tensors=gathered_buckets[
+                                    rank_offset:next_rank_offset
+                                ],
+                                policy_version=policy_version,
+                                load_format="flattened_bucket",
+                                flush_cache=flush_cache,
+                            )
+                        )
+                        rank_offset = next_rank_offset
+                    if rank_offset != len(gathered_buckets):
+                        raise RuntimeError(
+                            "tensor sync expected one gathered payload per train rank"
+                        )
+                    ray.get(refs)
+                except Exception as exc:  # noqa: BLE001
+                    bucket_error = repr(exc)
 
-        group_name = str(plan["group_name"])
-        process_group = self.distributed_update_groups.pop(group_name, None)
-        if process_group is not None:
-            dist.destroy_process_group(process_group)
-        self.distributed_update_buckets.pop(group_name, None)
+            bucket_errors = [None] * self.spec.world_size
+            dist.all_gather_object(bucket_errors, bucket_error, group=gloo_group)
+            first_error = next(
+                (error for error in bucket_errors if error is not None),
+                None,
+            )
+            if first_error is not None:
+                raise RuntimeError(
+                    f"tensor sync rollout update failed on bucket {bucket_index}: {first_error}"
+                )
 
     def shutdown(self) -> None:
-        for process_group in self.distributed_update_groups.values():
-            dist.destroy_process_group(process_group)
-        self.distributed_update_groups.clear()
-        self.distributed_update_buckets.clear()
         self.engine.shutdown()
 
     def _build_named_tensor_buckets(
@@ -207,10 +214,19 @@ class TrainWorker:
         if self.spec.rank != 0:
             return []
 
+        publish_dtype = get_torch_dtype(
+            self.spec.cfg.train.config.mixed_precision.param_dtype
+        )
+        parameter_names = {
+            name for name, _parameter in self.engine.main_model.named_parameters()
+        }
         named_tensors = [
-            (name, tensor.detach().cpu().contiguous())
+            (
+                name,
+                tensor.detach().to(dtype=publish_dtype).cpu().contiguous(),
+            )
             for name, tensor in state_dict.items()
-            if isinstance(tensor, torch.Tensor)
+            if isinstance(tensor, torch.Tensor) and name in parameter_names
         ]
         if not named_tensors:
             raise RuntimeError("main_model state_dict did not contain any tensors")
@@ -230,23 +246,87 @@ class TrainWorker:
             buckets.append(bucket)
         return buckets
 
-    def _build_bucket_meta(
+    def _build_rank_local_serialized_tensor_buckets(
         self,
-        bucket: list[tuple[str, torch.Tensor]],
-    ) -> dict[str, list[object]]:
-        return {
-            "names": [name for name, _tensor in bucket],
-            "dtypes": [get_torch_dtype_name(tensor.dtype) for _name, tensor in bucket],
-            "shapes": [list(tensor.shape) for _name, tensor in bucket],
+        *,
+        bucket_bytes: int,
+    ) -> list[str]:
+        self._patch_torch_reductions_for_sglang()
+        publish_dtype = get_torch_dtype(
+            self.spec.cfg.train.config.mixed_precision.param_dtype
+        )
+        parameter_names = {
+            name for name, _parameter in self.engine.main_model.named_parameters()
         }
 
-    def _serialize_tensor_bucket(self, bucket: list[tuple[str, torch.Tensor]]) -> str:
-        from sglang.srt.utils import MultiprocessingSerializer
-        from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
+        serialized_buckets: list[str] = []
+        bucket: list[tuple[str, torch.Tensor | Any]] = []
+        current_bucket_bytes = 0
+        for name, tensor in self.engine.main_model.state_dict().items():
+            if not isinstance(tensor, torch.Tensor) or name not in parameter_names:
+                continue
+            tensor_bytes = tensor.numel() * tensor.element_size()
+            if bucket and current_bucket_bytes + tensor_bytes > bucket_bytes:
+                serialized_buckets.append(
+                    self._serialize_rank_local_tensor_bucket(
+                        bucket=bucket,
+                        publish_dtype=publish_dtype,
+                    )
+                )
+                bucket = []
+                current_bucket_bytes = 0
+            bucket.append((name, self._prepare_rank_local_publish_tensor(tensor)))
+            current_bucket_bytes += tensor_bytes
 
-        flattened_bucket = FlattenedTensorBucket(named_tensors=bucket)
-        payload = {
-            "flattened_tensor": flattened_bucket.get_flattened_tensor(),
-            "metadata": flattened_bucket.get_metadata(),
-        }
-        return MultiprocessingSerializer.serialize(payload, output_str=True)
+        if bucket:
+            serialized_buckets.append(
+                self._serialize_rank_local_tensor_bucket(
+                    bucket=bucket,
+                    publish_dtype=publish_dtype,
+                )
+            )
+        if not serialized_buckets:
+            raise RuntimeError("main_model state_dict did not contain any tensors")
+        return serialized_buckets
+
+    def _prepare_rank_local_publish_tensor(
+        self,
+        tensor: torch.Tensor,
+    ) -> torch.Tensor | Any:
+        if isinstance(tensor, DTensor):
+            return tensor.redistribute(
+                placements=[Replicate()] * tensor.device_mesh.ndim,
+                async_op=True,
+            ).to_local()
+        if tensor.device != self.engine.device:
+            tensor = tensor.to(self.engine.device)
+        return tensor
+
+    def _serialize_rank_local_tensor_bucket(
+        self,
+        *,
+        bucket: list[tuple[str, torch.Tensor | Any]],
+        publish_dtype: torch.dtype,
+    ) -> str:
+        ready_bucket = [
+            (
+                name,
+                (tensor.wait() if hasattr(tensor, "wait") else tensor)
+                .detach()
+                .to(dtype=publish_dtype)
+                .contiguous(),
+            )
+            for name, tensor in bucket
+        ]
+        return serialize_tensor_bucket(ready_bucket)
+
+    @staticmethod
+    def _patch_torch_reductions_for_sglang() -> None:
+        if not torch.cuda.is_available():
+            return
+        try:
+            from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+        except ImportError:
+            from sglang.srt.patch_torch import monkey_patch_torch_reductions
+
+        monkey_patch_torch_reductions()
