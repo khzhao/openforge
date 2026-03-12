@@ -17,20 +17,18 @@ from openforge.configs.topology import ParallelismConfig
 def get_sglang_global_gpu_offset_for_replica(
     cfg: OpenForgeConfig,
     engine_replica_index: int,
-    colocated: bool = False,
 ) -> int:
     """Return the first global GPU id assigned to one rollout engine replica."""
     assert engine_replica_index >= 0, "engine_replica_index must be non-negative"
     assert engine_replica_index < cfg.rollout.num_engine_replicas, (
         "engine_replica_index is out of range"
     )
-    base_offset = 0 if colocated else cfg.train.total_gpus
     per_replica_gpus = [
         engine_group.num_gpus_per_replica
         for engine_group in cfg.rollout.engine_groups
         for _ in range(engine_group.replicas)
     ]
-    offsets = list(accumulate([base_offset, *per_replica_gpus]))
+    offsets = list(accumulate([cfg.train.total_gpus, *per_replica_gpus]))
     return offsets[engine_replica_index]
 
 
@@ -87,7 +85,6 @@ def kill_sglang_process_tree(pid: int) -> bool:
 def generate_sglang_server_args(
     cfg: OpenForgeConfig,
     engine_replica_index: int,
-    colocated: bool = False,
     *,
     model_path: str,
     host: str,
@@ -101,12 +98,15 @@ def generate_sglang_server_args(
     override_server_args: dict[str, Any] | None = None,
 ) -> ServerArgs:
     """Generate SGLang HTTP server arguments for a rollout engine replica."""
-    global_gpu_offset = get_sglang_global_gpu_offset_for_replica(
-        cfg,
-        engine_replica_index,
-        colocated,
-    )
-    local_gpu_id = get_local_gpu_id(global_gpu_offset)
+    resolved_override_server_args = dict(override_server_args or {})
+    base_gpu_id = resolved_override_server_args.get("base_gpu_id")
+    if base_gpu_id is None:
+        global_gpu_offset = get_sglang_global_gpu_offset_for_replica(
+            cfg,
+            engine_replica_index,
+        )
+        base_gpu_id = get_local_gpu_id(global_gpu_offset)
+    gpu_id_step = resolved_override_server_args.get("gpu_id_step", 1)
 
     server_args_payload = {
         # Model
@@ -120,8 +120,8 @@ def generate_sglang_server_args(
         "dist_init_addr": dist_init_addr,
         "nccl_port": nccl_port,
         # Distributed
-        "base_gpu_id": local_gpu_id,
-        "gpu_id_step": 1,
+        "base_gpu_id": base_gpu_id,
+        "gpu_id_step": gpu_id_step,
         "dp_size": parallelism_config.data_parallel_size,
         "pp_size": parallelism_config.pipeline_parallel_size,
         "tp_size": parallelism_config.tensor_parallel_size,
@@ -132,6 +132,6 @@ def generate_sglang_server_args(
         "enable_draft_weights_cpu_backup": True,
     }
 
-    if override_server_args is not None:
-        server_args_payload.update(override_server_args)
+    if resolved_override_server_args:
+        server_args_payload.update(resolved_override_server_args)
     return ServerArgs(**server_args_payload)

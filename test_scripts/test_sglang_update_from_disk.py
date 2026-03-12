@@ -29,8 +29,8 @@ def main() -> int:
     runtime, _cfg = start_runtime(
         model_path=model_path,
         name="sglang-disk-update-test",
-        colocated=True,
         train_total_gpus=1,
+        base_gpu_id=0,
     )
     try:
         assert_success(

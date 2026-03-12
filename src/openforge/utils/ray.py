@@ -21,6 +21,15 @@ def get_current_ray_node_ip_address() -> str:
     return address
 
 
+def get_current_ray_gpu_ids() -> list[int]:
+    """Get the physical GPU ids assigned to the current Ray worker."""
+    assert ray.is_initialized(), (
+        "Ray must be initialized before getting accelerator ids"
+    )
+    gpu_ids = ray.get_runtime_context().get_accelerator_ids().get("GPU", [])
+    return [int(gpu_id) for gpu_id in gpu_ids]
+
+
 def normalize_placement_strategy(
     strategy: PlacementStrategy | str,
 ) -> PlacementStrategy:

@@ -60,7 +60,6 @@ class SGLangEngineRuntime:
         node_rank: int,
         dist_init_addr: str,
         nccl_port: int,
-        colocated: bool = False,
         override_server_args: dict[str, Any] | None = None,
     ) -> None:
         if self.process is not None and self.process.is_alive():
@@ -72,7 +71,6 @@ class SGLangEngineRuntime:
             generate_sglang_server_args(
                 cfg,
                 engine_replica_index,
-                colocated,
                 model_path=self.model_path,
                 host=self.host,
                 port=self.port,

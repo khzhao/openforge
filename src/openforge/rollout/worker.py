@@ -5,7 +5,10 @@ import threading
 from openforge.configs.rollout import RolloutEndpoint
 from openforge.rollout.types import RolloutWorkerSpec
 from openforge.utils.networking import get_free_port
-from openforge.utils.ray import get_current_ray_node_ip_address
+from openforge.utils.ray import (
+    get_current_ray_gpu_ids,
+    get_current_ray_node_ip_address,
+)
 
 __all__ = ["RolloutWorker"]
 
@@ -17,6 +20,13 @@ class RolloutWorker:
         from openforge.rollout.sglang.engine_runtime import SGLangEngineRuntime
 
         self.spec = spec
+        assigned_gpu_ids = get_current_ray_gpu_ids()
+        expected_gpu_count = spec.parallelism.world_size
+        if len(assigned_gpu_ids) != expected_gpu_count:
+            raise RuntimeError(
+                "RolloutWorker expected Ray to assign "
+                f"{expected_gpu_count} GPU(s), got {assigned_gpu_ids}"
+            )
         self.runtime = SGLangEngineRuntime(
             name=self._engine_name(),
             host=spec.host,
@@ -33,7 +43,6 @@ class RolloutWorker:
             node_rank=0,
             dist_init_addr=f"{spec.host}:{self.allocate_port(spec.port + 1)}",
             nccl_port=self.allocate_port(spec.port + 2),
-            colocated=False,
         )
         self.pending_runtime_thread: threading.Thread | None = None
         self.pending_runtime_result: dict[str, object] | None = None

@@ -34,7 +34,6 @@ def main() -> int:
     runtime, _cfg = start_runtime(
         model_path=model_path,
         name="sglang-tensor-update-test",
-        colocated=False,
         train_total_gpus=1,
     )
     source_model = load_source_model(model_path, device=source_device)

@@ -147,8 +147,8 @@ def start_runtime(
     *,
     model_path: str,
     name: str,
-    colocated: bool,
     train_total_gpus: int,
+    base_gpu_id: int | None = None,
 ) -> tuple["SGLangEngineRuntime", OpenForgeConfig]:
     try:
         from openforge.rollout.sglang.engine_runtime import SGLangEngineRuntime
@@ -174,7 +174,9 @@ def start_runtime(
         node_rank=0,
         dist_init_addr=f"127.0.0.1:{find_free_port()}",
         nccl_port=find_free_port(),
-        colocated=colocated,
+        override_server_args=(
+            None if base_gpu_id is None else {"base_gpu_id": base_gpu_id}
+        ),
     )
     return runtime, cfg
 
