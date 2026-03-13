@@ -75,7 +75,7 @@ rollout:
     skip_special_tokens: true
     no_stop_trim: false
     spaces_between_words: true
-  engine_groups:
+  server_groups:
     - name: regular
       role: regular
       replicas: 1
