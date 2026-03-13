@@ -10,7 +10,7 @@ from pydantic import model_validator
 from .base import OpenForgeBaseModel, Reward
 from .topology import ParallelismConfig
 
-RolloutRole = Literal["regular"]
+RolloutWorkerType = Literal["regular"]
 
 
 @dataclass(slots=True)
@@ -35,7 +35,7 @@ class RolloutEndpoint:
     """Routable rollout endpoint or underlying engine endpoint."""
 
     name: str
-    role: RolloutRole
+    worker_type: RolloutWorkerType
     host: str
     port: int | None
     disaggregation_bootstrap_port: int | None
@@ -63,8 +63,7 @@ class RolloutEngineGroupConfig(OpenForgeBaseModel):
     """A homogeneous rollout engine group with shared resources and placement."""
 
     name: str
-    worker_type: str
-    role: RolloutRole
+    worker_type: RolloutWorkerType
     replicas: int
     num_gpus_per_replica: int
     num_cpus_per_replica: int
@@ -110,9 +109,9 @@ class RolloutConfig(OpenForgeBaseModel):
         if len(names) != len(set(names)):
             raise ValueError("rollout.engine_groups must have unique names")
 
-        roles = {group.role for group in self.engine_groups}
-        if not roles.issubset({"regular"}):
-            raise ValueError("rollout.engine_groups must all use role=regular")
+        worker_types = {group.worker_type for group in self.engine_groups}
+        if not worker_types.issubset({"regular"}):
+            raise ValueError("rollout.engine_groups must all use worker_type=regular")
         return self
 
     @property
