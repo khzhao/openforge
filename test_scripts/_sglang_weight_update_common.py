@@ -17,7 +17,7 @@ from transformers import AutoModelForCausalLM
 from openforge.configs.models import OpenForgeConfig
 
 if TYPE_CHECKING:
-    from openforge.rollout.sglang.engine_runtime import SGLangEngineRuntime
+    from openforge.rollout.sglang.server import SGLangServer
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -149,17 +149,17 @@ def start_runtime(
     name: str,
     train_total_gpus: int,
     base_gpu_id: int | None = None,
-) -> tuple["SGLangEngineRuntime", OpenForgeConfig]:
+) -> tuple["SGLangServer", OpenForgeConfig]:
     try:
-        from openforge.rollout.sglang.engine_runtime import SGLangEngineRuntime
+        from openforge.rollout.sglang.server import SGLangServer
     except Exception as exc:
         raise RuntimeError(
-            "Importing SGLangEngineRuntime failed before server launch. "
+            "Importing SGLangServer failed before server launch. "
             "This environment currently has a broken transformers/torchvision "
             "stack for SGLang imports."
         ) from exc
     cfg = build_cfg(model_path, train_total_gpus=train_total_gpus)
-    runtime = SGLangEngineRuntime(
+    runtime = SGLangServer(
         name=name,
         host="127.0.0.1",
         port=find_free_port(),
@@ -243,7 +243,7 @@ def assert_success(response: dict[str, Any], *, context: str) -> None:
 
 
 def assert_weight_version(
-    runtime: "SGLangEngineRuntime",
+    runtime: "SGLangServer",
     *,
     expected_version: int,
 ) -> None:

@@ -7,7 +7,7 @@ from typing import Any
 from openforge.configs.models import OpenForgeConfig
 from openforge.configs.topology import ParallelismConfig
 
-from .client import SGLangControlClient
+from .client import SGLangClient
 from .utils import (
     generate_sglang_server_args,
     kill_sglang_process_tree,
@@ -19,8 +19,8 @@ HEALTHCHECK_POLL_INTERVAL_SECONDS = 1.0
 PROCESS_TERMINATION_TIMEOUT_SECONDS = 30.0
 
 
-class SGLangEngineRuntime:
-    """Managed lifecycle for one in-worker SGLang HTTP server."""
+class SGLangServer:
+    """Managed lifecycle for one SGLang HTTP server."""
 
     def __init__(
         self,
@@ -43,7 +43,7 @@ class SGLangEngineRuntime:
         self.server_args = dict(server_args or {})
         self.enable_memory_saver = enable_memory_saver
         self.policy_version = policy_version
-        self.client = SGLangControlClient(self.url)
+        self.client = SGLangClient(self.url)
         self.request_timeout_seconds = request_timeout_seconds
         self.process: BaseProcess | None = None
 

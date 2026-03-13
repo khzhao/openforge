@@ -14,10 +14,10 @@ __all__ = ["RolloutWorker"]
 
 
 class RolloutWorker:
-    """Thin Ray-facing wrapper over one SGLang runtime."""
+    """Thin Ray-facing wrapper over one SGLang server."""
 
     def initialize(self, spec: RolloutWorkerSpec) -> RolloutEndpoint:
-        from openforge.rollout.sglang.engine_runtime import SGLangEngineRuntime
+        from openforge.rollout.sglang.server import SGLangServer
 
         self.spec = spec
         assigned_gpu_ids = get_current_ray_gpu_ids()
@@ -27,7 +27,7 @@ class RolloutWorker:
                 "RolloutWorker expected Ray to assign "
                 f"{expected_gpu_count} GPU(s), got {assigned_gpu_ids}"
             )
-        self.runtime = SGLangEngineRuntime(
+        self.runtime = SGLangServer(
             name=self._engine_name(),
             host=spec.host,
             port=spec.port,

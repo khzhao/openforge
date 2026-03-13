@@ -7,7 +7,7 @@ from typing import Any
 import requests
 
 
-class SGLangControlClient:
+class SGLangClient:
     """Small client for SGLang server control and metadata endpoints."""
 
     def __init__(
