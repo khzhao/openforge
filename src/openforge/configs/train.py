@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import model_validator
 
 from .base import OpenForgeBaseModel
-from .topology import ParallelismConfig, PlacementConfig
+from .topology import ParallelismConfig
 
 
 class MixedPrecisionConfig(OpenForgeBaseModel):
@@ -84,7 +84,6 @@ class TrainConfig(OpenForgeBaseModel):
 
     cpus_per_worker: int
     parallel: ParallelismConfig
-    placement: PlacementConfig
 
     @model_validator(mode="after")
     def _validate_train_config(self) -> "TrainConfig":

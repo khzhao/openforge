@@ -8,12 +8,6 @@ from loguru import logger
 from ray.util.placement_group import placement_group
 
 from openforge.configs.models import OpenForgeConfig
-from openforge.configs.topology import PlacementStrategy
-
-_RAY_PLACEMENT_STRATEGIES = {
-    PlacementStrategy.PACK: "STRICT_PACK",
-    PlacementStrategy.SPREAD: "STRICT_SPREAD",
-}
 
 
 @ray.remote(num_gpus=1)
@@ -82,22 +76,6 @@ def get_current_physical_gpu_id() -> str:
     device = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device)
     return str(props.uuid)
-
-
-def normalize_placement_strategy(
-    strategy: PlacementStrategy | str,
-) -> PlacementStrategy:
-    """Normalize config/runtime placement values to the shared enum."""
-    return (
-        strategy
-        if isinstance(strategy, PlacementStrategy)
-        else PlacementStrategy(strategy)
-    )
-
-
-def ray_placement_group_strategy(strategy: PlacementStrategy | str) -> str:
-    """Map the shared placement enum to Ray placement-group strategy names."""
-    return _RAY_PLACEMENT_STRATEGIES[normalize_placement_strategy(strategy)]
 
 
 def _sort_key(x):

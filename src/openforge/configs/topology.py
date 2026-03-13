@@ -1,17 +1,9 @@
 # Copyright 2026 openforge
 
-from enum import Enum
 
 from pydantic import model_validator
 
 from .base import OpenForgeBaseModel
-
-
-class PlacementStrategy(str, Enum):
-    """Placement strategy for grouping workers onto nodes."""
-
-    PACK = "PACK"
-    SPREAD = "SPREAD"
 
 
 class ParallelismConfig(OpenForgeBaseModel):
@@ -56,9 +48,3 @@ class ParallelismConfig(OpenForgeBaseModel):
         return (
             self.data_parallel_size * self.fsdp_parallel_size * self.model_parallel_size
         )
-
-
-class PlacementConfig(OpenForgeBaseModel):
-    """Placement target for a workload fragment."""
-
-    strategy: PlacementStrategy = PlacementStrategy.PACK

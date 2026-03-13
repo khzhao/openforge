@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import model_validator
 
 from .base import OpenForgeBaseModel, Reward
-from .topology import ParallelismConfig, PlacementConfig
+from .topology import ParallelismConfig
 
 RolloutRole = Literal["regular"]
 
@@ -66,7 +66,6 @@ class RolloutEngineGroupConfig(OpenForgeBaseModel):
     num_gpus_per_replica: int
     num_cpus_per_replica: int
     parallelism: ParallelismConfig
-    placement: PlacementConfig
 
     @model_validator(mode="after")
     def _validate_group(self) -> "RolloutEngineGroupConfig":
