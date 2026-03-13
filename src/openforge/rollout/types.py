@@ -22,10 +22,11 @@ class EngineSpec:
     worker_type: RolloutWorkerType
     engine_rank: int
     gpu_rank_offset: int
+    base_gpu_id: int
     num_gpus: int
     num_cpus: int
     parallelism: ParallelismConfig
-    # Scheduling from ray
+    # Scheduling from ray for rollout
     pg: PlacementGroup
     bundle_indices: list[int]
     gpu_ids: list[int]

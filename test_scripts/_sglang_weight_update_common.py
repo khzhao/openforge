@@ -105,7 +105,6 @@ def build_cfg(model_path: str, *, train_total_gpus: int) -> OpenForgeConfig:
                     "context_parallel_size": 1,
                     "expert_parallel_size": 1,
                 },
-                "placement": {"strategy": "PACK"},
             },
             "rollout": {
                 "backend": "sglang",
@@ -135,7 +134,6 @@ def build_cfg(model_path: str, *, train_total_gpus: int) -> OpenForgeConfig:
                             "context_parallel_size": 1,
                             "expert_parallel_size": 1,
                         },
-                        "placement": {"strategy": "PACK"},
                     }
                 ],
             },

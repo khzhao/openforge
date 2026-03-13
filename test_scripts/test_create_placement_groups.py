@@ -86,7 +86,6 @@ def build_cfg(*, visible_gpus: int, train_gpus: int, rollout_gpus: int) -> OpenF
                     "context_parallel_size": 1,
                     "expert_parallel_size": 1,
                 },
-                "placement": {"strategy": "PACK"},
             },
             "rollout": {
                 "backend": "sglang",
@@ -116,7 +115,6 @@ def build_cfg(*, visible_gpus: int, train_gpus: int, rollout_gpus: int) -> OpenF
                             "context_parallel_size": 1,
                             "expert_parallel_size": 1,
                         },
-                        "placement": {"strategy": "PACK"},
                     }
                 ],
             },

@@ -23,7 +23,7 @@ from _sglang_weight_update_common import (
     require_visible_gpus,
     resolve_local_model_path,
 )
-from openforge.rollout.types import RolloutWorkerSpec
+from openforge.rollout.spec import EngineSpec
 from openforge.rollout.worker import RolloutWorker
 from openforge.train.fsdp2.weight_updater import WeightUpdater
 from openforge.train.group import TrainWorkerGroup
@@ -70,12 +70,15 @@ def create_rollout_worker(cfg):
     ).remote()
     host = "127.0.0.1"
     port = ray.get(worker.allocate_port.remote(30000))
-    spec = RolloutWorkerSpec(
+    spec = EngineSpec(
         cfg=cfg,
-        engine_replica_index=0,
-        group_name=group_cfg.name,
+        name=f"{group_cfg.name}-0",
         role=group_cfg.role,
+        worker_type=group_cfg.worker_type,
+        num_gpus=group_cfg.num_gpus_per_replica,
+        num_cpus=group_cfg.num_cpus_per_replica,
         parallelism=group_cfg.parallelism,
+        engine_replica_index=0,
         host=host,
         port=port,
     )
