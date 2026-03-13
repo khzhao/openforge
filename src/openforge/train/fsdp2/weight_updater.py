@@ -73,7 +73,9 @@ class WeightUpdater:
             raise RuntimeError("weight sync failed") from last_error
         finally:
             if success:
-                ray.get([worker.continue_generation.remote() for worker in rollout_workers])
+                ray.get(
+                    [worker.continue_generation.remote() for worker in rollout_workers]
+                )
 
     def _sync_tensor(
         self,
@@ -225,7 +227,9 @@ class WeightUpdater:
             try:
                 ray.get(
                     [
-                        worker.destroy_weights_update_group.remote(group_name=group_name)
+                        worker.destroy_weights_update_group.remote(
+                            group_name=group_name
+                        )
                         for worker in rollout_workers
                     ]
                 )

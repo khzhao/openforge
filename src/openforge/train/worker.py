@@ -2,7 +2,6 @@
 
 import uuid
 from contextlib import nullcontext
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -78,11 +77,11 @@ class TrainWorker:
 
     def sleep(self) -> None:
         self.engine.sleep()
-        self.state = replace(self.state, sleeping=True)
+        self.state.sleeping = True
 
     def wakeup(self) -> None:
         self.engine.wakeup()
-        self.state = replace(self.state, sleeping=False)
+        self.state.sleeping = False
 
     def status(self) -> TrainWorkerState:
         return self.state
@@ -145,7 +144,9 @@ class TrainWorker:
             )
 
         for bucket_index, serialized_bucket in enumerate(serialized_buckets):
-            gathered_buckets = [None] * self.spec.world_size if self.spec.rank == 0 else None
+            gathered_buckets = (
+                [None] * self.spec.world_size if self.spec.rank == 0 else None
+            )
             dist.gather_object(
                 obj=serialized_bucket,
                 object_gather_list=gathered_buckets,

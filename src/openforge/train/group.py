@@ -117,7 +117,9 @@ class TrainWorkerGroup:
         if self.world_size != sum(int(size) for size in rollout_world_sizes):
             return False
 
-        train_node_ips = ray.get([worker.node_ip_address.remote() for worker in self.workers])
+        train_node_ips = ray.get(
+            [worker.node_ip_address.remote() for worker in self.workers]
+        )
         rollout_node_ips = ray.get(
             [worker.node_ip_address.remote() for worker in rollout_workers]
         )
