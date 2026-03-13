@@ -3,13 +3,58 @@
 import os
 
 import ray
+import torch
+from loguru import logger
+from ray.util.placement_group import placement_group
 
+from openforge.configs.models import OpenForgeConfig
 from openforge.configs.topology import PlacementStrategy
 
 _RAY_PLACEMENT_STRATEGIES = {
     PlacementStrategy.PACK: "STRICT_PACK",
     PlacementStrategy.SPREAD: "STRICT_SPREAD",
 }
+
+
+@ray.remote(num_gpus=1)
+class CanaryWorker:
+    """Just get the GPU IDs visible to a worker."""
+
+    def cuda_visible_devices(self) -> str:
+        return os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+
+    def get_node_ip_address(self) -> str:
+        return get_current_ray_node_ip_address()
+
+    def get_gpu_id(self) -> int:
+        gpu_ids = get_current_ray_gpu_ids()
+        assert len(gpu_ids) == 1, "Expected 1 GPU per worker"
+        return gpu_ids[0]
+
+    def get_ip_and_gpu_id(self):
+        ip_addr = self.get_node_ip_address()
+        gpu_id = self.get_gpu_id()
+        return ip_addr, gpu_id
+
+
+@ray.remote(num_cpus=0.1, num_gpus=0)
+class LockWorker:
+    """Worker that can acquire and release a lock."""
+
+    def __init__(self):
+        self._locked = False
+
+    def acquire(self) -> bool:
+        """Try to acquire the lock."""
+        if not self._locked:
+            self._locked = True
+            return True
+        return False
+
+    def release(self) -> None:
+        """Release the lock, allowing others to acquire."""
+        assert self._locked, "Lock is not acquired, cannot release."
+        self._locked = False
 
 
 def get_current_ray_node_ip_address() -> str:
@@ -30,6 +75,15 @@ def get_current_ray_gpu_ids() -> list[int]:
     return [int(gpu_id) for gpu_id in gpu_ids]
 
 
+def get_current_physical_gpu_id() -> str:
+    """Get the physical GPU id of the current CUDA device."""
+    if not torch.cuda.is_available():
+        raise ValueError("CUDA is not available")
+    device = torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device)
+    return str(props.uuid)
+
+
 def normalize_placement_strategy(
     strategy: PlacementStrategy | str,
 ) -> PlacementStrategy:
@@ -46,12 +100,76 @@ def ray_placement_group_strategy(strategy: PlacementStrategy | str) -> str:
     return _RAY_PLACEMENT_STRATEGIES[normalize_placement_strategy(strategy)]
 
 
-@ray.remote(num_gpus=1)
-class CanaryWorker:
-    """Just get the GPU IDs visible to a worker."""
+def _sort_key(x):
+    """Sort bundles by numeric IPv4 address, then GPU id."""
+    _, node_ip, gpu_id = x
+    return (tuple(map(int, node_ip.split("."))), gpu_id)
 
-    def cuda_visible_devices(self) -> str:
-        return os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
 
-    def get_node_ip_address(self) -> str:
-        return get_current_ray_node_ip_address()
+def create_placement_groups(cfg: OpenForgeConfig):
+    """Determine how to place workers on GPUS given the various roles.
+
+    We are assuming a fully disaggregated placement and division between
+    train and rollout workers. In the future we plan to support other modes
+    including the following:
+    - Debug Train Only
+    - Rollout Only
+    - Colocated Train and Rollout
+    - Disaggregated Train and Rollout
+    """
+    # 1. Get total number of GPUs requested by the user
+    train_gpus = cfg.train.total_gpus
+    rollout_gpus = cfg.rollout.total_gpus
+    total_gpus = train_gpus + rollout_gpus
+    logger.info(f"Total GPUs requested: {total_gpus}")
+
+    # 2. Create canary workers to get the cluster topology, then kill them
+    bundles = [{"GPU": 1, "CPU": 1} for _ in range(total_gpus)]
+    pg = placement_group(bundles, strategy="PACK")
+    ray.get(pg.ready())
+
+    canary_workers = []
+    for i in range(len(bundles)):
+        canary_workers.append(
+            CanaryWorker.options(
+                placement_group=pg, placement_group_bundle_index=i
+            ).remote()
+        )
+
+    ip_and_gpu_ids = ray.get(
+        [worker.get_ip_and_gpu_id.remote() for worker in canary_workers]
+    )
+    logger.info(f"IP and GPU IDs: {ip_and_gpu_ids}")
+    for canary_worker in canary_workers:
+        ray.kill(canary_worker)
+
+    bundle_infos = [
+        (i, ip_and_gpu_ids[i][0], ip_and_gpu_ids[i][1]) for i in range(len(bundles))
+    ]
+    sorted_bundle_infos = sorted(bundle_infos, key=_sort_key)
+    pg_reordered_bundle_indices = [info[0] for info in sorted_bundle_infos]
+    pg_reordered_gpu_ids = [ip_and_gpu_ids[info[0]][1] for info in sorted_bundle_infos]
+
+    logger.info("Placement group bundle mapping (logical → actual):")
+    for logical_bundle_idx, actual_bundle_idx in enumerate(pg_reordered_bundle_indices):
+        ip, physical_gpu_id = ip_and_gpu_ids[actual_bundle_idx]
+        logger.info(
+            "  logical_bundle_idx={:2d} actual_bundle_idx={:2d} node={} physical_gpu_id={}",
+            logical_bundle_idx,
+            actual_bundle_idx,
+            ip,
+            physical_gpu_id,
+        )
+
+    return {
+        "actor": (
+            pg,
+            pg_reordered_bundle_indices[:train_gpus],
+            pg_reordered_gpu_ids[:train_gpus],
+        ),
+        "rollout": (
+            pg,
+            pg_reordered_bundle_indices[train_gpus:],
+            pg_reordered_gpu_ids[train_gpus:],
+        ),
+    }
