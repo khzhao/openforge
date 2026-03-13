@@ -59,8 +59,8 @@ class SGLangRequestConfig(OpenForgeBaseModel):
     spaces_between_words: bool
 
 
-class RolloutServerGroupConfig(OpenForgeBaseModel):
-    """A homogeneous rollout server group with shared resources and placement."""
+class RolloutEngineGroupConfig(OpenForgeBaseModel):
+    """A homogeneous rollout engine group with shared resources and placement."""
 
     name: str
     role: RolloutRole
@@ -70,7 +70,7 @@ class RolloutServerGroupConfig(OpenForgeBaseModel):
     parallelism: ParallelismConfig
 
     @model_validator(mode="after")
-    def _validate_group(self) -> RolloutServerGroupConfig:
+    def _validate_group(self) -> RolloutEngineGroupConfig:
         if self.replicas <= 0:
             raise ValueError("replicas must be > 0")
         if self.num_gpus_per_replica <= 0:
@@ -98,34 +98,34 @@ class RolloutConfig(OpenForgeBaseModel):
 
     backend: Literal["sglang"]
     request: SGLangRequestConfig
-    server_groups: list[RolloutServerGroupConfig]
+    engine_groups: list[RolloutEngineGroupConfig]
 
     @model_validator(mode="after")
     def _validate_rollout_config(self) -> "RolloutConfig":
-        if not self.server_groups:
-            raise ValueError("rollout.server_groups must not be empty")
+        if not self.engine_groups:
+            raise ValueError("rollout.engine_groups must not be empty")
 
-        names = [group.name for group in self.server_groups]
+        names = [group.name for group in self.engine_groups]
         if len(names) != len(set(names)):
-            raise ValueError("rollout.server_groups must have unique names")
+            raise ValueError("rollout.engine_groups must have unique names")
 
-        roles = {group.role for group in self.server_groups}
+        roles = {group.role for group in self.engine_groups}
         if not roles.issubset({"regular"}):
-            raise ValueError("rollout.server_groups must all use role=regular")
+            raise ValueError("rollout.engine_groups must all use role=regular")
         return self
 
     @property
-    def num_server_replicas(self) -> int:
-        return sum(group.replicas for group in self.server_groups)
+    def num_engine_replicas(self) -> int:
+        return sum(group.replicas for group in self.engine_groups)
 
     @property
-    def num_server_groups(self) -> int:
-        return len(self.server_groups)
+    def num_engine_groups(self) -> int:
+        return len(self.engine_groups)
 
     @property
     def total_gpus(self) -> int:
-        return sum(group.total_gpus for group in self.server_groups)
+        return sum(group.total_gpus for group in self.engine_groups)
 
     @property
     def total_cpus(self) -> int:
-        return sum(group.total_cpus for group in self.server_groups)
+        return sum(group.total_cpus for group in self.engine_groups)

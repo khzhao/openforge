@@ -20,13 +20,13 @@ def get_sglang_global_gpu_offset_for_replica(
 ) -> int:
     """Return the first global GPU id assigned to one rollout engine replica."""
     assert engine_replica_index >= 0, "engine_replica_index must be non-negative"
-    assert engine_replica_index < cfg.rollout.num_server_replicas, (
+    assert engine_replica_index < cfg.rollout.num_engine_replicas, (
         "engine_replica_index is out of range"
     )
     per_replica_gpus = [
-        server_group.num_gpus_per_replica
-        for server_group in cfg.rollout.server_groups
-        for _ in range(server_group.replicas)
+        engine_group.num_gpus_per_replica
+        for engine_group in cfg.rollout.engine_groups
+        for _ in range(engine_group.replicas)
     ]
     offsets = list(accumulate([cfg.train.total_gpus, *per_replica_gpus]))
     return offsets[engine_replica_index]
