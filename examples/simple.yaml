@@ -60,8 +60,6 @@ train:
     tensor_parallel_size: 1
     context_parallel_size: 1
     expert_parallel_size: 1
-  placement:
-    strategy: PACK
 
 rollout:
   backend: sglang
@@ -75,9 +73,9 @@ rollout:
     skip_special_tokens: true
     no_stop_trim: false
     spaces_between_words: true
-  server_groups:
+  engine_groups:
     - name: regular
-      role: regular
+      worker_type: regular
       replicas: 1
       num_gpus_per_replica: 1
       num_cpus_per_replica: 0
@@ -88,5 +86,3 @@ rollout:
         tensor_parallel_size: 1
         context_parallel_size: 1
         expert_parallel_size: 1
-      placement:
-        strategy: PACK

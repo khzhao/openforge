@@ -63,6 +63,7 @@ class RolloutEngineGroupConfig(OpenForgeBaseModel):
     """A homogeneous rollout engine group with shared resources and placement."""
 
     name: str
+    worker_type: str
     role: RolloutRole
     replicas: int
     num_gpus_per_replica: int
