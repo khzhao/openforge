@@ -1,7 +1,7 @@
 # Copyright 2026 openforge
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ray.util.placement_group import PlacementGroup
@@ -10,7 +10,17 @@ from openforge.configs.models import OpenForgeConfig
 from openforge.configs.rollout import RolloutWorkerType
 from openforge.configs.topology import ParallelismConfig
 
-__all__ = ["EngineSpec"]
+__all__ = ["EngineAddr", "EngineSpec"]
+
+
+@dataclass(slots=True)
+class EngineAddr:
+    """Resolved network addresses for one rollout engine."""
+
+    host: str
+    port: int
+    nccl_port: int
+    dist_init_addr: str
 
 
 @dataclass(slots=True)
@@ -31,4 +41,4 @@ class EngineSpec:
     bundle_indices: list[int]
     gpu_ids: list[int]
     # SGLang overrides
-    sglang_server_overrides: dict[str, Any]
+    sglang_server_overrides: dict[str, Any] = field(default_factory=dict)
