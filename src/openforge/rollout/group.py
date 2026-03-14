@@ -11,29 +11,29 @@ from openforge.rollout.sglang.engine import Engine
 from openforge.rollout.types import EngineAddr, EngineSpec
 from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 
-__all__ = ["RolloutManager"]
+__all__ = ["EngineGroup"]
 
 
 @ray.remote(num_gpus=0, num_cpus=1)
-class RolloutManager:
-    """Manager for the rollout process."""
+class EngineGroup:
+    """Group for the SGLang engine group."""
 
     def __init__(
         self,
         cfg: OpenForgeConfig,
         placement_groups: dict[str, tuple[PlacementGroup, list[int], list[int]]],
     ):
-        """Startup processes for the rollout manager."""
+        """Startup processes for the SGLang engine group."""
         self.cfg = cfg
         self.placement_groups = placement_groups
 
     def initialize(self) -> None:
-        """Initialize the rollout manager."""
+        """Initialize the SGLang engine group."""
         # 1. Start the SGLang engines
         self.engine_info = start_sglang_engines(self.cfg, self.placement_groups)
 
     def shutdown(self) -> None:
-        """Terminate all child engine actors started by this manager."""
+        """Terminate all child engine actors started by this group."""
         workers = self.engine_info["engine_workers"]
         ray.get([worker.stop.remote() for worker in workers])
         for worker in workers:
@@ -67,7 +67,7 @@ def start_sglang_engines(
 
         engine_spec = EngineSpec(
             cfg=cfg,
-            name=engine_name,
+            engine_name=engine_name,
             worker_type=engine_group_cfg.worker_type,
             node_rank=0,
             num_nodes=1,
@@ -106,7 +106,7 @@ def start_sglang_engines(
     engine_addrs = allocate_engine_addrs(engine_specs_and_workers)
     ray.get(
         [
-            worker.launch.remote(engine_addrs[spec.name])
+            worker.launch.remote(engine_addrs[spec.engine_name])
             for spec, worker in engine_specs_and_workers
         ]
     )
@@ -138,7 +138,7 @@ def allocate_engine_addrs(
             worker.get_free_port.remote(start=cursor, block_size=PORTS_PER_ENGINE)
         )
         node_port_cursor[host] = port + PORTS_PER_ENGINE
-        engine_addrs[spec.name] = EngineAddr(
+        engine_addrs[spec.engine_name] = EngineAddr(
             host=host,
             port=port,
             nccl_port=port + 1,
