@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from loguru import logger
+from sglang.srt.utils import kill_process_tree
 
 from openforge.rollout.types import EngineAddr, EngineSpec
 from openforge.utils.networking import get_free_port
@@ -12,7 +13,6 @@ from openforge.utils.ray import get_current_ray_node_ip_address
 from .client import SGLangClient
 from .utils import (
     generate_sglang_server_args,
-    kill_sglang_process_tree,
     launch_sglang_process,
 )
 
@@ -44,7 +44,7 @@ class Engine:
 
     @property
     def url(self) -> str:
-        return f"http://{self.addr.host}:{self.addr.port}"
+        return self.addr.url
 
     def launch(self, addr: EngineAddr) -> None:
         self.addr = addr
@@ -57,7 +57,9 @@ class Engine:
 
     def stop(self) -> None:
         if self.process.is_alive():
-            if not kill_sglang_process_tree(self.process.pid):
+            try:
+                kill_process_tree(self.process.pid, include_parent=True)
+            except Exception:
                 self.process.terminate()
             self.process.join(timeout=self.PROCESS_TERMINATION_TIMEOUT_SECONDS)
             if self.process.is_alive():
@@ -106,14 +108,14 @@ class Engine:
         while time.monotonic() < deadline:
             if not self.process.is_alive():
                 raise RuntimeError(
-                    f"rollout engine {self.spec.name} exited before becoming healthy"
+                    f"rollout engine {self.spec.engine_name} exited before becoming healthy"
                 )
             if self.client.health_generate(timeout=self.REQUEST_TIMEOUT_SECONDS):
                 self._wait_for_flush_cache()
                 return
             time.sleep(self.HEALTHCHECK_POLL_INTERVAL_SECONDS)
         raise TimeoutError(
-            f"rollout engine {self.spec.name} did not become healthy in time"
+            f"rollout engine {self.spec.engine_name} did not become healthy in time"
         )
 
     def _wait_for_flush_cache(self) -> None:
@@ -121,11 +123,11 @@ class Engine:
         while time.monotonic() < deadline:
             if not self.process.is_alive():
                 raise RuntimeError(
-                    f"rollout engine {self.spec.name} exited before cache flush"
+                    f"rollout engine {self.spec.engine_name} exited before cache flush"
                 )
             if self.client.flush_cache(timeout=self.REQUEST_TIMEOUT_SECONDS):
                 return
             time.sleep(self.HEALTHCHECK_POLL_INTERVAL_SECONDS)
         raise TimeoutError(
-            f"rollout engine {self.spec.name} never acknowledged flush_cache"
+            f"rollout engine {self.spec.engine_name} never acknowledged flush_cache"
         )

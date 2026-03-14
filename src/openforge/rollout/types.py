@@ -2,7 +2,7 @@
 
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from ray.util.placement_group import PlacementGroup
 
@@ -10,7 +10,36 @@ from openforge.configs.models import OpenForgeConfig
 from openforge.configs.rollout import RolloutWorkerType
 from openforge.configs.topology import ParallelismConfig
 
-__all__ = ["EngineAddr", "EngineSpec"]
+__all__ = ["EngineAddr", "EngineSpec", "RouterSpec"]
+
+
+@dataclass(slots=True)
+class RouterSpec:
+    """Configuration parameters for the SGLang router."""
+
+    # Core parameters
+    router_name: str
+    router_ip: str
+    router_port: int
+    policy: Literal["cache_aware", "round_robin"]
+    worker_urls: list[str]
+
+    # Router non-core parameters
+    request_timeout_secs: int
+    worker_startup_timeout_secs: int
+    worker_startup_check_interval: int
+    health_check_timeout_secs: int
+    health_check_interval_secs: int
+
+    @property
+    def url(self) -> str:
+        """Canonical HTTP URL for the router."""
+        return f"http://{self.router_ip}:{self.router_port}"
+
+    @property
+    def health_url(self) -> str:
+        """Router readiness probe URL."""
+        return f"{self.url}/health"
 
 
 @dataclass(slots=True)
@@ -22,6 +51,11 @@ class EngineAddr:
     nccl_port: int
     dist_init_addr: str
 
+    @property
+    def url(self) -> str:
+        """Canonical HTTP URL for the engine."""
+        return f"http://{self.host}:{self.port}"
+
 
 @dataclass(slots=True)
 class EngineSpec:
@@ -29,7 +63,7 @@ class EngineSpec:
 
     # Main
     cfg: OpenForgeConfig
-    name: str
+    engine_name: str
     worker_type: RolloutWorkerType
 
     # Distributed
