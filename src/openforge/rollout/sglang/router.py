@@ -76,31 +76,31 @@ class Router:
             return False
         return response.status_code == 200
 
-    def is_ready(self) -> bool:
-        """Return ``True`` when the router is ready to serve model traffic."""
+    def _can_route_generate(self) -> bool:
+        """Return ``True`` when the router can proxy a minimal generate request."""
         spec = self.spec
-        if not self.is_healthy():
-            return False
         if not spec.worker_urls:
             return True
 
+        payload = {
+            "text": "Router readiness probe.",
+            "sampling_params": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "max_new_tokens": 1,
+            },
+            "stream": False,
+        }
         try:
-            response = requests.get(
-                f"{spec.url}/v1/models",
+            response = requests.post(
+                f"{spec.url}/generate",
+                json=payload,
                 timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
         except requests.RequestException:
             return False
-
-        if response.status_code != 200:
-            return False
-
-        try:
-            payload = response.json()
-        except ValueError:
-            return False
-        data = payload.get("data")
-        return isinstance(data, list) and len(data) > 0
+        return response.status_code == 200
 
     def add_worker(self, worker_url: str) -> None:
         """Register a worker URL before the router is launched."""
@@ -116,7 +116,7 @@ class Router:
         return list(self.spec.worker_urls)
 
     def wait_until_ready(self) -> None:
-        """Block until the router is ready to serve traffic."""
+        """Block until the router is healthy and can proxy generate traffic."""
         if self.process is None:
             raise RuntimeError(f"router {self.spec.router_name} has not been launched")
 
@@ -130,7 +130,7 @@ class Router:
                 raise RuntimeError(
                     f"rollout router {self.spec.router_name} exited before becoming ready"
                 )
-            if self.is_ready():
+            if self.is_healthy() and self._can_route_generate():
                 return
             time.sleep(self.HEALTHCHECK_POLL_INTERVAL_SECONDS)
 

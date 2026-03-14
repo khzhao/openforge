@@ -10,7 +10,7 @@ from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.sglang.engine import Engine
 from openforge.rollout.sglang.router import Router
 from openforge.rollout.types import EngineAddr, EngineSpec, RouterSpec
-from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
+from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, LockWorker
 
 __all__ = ["EngineGroup"]
 
@@ -26,6 +26,7 @@ class Manager:
         """Initialize the rollout manager."""
         self.cfg = cfg
         self.placement_groups = placement_groups
+        self.lock_worker = LockWorker.options(num_cpus=0.2, num_gpus=0).remote()
 
     def initialize(self, **router_kwargs: Any | None) -> None:
         """Initialize the rollout manager."""
@@ -59,6 +60,10 @@ class Manager:
         self.router.shutdown()
 
     @property
+    def router(self) -> Router:
+        return self.router
+
+    @property
     def engine_workers(self) -> list[Engine]:
         return self.engine_group.engine_workers
 
@@ -67,8 +72,12 @@ class Manager:
         return self.engine_group.engine_addrs
 
     @property
-    def router(self) -> Router:
-        return self.router
+    def engine_specs(self) -> list[EngineSpec]:
+        return self.engine_group.engine_specs
+
+    @property
+    def engine_gpu_offsets(self) -> list[int]:
+        return [spec.gpu_rank_offset for spec in self.engine_specs]
 
 
 class EngineGroup:

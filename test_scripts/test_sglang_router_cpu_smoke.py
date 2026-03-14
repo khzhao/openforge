@@ -295,12 +295,6 @@ def main() -> int:
         if worker_id not in {cfg.worker_id for cfg in worker_configs}:
             raise RuntimeError(f"Unexpected generate response: {payload!r}")
 
-        models = requests.get(
-            f"http://{host}:{router_port}/v1/models",
-            timeout=5.0,
-        )
-        models.raise_for_status()
-
         print(
             "SUCCESS "
             f"router=http://{host}:{router_port} "

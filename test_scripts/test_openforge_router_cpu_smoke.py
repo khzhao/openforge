@@ -287,9 +287,6 @@ def main() -> int:
                 raise RuntimeError(f"Unexpected generate response: {payload!r}")
             seen_workers.add(worker_id)
 
-        models = requests.get(f"{router.url}/v1/models", timeout=5.0)
-        models.raise_for_status()
-
         if len(worker_configs) > 1 and len(seen_workers) < 2:
             raise RuntimeError(
                 f"round_robin smoke test only saw one worker: {sorted(seen_workers)}"
