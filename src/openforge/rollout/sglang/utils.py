@@ -67,6 +67,14 @@ def generate_sglang_server_args(
     engine_addr: EngineAddr,
 ) -> ServerArgs:
     """Generate SGLang HTTP server arguments for a rollout engine replica."""
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_visible_devices:
+        cvds = [int(device.strip()) for device in cuda_visible_devices.split(",")]
+        assert cvds == sorted(cvds), (
+            "CUDA_VISIBLE_DEVICES must be ordered by physical GPU id: "
+            f"{cuda_visible_devices}"
+        )
+
     base_gpu_id = get_local_gpu_id(engine_spec.base_gpu_id)
     server_args_payload = {
         # Model
