@@ -9,6 +9,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.sglang.engine import Engine
 from openforge.rollout.types import EngineAddr, EngineSpec
+from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 
 __all__ = ["RolloutManager"]
 
@@ -33,9 +34,11 @@ class RolloutManager:
 
     def shutdown(self) -> None:
         """Terminate all child engine actors started by this manager."""
-        for worker in self.engine_info["engine_workers"]:
+        workers = self.engine_info["engine_workers"]
+        ray.get([worker.stop.remote() for worker in workers])
+        for worker in workers:
             ray.kill(worker)
-        self.engine_info.clear()
+        self.engine_info = {}
 
 
 def start_sglang_engines(
@@ -66,6 +69,8 @@ def start_sglang_engines(
             cfg=cfg,
             name=engine_name,
             worker_type=engine_group_cfg.worker_type,
+            node_rank=0,
+            num_nodes=1,
             engine_rank=engine_rank,
             gpu_rank_offset=gpu_rank_offset,
             base_gpu_id=base_gpu_id,
@@ -75,32 +80,36 @@ def start_sglang_engines(
             pg=pg,
             bundle_indices=bundle_indices,
             gpu_ids=gpu_ids,
+            enable_memory_saver=engine_group_cfg.enable_memory_saver,
+            sglang_server_overrides=engine_group_cfg.sglang_server_overrides,
         )
         engine_worker = EngineWorker.options(
-            num_cpus=engine_group_cfg.num_cpus_per_replica,
-            num_gpus=engine_group_cfg.num_gpus_per_replica,
+            num_cpus=1,
+            num_gpus=0.1,
             scheduling_strategy=PlacementGroupSchedulingStrategy(
                 placement_group=pg,
+                placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_indices[gpu_rank_offset],
             ),
+            runtime_env={
+                "env_vars": dict.fromkeys(NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, "1")
+            },
         ).remote()
         engine_specs_and_workers.append((engine_spec, engine_worker))
 
     # 2. Initialize the engine workers
-    states = []
-    for spec, worker in engine_specs_and_workers:
-        state = worker.initialize.remote(spec)
-        states.append(state)
-    ray.get(states)
+    ray.get(
+        [worker.initialize.remote(spec) for spec, worker in engine_specs_and_workers]
+    )
 
     # 3. Allocate addresses and ports, then launch the servers
     engine_addrs = allocate_engine_addrs(engine_specs_and_workers)
-    launches = []
-    for spec, worker in engine_specs_and_workers:
-        addr = engine_addrs[spec.name]
-        launch = worker.launch.remote(addr)
-        launches.append(launch)
-    ray.get(launches)
+    ray.get(
+        [
+            worker.launch.remote(engine_addrs[spec.name])
+            for spec, worker in engine_specs_and_workers
+        ]
+    )
 
     # 4. Prepare outputs
     engine_specs = [spec for spec, _ in engine_specs_and_workers]

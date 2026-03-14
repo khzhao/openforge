@@ -2,7 +2,6 @@
 
 import multiprocessing
 import os
-from itertools import accumulate
 from multiprocessing.process import BaseProcess
 from typing import Any
 
@@ -10,26 +9,7 @@ from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
 
-from openforge.configs.models import OpenForgeConfig
-from openforge.configs.topology import ParallelismConfig
-
-
-def get_sglang_global_gpu_offset_for_replica(
-    cfg: OpenForgeConfig,
-    engine_replica_index: int,
-) -> int:
-    """Return the first global GPU id assigned to one rollout engine replica."""
-    assert engine_replica_index >= 0, "engine_replica_index must be non-negative"
-    assert engine_replica_index < cfg.rollout.num_engine_replicas, (
-        "engine_replica_index is out of range"
-    )
-    per_replica_gpus = [
-        engine_group.num_gpus_per_replica
-        for engine_group in cfg.rollout.engine_groups
-        for _ in range(engine_group.replicas)
-    ]
-    offsets = list(accumulate([cfg.train.total_gpus, *per_replica_gpus]))
-    return offsets[engine_replica_index]
+from openforge.rollout.types import EngineAddr, EngineSpec
 
 
 def get_local_gpu_id(global_gpu_id: int) -> int:
@@ -83,55 +63,35 @@ def kill_sglang_process_tree(pid: int) -> bool:
 
 
 def generate_sglang_server_args(
-    cfg: OpenForgeConfig,
-    engine_replica_index: int,
-    *,
-    model_path: str,
-    host: str,
-    port: int,
-    num_nodes: int,
-    node_rank: int,
-    dist_init_addr: str,
-    nccl_port: int,
-    parallelism_config: ParallelismConfig,
-    enable_memory_saver: bool = False,
-    override_server_args: dict[str, Any] | None = None,
+    engine_spec: EngineSpec,
+    engine_addr: EngineAddr,
 ) -> ServerArgs:
     """Generate SGLang HTTP server arguments for a rollout engine replica."""
-    resolved_override_server_args = dict(override_server_args or {})
-    base_gpu_id = resolved_override_server_args.get("base_gpu_id")
-    if base_gpu_id is None:
-        global_gpu_offset = get_sglang_global_gpu_offset_for_replica(
-            cfg,
-            engine_replica_index,
-        )
-        base_gpu_id = get_local_gpu_id(global_gpu_offset)
-    gpu_id_step = resolved_override_server_args.get("gpu_id_step", 1)
-
+    base_gpu_id = get_local_gpu_id(engine_spec.base_gpu_id)
     server_args_payload = {
         # Model
-        "model_path": model_path,
+        "model_path": engine_spec.cfg.model.model_name_or_path,
         "trust_remote_code": True,
         # Server
-        "host": host,
-        "port": port,
-        "nnodes": num_nodes,
-        "node_rank": node_rank,
-        "dist_init_addr": dist_init_addr,
-        "nccl_port": nccl_port,
+        "host": engine_addr.host,
+        "port": engine_addr.port,
+        "nnodes": engine_spec.num_nodes,
+        "node_rank": engine_spec.node_rank,
+        "dist_init_addr": engine_addr.dist_init_addr,
+        "nccl_port": engine_addr.nccl_port,
         # Distributed
         "base_gpu_id": base_gpu_id,
-        "gpu_id_step": gpu_id_step,
-        "dp_size": parallelism_config.data_parallel_size,
-        "pp_size": parallelism_config.pipeline_parallel_size,
-        "tp_size": parallelism_config.tensor_parallel_size,
-        "ep_size": parallelism_config.expert_parallel_size,
+        "gpu_id_step": 1,
+        "dp_size": engine_spec.parallelism.data_parallel_size,
+        "pp_size": engine_spec.parallelism.pipeline_parallel_size,
+        "tp_size": engine_spec.parallelism.tensor_parallel_size,
+        "ep_size": engine_spec.parallelism.expert_parallel_size,
         # Misc
-        "enable_memory_saver": enable_memory_saver,
+        "enable_memory_saver": engine_spec.enable_memory_saver,
         "skip_server_warmup": True,
         "enable_draft_weights_cpu_backup": True,
     }
 
-    if resolved_override_server_args:
-        server_args_payload.update(resolved_override_server_args)
+    if engine_spec.sglang_server_overrides:
+        server_args_payload.update(engine_spec.sglang_server_overrides)
     return ServerArgs(**server_args_payload)

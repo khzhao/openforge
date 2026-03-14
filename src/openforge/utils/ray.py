@@ -9,6 +9,16 @@ from ray.util.placement_group import placement_group
 
 from openforge.configs.models import OpenForgeConfig
 
+NOSET_VISIBLE_DEVICES_ENV_VARS_LIST = [
+    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+    "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES",
+    "RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES",
+    "RAY_EXPERIMENTAL_NOSET_NEURON_RT_VISIBLE_CORES",
+    "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS",
+    "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
+]
+
 
 @ray.remote(num_gpus=1)
 class CanaryWorker:
@@ -76,6 +86,13 @@ def get_current_physical_gpu_id() -> str:
     device = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device)
     return str(props.uuid)
+
+
+def ray_noset_visible_devices() -> bool:
+    """Return True when Ray accelerator visibility rewriting is disabled."""
+    return any(
+        os.environ.get(env_var) for env_var in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
+    )
 
 
 def _sort_key(x):

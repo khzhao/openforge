@@ -14,19 +14,22 @@ def clear_memory(sync: bool = True) -> None:
     gc.collect()
 
 
-def get_curr_gpu_device_memory_profile() -> dict[str, float]:
-    """Get the memory profile of the current GPU device."""
+def get_curr_gpu_device_memory_profile(
+    device: int | None = None,
+) -> dict[str, int | float]:
+    """Get the memory profile of the current or specified GPU device."""
     if not torch.cuda.is_available():
         raise ValueError("CUDA is not available")
 
-    device = torch.cuda.current_device()
+    if device is None:
+        device = torch.cuda.current_device()
     allocated = torch.cuda.memory_allocated(device) / 1e9
     reserved = torch.cuda.memory_reserved(device) / 1e9
     max_allocated = torch.cuda.max_memory_allocated(device) / 1e9
     max_reserved = torch.cuda.max_memory_reserved(device) / 1e9
-
-    total = torch.cuda.get_device_properties(device).total_memory / 1e9
-    free = total - reserved
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    total = total_bytes / 1e9
+    free = free_bytes / 1e9
 
     return {
         "device": device,
@@ -38,3 +41,14 @@ def get_curr_gpu_device_memory_profile() -> dict[str, float]:
         "free_gb": free,
         "utilization": allocated / total if total > 0 else 0.0,
     }
+
+
+def get_visible_gpu_memory_profiles() -> list[dict[str, int | float]]:
+    """Get memory profiles for every GPU visible to the current process."""
+    if not torch.cuda.is_available():
+        raise ValueError("CUDA is not available")
+
+    return [
+        get_curr_gpu_device_memory_profile(device)
+        for device in range(torch.cuda.device_count())
+    ]

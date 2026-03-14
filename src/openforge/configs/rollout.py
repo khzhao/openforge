@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from pydantic import model_validator
 
@@ -30,21 +30,6 @@ class RolloutDatum:
     consumed: bool = False
 
 
-@dataclass(slots=True)
-class RolloutEndpoint:
-    """Routable rollout endpoint or underlying engine endpoint."""
-
-    name: str
-    worker_type: RolloutWorkerType
-    host: str
-    port: int | None
-    disaggregation_bootstrap_port: int | None
-    url: str | None
-    healthy: bool
-    policy_version: int | None
-    model_path: str | None
-
-
 class SGLangRequestConfig(OpenForgeBaseModel):
     """Request-time generation defaults for SGLang-backed rollout."""
 
@@ -68,6 +53,8 @@ class RolloutEngineGroupConfig(OpenForgeBaseModel):
     num_gpus_per_replica: int
     num_cpus_per_replica: int
     parallelism: ParallelismConfig
+    enable_memory_saver: bool
+    sglang_server_overrides: dict[str, Any] = field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_group(self) -> RolloutEngineGroupConfig:
