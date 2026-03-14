@@ -30,6 +30,7 @@ class RouterSpec:
     worker_startup_check_interval: int
     health_check_timeout_secs: int
     health_check_interval_secs: int
+    log_level: str | None
 
     @property
     def url(self) -> str:

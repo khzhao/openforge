@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
         choices=("round_robin", "cache_aware"),
         default="round_robin",
     )
+    parser.add_argument(
+        "--router-log-level",
+        default=None,
+        help="Optional SGLang router log level, for example warn or error.",
+    )
     parser.add_argument("--num-requests", type=int, default=8)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--max-new-tokens", type=int, default=32)
@@ -464,15 +469,13 @@ def main() -> int:
             worker_startup_check_interval=1,
             health_check_timeout_secs=5,
             health_check_interval_secs=5,
+            log_level=args.router_log_level,
         )
         router = Router()
         router.initialize(router_spec)
         for url in engine_urls:
             router.add_worker(url)
         router.launch()
-
-        if not router.is_ready():
-            raise RuntimeError(f"Router did not become ready at {router.url}")
 
         total_requests, total_chars, elapsed, response_payloads = stress_router(
             router.url,

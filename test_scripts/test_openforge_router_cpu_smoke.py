@@ -259,6 +259,7 @@ def main() -> int:
             worker_startup_check_interval=1,
             health_check_timeout_secs=1,
             health_check_interval_secs=2,
+            log_level=None,
         )
         router.initialize(router_spec)
         for cfg in worker_configs:

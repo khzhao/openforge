@@ -112,6 +112,7 @@ def generate_sglang_router_args(router_spec: RouterSpec) -> RouterArgs:
         "host": router_spec.router_ip,
         "port": router_spec.router_port,
         "policy": router_spec.policy,
+        "log_level": router_spec.log_level,
         "request_timeout_secs": router_spec.request_timeout_secs,
         "worker_startup_timeout_secs": router_spec.worker_startup_timeout_secs,
         "worker_startup_check_interval": router_spec.worker_startup_check_interval,
