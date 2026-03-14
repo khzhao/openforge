@@ -26,14 +26,13 @@ class SGLangClient:
         return self._ok("GET", "/flush_cache", timeout=timeout)
 
     def get_model_info(self, *, timeout: float = 5.0) -> dict[str, Any]:
-        return self._request_json_dict("GET", "/model_info", timeout=timeout)
+        return self._get_json("/model_info", timeout=timeout)
 
     def get_server_info(self, *, timeout: float = 5.0) -> dict[str, Any]:
-        return self._request_json_dict("GET", "/server_info", timeout=timeout)
+        return self._get_json("/server_info", timeout=timeout)
 
     def get_weight_version(self, *, timeout: float = 5.0) -> str | None:
-        payload = self.get_model_info(timeout=timeout)
-        version = payload.get("weight_version")
+        version = self.get_model_info(timeout=timeout).get("weight_version")
         return None if version is None else str(version)
 
     def generate(
@@ -42,12 +41,7 @@ class SGLangClient:
         payload: dict[str, Any],
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        return self._request_json_dict(
-            "POST",
-            "/generate",
-            payload=payload,
-            timeout=timeout,
-        )
+        return self._post_json("/generate", payload=payload, timeout=timeout)
 
     def pause_generation(
         self,
@@ -55,8 +49,7 @@ class SGLangClient:
         mode: str = "abort",
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        return self._request_json_dict(
-            "POST",
+        return self._post_json(
             "/pause_generation",
             payload={"mode": mode},
             timeout=timeout,
@@ -67,12 +60,7 @@ class SGLangClient:
         *,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        return self._request_json_dict(
-            "POST",
-            "/continue_generation",
-            payload={},
-            timeout=timeout,
-        )
+        return self._post_json("/continue_generation", payload={}, timeout=timeout)
 
     def update_weights_from_disk(
         self,
@@ -101,8 +89,7 @@ class SGLangClient:
             "recapture_cuda_graph": recapture_cuda_graph,
             "token_step": token_step,
         }
-        return self._request_json_dict(
-            "POST",
+        return self._post_json(
             "/update_weights_from_disk",
             payload=payload,
             timeout=timeout,
@@ -125,8 +112,7 @@ class SGLangClient:
             "abort_all_requests": abort_all_requests,
             "weight_version": weight_version,
         }
-        return self._request_json_dict(
-            "POST",
+        return self._post_json(
             "/update_weights_from_tensor",
             payload=payload,
             timeout=timeout,
@@ -151,8 +137,7 @@ class SGLangClient:
             "group_name": group_name,
             "backend": backend,
         }
-        return self._request_json_dict(
-            "POST",
+        return self._post_json(
             "/init_weights_update_group",
             payload=payload,
             timeout=timeout,
@@ -181,8 +166,7 @@ class SGLangClient:
             "weight_version": weight_version,
             "load_format": load_format,
         }
-        return self._request_json_dict(
-            "POST",
+        return self._post_json(
             "/update_weights_from_distributed",
             payload=payload,
             timeout=timeout,
@@ -194,8 +178,7 @@ class SGLangClient:
         group_name: str = "weight_update_group",
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        return self._request_json_dict(
-            "POST",
+        return self._post_json(
             "/destroy_weights_update_group",
             payload={"group_name": group_name},
             timeout=timeout,
@@ -207,24 +190,16 @@ class SGLangClient:
         action: str,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        status_code, body = self._request(
-            "POST",
+        return self._post_json(
             "/weights_checker",
             payload={"action": action},
             timeout=timeout,
-            raise_for_status=False,
+            expected_statuses=(HTTPStatus.OK, HTTPStatus.BAD_REQUEST),
         )
-        if status_code not in (HTTPStatus.OK, HTTPStatus.BAD_REQUEST):
-            raise RuntimeError(
-                f"sglang request POST /weights_checker failed with status {status_code}: {body!r}"
-            )
-        if not isinstance(body, dict):
-            raise RuntimeError("sglang /weights_checker did not return a JSON object")
-        return body
 
     def _ok(self, method: str, path: str, *, timeout: float) -> bool:
         try:
-            status, _ = self._request(
+            response = self._request(
                 method,
                 path,
                 timeout=timeout,
@@ -232,17 +207,49 @@ class SGLangClient:
             )
         except OSError:
             return False
-        return status == HTTPStatus.OK
+        return response.status_code == HTTPStatus.OK
 
-    def _request_json_dict(
+    def _get_json(self, path: str, *, timeout: float) -> dict[str, Any]:
+        return self._request_json("GET", path, timeout=timeout)
+
+    def _post_json(
+        self,
+        path: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        timeout: float,
+        expected_statuses: tuple[HTTPStatus, ...] = (HTTPStatus.OK,),
+    ) -> dict[str, Any]:
+        return self._request_json(
+            "POST",
+            path,
+            payload=payload,
+            timeout=timeout,
+            expected_statuses=expected_statuses,
+        )
+
+    def _request_json(
         self,
         method: str,
         path: str,
         *,
         payload: dict[str, Any] | None = None,
         timeout: float,
+        expected_statuses: tuple[HTTPStatus, ...] = (HTTPStatus.OK,),
     ) -> dict[str, Any]:
-        _, body = self._request(method, path, payload=payload, timeout=timeout)
+        response = self._request(
+            method,
+            path,
+            payload=payload,
+            timeout=timeout,
+            raise_for_status=expected_statuses == (HTTPStatus.OK,),
+        )
+        body = self._decode_body(response.text)
+        if response.status_code not in expected_statuses:
+            raise RuntimeError(
+                f"sglang request {method} {path} failed with status "
+                f"{response.status_code}: {body!r}"
+            )
         if not isinstance(body, dict):
             raise RuntimeError(f"sglang {path} did not return a JSON object")
         return body
@@ -255,10 +262,9 @@ class SGLangClient:
         payload: dict[str, Any] | None = None,
         timeout: float,
         raise_for_status: bool = True,
-    ) -> tuple[int, Any]:
-        headers = self._headers()
+    ) -> requests.Response:
         request_kwargs: dict[str, Any] = {
-            "headers": headers,
+            "headers": self._headers(),
             "timeout": timeout,
         }
         if payload is not None:
@@ -281,15 +287,12 @@ class SGLangClient:
                     f"sglang request {method} {path} failed with status "
                     f"{response.status_code}: {raw_body.strip()}"
                 ) from exc
-        return response.status_code, self._decode_body(raw_body)
+        return response
 
     def _headers(self) -> dict[str, str]:
-        headers: dict[str, str] = {}
-        token = self.api_key
-        if token is None:
-            return headers
-        headers["Authorization"] = f"Bearer {token}"
-        return headers
+        if self.api_key is None:
+            return {}
+        return {"Authorization": f"Bearer {self.api_key}"}
 
     @staticmethod
     def _decode_body(raw_body: str) -> Any:

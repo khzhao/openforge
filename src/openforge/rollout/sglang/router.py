@@ -62,7 +62,7 @@ class Router:
         self.process = None
 
     def is_healthy(self) -> bool:
-        """Return ``True`` when the router process is alive and serving traffic."""
+        """Return ``True`` when the router process is alive and responding on /health."""
         spec = self.spec
         if spec is None or self.process is None or not self.process.is_alive():
             return False
@@ -75,6 +75,32 @@ class Router:
         except requests.RequestException:
             return False
         return response.status_code == 200
+
+    def is_ready(self) -> bool:
+        """Return ``True`` when the router is ready to serve model traffic."""
+        spec = self.spec
+        if not self.is_healthy():
+            return False
+        if not spec.worker_urls:
+            return True
+
+        try:
+            response = requests.get(
+                f"{spec.url}/v1/models",
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException:
+            return False
+
+        if response.status_code != 200:
+            return False
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return False
+        data = payload.get("data")
+        return isinstance(data, list) and len(data) > 0
 
     def add_worker(self, worker_url: str) -> None:
         """Register a worker URL before the router is launched."""
@@ -90,7 +116,7 @@ class Router:
         return list(self.spec.worker_urls)
 
     def wait_until_ready(self) -> None:
-        """Block until the router health endpoint becomes ready."""
+        """Block until the router is ready to serve traffic."""
         if self.process is None:
             raise RuntimeError(f"router {self.spec.router_name} has not been launched")
 
@@ -102,12 +128,12 @@ class Router:
         while time.monotonic() < deadline:
             if not self.process.is_alive():
                 raise RuntimeError(
-                    f"rollout router {self.spec.router_name} exited before becoming healthy"
+                    f"rollout router {self.spec.router_name} exited before becoming ready"
                 )
-            if self.is_healthy():
+            if self.is_ready():
                 return
             time.sleep(self.HEALTHCHECK_POLL_INTERVAL_SECONDS)
 
         raise TimeoutError(
-            f"rollout router {self.spec.router_name} did not become healthy in time"
+            f"rollout router {self.spec.router_name} did not become ready in time"
         )
