@@ -8,13 +8,69 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.sglang.engine import Engine
-from openforge.rollout.types import EngineAddr, EngineSpec
+from openforge.rollout.sglang.router import Router
+from openforge.rollout.types import EngineAddr, EngineSpec, RouterSpec
 from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 
 __all__ = ["EngineGroup"]
 
 
-@ray.remote(num_gpus=0, num_cpus=1)
+class Manager:
+    """Manager for the rollout process."""
+
+    def __init__(
+        self,
+        cfg: OpenForgeConfig,
+        placement_groups: dict[str, tuple[PlacementGroup, list[int], list[int]]],
+    ):
+        """Initialize the rollout manager."""
+        self.cfg = cfg
+        self.placement_groups = placement_groups
+
+    def initialize(self, **router_kwargs: Any | None) -> None:
+        """Initialize the rollout manager."""
+        self.engine_group = EngineGroup(self.cfg, self.placement_groups)
+        self.engine_group.initialize()
+
+        main_router_kwargs = {
+            "router_name": "openforge-router",
+            "router_ip": self.cfg.rollout.router_ip,
+            "router_port": self.cfg.rollout.router_port,
+            "policy": self.cfg.rollout.router_policy,
+            "worker_urls": [engine.url for engine in self.engine_group.engine_workers],
+            "request_timeout_secs": self.cfg.rollout.request_timeout_secs,
+            "worker_startup_timeout_secs": self.cfg.rollout.worker_startup_timeout_secs,
+            "worker_startup_check_interval": self.cfg.rollout.worker_startup_check_interval,
+            "health_check_timeout_secs": self.cfg.rollout.health_check_timeout_secs,
+            "health_check_interval_secs": self.cfg.rollout.health_check_interval_secs,
+            "log_level": self.cfg.rollout.log_level,
+        }
+        if router_kwargs is not None:
+            main_router_kwargs.update(router_kwargs)
+
+        self.router_spec = RouterSpec(**main_router_kwargs)
+        self.router = Router()
+        self.router.initialize(self.router_spec)
+        self.router.launch()
+
+    def shutdown(self) -> None:
+        """Shutdown the rollout manager."""
+        self.engine_group.shutdown()
+        self.router.shutdown()
+
+    @property
+    def engine_workers(self) -> list[Engine]:
+        return self.engine_group.engine_workers
+
+    @property
+    def engine_addrs(self) -> dict[str, EngineAddr]:
+        return self.engine_group.engine_addrs
+
+    @property
+    def router(self) -> Router:
+        return self.router
+
+
 class EngineGroup:
     """Group for the SGLang engine group."""
 
@@ -29,16 +85,27 @@ class EngineGroup:
 
     def initialize(self) -> None:
         """Initialize the SGLang engine group."""
-        # 1. Start the SGLang engines
         self.engine_info = start_sglang_engines(self.cfg, self.placement_groups)
 
     def shutdown(self) -> None:
         """Terminate all child engine actors started by this group."""
-        workers = self.engine_info["engine_workers"]
+        workers = self.engine_workers
         ray.get([worker.stop.remote() for worker in workers])
         for worker in workers:
             ray.kill(worker)
         self.engine_info = {}
+
+    @property
+    def engine_specs(self) -> list[EngineSpec]:
+        return self.engine_info["engine_specs"]
+
+    @property
+    def engine_workers(self) -> list[Engine]:
+        return self.engine_info["engine_workers"]
+
+    @property
+    def engine_addrs(self) -> dict[str, EngineAddr]:
+        return self.engine_info["engine_addrs"]
 
 
 def start_sglang_engines(
