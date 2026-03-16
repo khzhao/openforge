@@ -20,11 +20,12 @@ from transformers import AutoTokenizer
 from openforge.train.fsdp2.base import FSDP2Engine
 from openforge.train.types import TrainStepResult, TrainWorkerSpec, TrainWorkerState
 from openforge.utils.distributed import init_gloo_group
+from openforge.utils.networking import get_free_port
 from openforge.utils.packed import serialize_tensor_bucket
 from openforge.utils.ray import get_current_ray_node_ip_address
 from openforge.utils.torch import get_torch_dtype
 
-__all__ = ["TrainWorker"]
+__all__ = ["TrainWorker", "RayTrainWorker"]
 
 
 class TrainWorker:
@@ -123,6 +124,14 @@ class TrainWorker:
     @staticmethod
     def node_ip_address() -> str:
         return get_current_ray_node_ip_address()
+
+    @staticmethod
+    def get_free_port(
+        *,
+        start: int = 10000,
+        block_size: int = 1,
+    ) -> int:
+        return get_free_port(start=start, block_size=block_size)
 
     def push_weights_to_rollouts_from_tensor(
         self,
@@ -331,3 +340,6 @@ class TrainWorker:
             from sglang.srt.patch_torch import monkey_patch_torch_reductions
 
         monkey_patch_torch_reductions()
+
+
+RayTrainWorker = ray.remote(TrainWorker)

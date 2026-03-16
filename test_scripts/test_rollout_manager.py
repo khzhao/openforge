@@ -235,10 +235,9 @@ def main() -> int:
         for worker in engine_info["engine_workers"]:
             ray.kill(worker)
 
-    manager = RolloutManager.remote(cfg, placement_groups)
-    ray.get(manager.initialize.remote())
-    ray.get(manager.shutdown.remote())
-    ray.kill(manager)
+    manager = RolloutManager(cfg, placement_groups)
+    manager.initialize()
+    manager.shutdown()
 
     ray.util.remove_placement_group(actor_pg)
     ray.shutdown()

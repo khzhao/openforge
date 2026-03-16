@@ -26,7 +26,7 @@ from _sglang_weight_update_common import (
 from openforge.rollout.spec import EngineSpec
 from openforge.rollout.worker import RolloutWorker
 from openforge.train.fsdp2.weight_updater import WeightUpdater
-from openforge.train.group import TrainWorkerGroup
+from openforge.train.group import TrainManager
 
 SyncMode = Literal["disk", "tensor", "distributed"]
 
@@ -129,7 +129,7 @@ def run_sync_test(mode: SyncMode, *, default_policy_version: int) -> int:
         ray.shutdown()
     ray.init(ignore_reinit_error=True, include_dashboard=False)
 
-    train_group = TrainWorkerGroup()
+    train_group = TrainManager()
     rollout_worker = None
     try:
         train_group.initialize(

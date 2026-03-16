@@ -9,14 +9,19 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from tensordict import TensorDict
 
 from openforge.configs.models import OpenForgeConfig
+from openforge.train.fsdp2.weight_updater import WeightUpdater
 from openforge.train.types import TrainStepResult, TrainWorkerSpec, TrainWorkerState
-from openforge.train.worker import TrainWorker
+from openforge.train.worker import RayTrainWorker
 
-__all__ = ["TrainWorkerGroup"]
+__all__ = ["TrainManager"]
 
 
-class TrainWorkerGroup:
+class TrainManager:
     """Ray actor group for one train worker per rank."""
+
+    def __init__(self) -> None:
+        self.workers = []
+        self.rollout_workers: Sequence[object] | None = None
 
     def initialize(
         self,
@@ -57,7 +62,7 @@ class TrainWorkerGroup:
             for rank in range(self.world_size)
         ]
         self.workers = [
-            TrainWorker.options(
+            RayTrainWorker.options(
                 num_cpus=self.num_cpus_per_worker,
                 num_gpus=self.num_gpus_per_worker,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
@@ -172,6 +177,25 @@ class TrainWorkerGroup:
         result = results[0]
         assert result is not None, "publisher rank returned no checkpoint path"
         return result
+
+    def register_rollout(self, rollout_workers: Sequence[object]) -> None:
+        self.rollout_workers = list(rollout_workers)
+
+    def sync_rollout_weights(
+        self,
+        *,
+        policy_version: int,
+        mode: str = "auto",
+        bucket_bytes: int = 256 << 20,
+    ) -> None:
+        if self.rollout_workers is None:
+            raise RuntimeError("rollout must be registered before syncing weights")
+
+        WeightUpdater(self, bucket_bytes=bucket_bytes).sync(
+            self.rollout_workers,
+            policy_version=policy_version,
+            mode=mode,
+        )
 
     def shutdown(self) -> None:
         ray.get([worker.shutdown.remote() for worker in self.workers])

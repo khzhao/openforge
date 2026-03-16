@@ -341,8 +341,8 @@ def main() -> int:
     try:
         session_dir = ray_worker._global_node.get_session_dir_path()
         placement_groups = create_placement_groups(cfg)
-        manager = RolloutManager.remote(cfg, placement_groups)
-        ray.get(manager.initialize.remote())
+        manager = RolloutManager(cfg, placement_groups)
+        manager.initialize()
 
         urls = wait_for_engine_addrs(
             session_dir=session_dir,
@@ -368,12 +368,13 @@ def main() -> int:
         for client in clients:
             assert client.flush_cache(timeout=10.0)
 
-        ray.get(manager.shutdown.remote())
+        manager.shutdown()
+        manager = None
         wait_for_clients_to_stop(clients, timeout=args.shutdown_timeout)
     finally:
         if manager is not None:
             try:
-                ray.kill(manager)
+                manager.shutdown()
             except Exception:
                 pass
         if placement_groups is not None:

@@ -1,5 +1,8 @@
 # Copyright 2026 openforge
 
+import base64
+import pickle
+
 import torch
 
 from openforge.utils.torch import get_torch_dtype_name
@@ -20,7 +23,6 @@ def flatten_tensor_bucket(bucket: list[tuple[str, torch.Tensor]]) -> torch.Tenso
 
 def serialize_tensor_bucket(bucket: list[tuple[str, torch.Tensor]]) -> str:
     """Serialize a tensor bucket into a string."""
-    from sglang.srt.utils import MultiprocessingSerializer
     from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 
     flattened_bucket = FlattenedTensorBucket(named_tensors=bucket)
@@ -28,7 +30,9 @@ def serialize_tensor_bucket(bucket: list[tuple[str, torch.Tensor]]) -> str:
         "flattened_tensor": flattened_bucket.get_flattened_tensor(),
         "metadata": flattened_bucket.get_metadata(),
     }
-    return MultiprocessingSerializer.serialize(payload, output_str=True)
+    return base64.b64encode(
+        pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+    ).decode("utf-8")
 
 
 def build_tensor_bucket_meta(
