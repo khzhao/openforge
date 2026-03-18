@@ -116,8 +116,7 @@ class WeightUpdater:
                 [
                     worker.update_weights_from_tensor.remote(
                         serialized_named_tensors=[
-                            serialized_bucket
-                            for _ in range(int(rollout_world_size))
+                            serialized_bucket for _ in range(int(rollout_world_size))
                         ],
                         policy_version=policy_version,
                         load_format="flattened_bucket",
