@@ -102,6 +102,20 @@ class Router:
             return False
         return response.status_code == 200
 
+    def generate(self, sampling_params, **kwargs):
+        """Send one non-streaming generate request through the router."""
+        response = requests.post(
+            f"{self.url}/generate",
+            json={
+                **kwargs,
+                "sampling_params": sampling_params,
+                "stream": False,
+            },
+            timeout=max(self.REQUEST_TIMEOUT_SECONDS, self.spec.request_timeout_secs),
+        )
+        response.raise_for_status()
+        return response.json()
+
     def add_worker(self, worker_url: str) -> None:
         """Register a worker URL before the router is launched."""
         if self.process is not None and self.process.is_alive():
