@@ -274,10 +274,10 @@ def build_cfg(
                         "num_gpus_per_replica": gpus_per_replica,
                         "num_cpus_per_replica": cpus_per_rollout_replica,
                         "parallelism": {
-                            "data_parallel_size": gpus_per_replica,
+                            "data_parallel_size": 1,
                             "fsdp_parallel_size": 1,
                             "pipeline_parallel_size": 1,
-                            "tensor_parallel_size": 1,
+                            "tensor_parallel_size": gpus_per_replica,
                             "context_parallel_size": 1,
                             "expert_parallel_size": 1,
                         },

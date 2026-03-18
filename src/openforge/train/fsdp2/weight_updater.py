@@ -103,6 +103,9 @@ class WeightUpdater:
         ):
             return
 
+        rollout_world_sizes = ray.get(
+            [worker.distributed_world_size.remote() for worker in rollout_workers]
+        )
         tensor_buckets = self.train_group.build_tensor_buckets(
             bucket_bytes=self.bucket_bytes
         )
@@ -112,12 +115,19 @@ class WeightUpdater:
             ray.get(
                 [
                     worker.update_weights_from_tensor.remote(
-                        serialized_named_tensors=[serialized_bucket],
+                        serialized_named_tensors=[
+                            serialized_bucket
+                            for _ in range(int(rollout_world_size))
+                        ],
                         policy_version=policy_version,
                         load_format="flattened_bucket",
                         flush_cache=flush_cache,
                     )
-                    for worker in rollout_workers
+                    for worker, rollout_world_size in zip(
+                        rollout_workers,
+                        rollout_world_sizes,
+                        strict=True,
+                    )
                 ]
             )
 

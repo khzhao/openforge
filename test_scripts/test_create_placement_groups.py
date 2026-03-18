@@ -103,18 +103,19 @@ def build_cfg(*, visible_gpus: int, train_gpus: int, rollout_gpus: int) -> OpenF
                 "engine_groups": [
                     {
                         "name": "regular",
-                        "role": "regular",
+                        "worker_type": "regular",
                         "replicas": 1,
                         "num_gpus_per_replica": rollout_gpus,
                         "num_cpus_per_replica": 1,
                         "parallelism": {
-                            "data_parallel_size": rollout_gpus,
+                            "data_parallel_size": 1,
                             "fsdp_parallel_size": 1,
                             "pipeline_parallel_size": 1,
-                            "tensor_parallel_size": 1,
+                            "tensor_parallel_size": rollout_gpus,
                             "context_parallel_size": 1,
                             "expert_parallel_size": 1,
                         },
+                        "enable_memory_saver": False,
                     }
                 ],
             },

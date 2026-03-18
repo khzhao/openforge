@@ -64,6 +64,23 @@ class RolloutEngineGroupConfig(OpenForgeBaseModel):
             raise ValueError("num_gpus_per_replica must be > 0")
         if self.num_cpus_per_replica < 0:
             raise ValueError("num_cpus_per_replica must be >= 0")
+        unsupported_parallelism = [
+            name
+            for name in (
+                "data_parallel_size",
+                "fsdp_parallel_size",
+                "pipeline_parallel_size",
+                "context_parallel_size",
+                "expert_parallel_size",
+            )
+            if getattr(self.parallelism, name) != 1
+        ]
+        if unsupported_parallelism:
+            raise ValueError(
+                "SGLang rollout currently supports tensor parallelism only: "
+                + ", ".join(unsupported_parallelism)
+                + " must be 1"
+            )
         if self.num_gpus_per_replica != self.parallelism.world_size:
             raise ValueError(
                 "rollout.num_gpus_per_replica must match rollout parallelism world "

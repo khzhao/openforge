@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import ray
 import torch
+from huggingface_hub import snapshot_download
 from ray._private import worker as ray_worker
 
 from openforge.configs.models import OpenForgeConfig
@@ -17,9 +18,12 @@ from openforge.rollout.sglang.utils import get_local_gpu_id
 from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, ray_noset_visible_devices
 from openforge.utils.ray import create_placement_groups
 
+DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model-path", default=DEFAULT_MODEL)
     parser.add_argument("--train-gpus", type=int, default=1)
     parser.add_argument("--rollout-replicas", type=int, default=2)
     parser.add_argument("--gpus-per-replica", type=int, default=1)
@@ -36,8 +40,16 @@ def require_visible_gpus(min_count: int) -> int:
     return visible
 
 
+def resolve_model_path(model_path_or_id: str) -> str:
+    candidate = Path(model_path_or_id)
+    if candidate.exists():
+        return str(candidate.resolve())
+    return snapshot_download(repo_id=model_path_or_id, local_files_only=True)
+
+
 def build_cfg(
     *,
+    model_path: str,
     visible_gpus: int,
     train_gpus: int,
     rollout_replicas: int,
@@ -49,8 +61,8 @@ def build_cfg(
             "data": {"backend": "dummy"},
             "gateway": {"host": "127.0.0.1", "port": 0},
             "model": {
-                "model_name_or_path": "unused",
-                "tokenizer_name_or_path": "unused",
+                "model_name_or_path": model_path,
+                "tokenizer_name_or_path": model_path,
                 "attn_implementation": "sdpa",
             },
             "cluster": {
@@ -123,10 +135,10 @@ def build_cfg(
                         "num_gpus_per_replica": gpus_per_replica,
                         "num_cpus_per_replica": cpus_per_rollout_replica,
                         "parallelism": {
-                            "data_parallel_size": gpus_per_replica,
+                            "data_parallel_size": 1,
                             "fsdp_parallel_size": 1,
                             "pipeline_parallel_size": 1,
-                            "tensor_parallel_size": 1,
+                            "tensor_parallel_size": gpus_per_replica,
                             "context_parallel_size": 1,
                             "expert_parallel_size": 1,
                         },
@@ -173,9 +185,9 @@ def verify_engine_info(
         zip(engine_specs, post_specs, post_addrs, hosts, strict=True)
     ):
         offset = rank * gpus_per_replica
-        addr = engine_addrs[spec.name]
+        addr = engine_addrs[spec.engine_name]
 
-        assert spec.name == f"regular-{rank}"
+        assert spec.engine_name == f"regular-{rank}"
         assert spec.engine_rank == rank
         assert spec.gpu_rank_offset == offset
         assert spec.base_gpu_id == rollout_gpu_ids[offset]
@@ -205,7 +217,9 @@ def main() -> int:
     args = parse_args()
     total_requested = args.train_gpus + args.rollout_replicas * args.gpus_per_replica
     visible_gpus = require_visible_gpus(total_requested)
+    model_path = resolve_model_path(args.model_path)
     cfg = build_cfg(
+        model_path=model_path,
         visible_gpus=visible_gpus,
         train_gpus=args.train_gpus,
         rollout_replicas=args.rollout_replicas,
@@ -246,7 +260,7 @@ def main() -> int:
         "SUCCESS "
         f"replicas={args.rollout_replicas} "
         f"gpus_per_replica={args.gpus_per_replica} "
-        f"engines={[spec.name for spec in engine_info['engine_specs']]}"
+        f"engines={[spec.engine_name for spec in engine_info['engine_specs']]}"
     )
     return 0
 

@@ -90,10 +90,10 @@ def generate_sglang_server_args(
         # Distributed
         "base_gpu_id": base_gpu_id,
         "gpu_id_step": 1,
-        "dp_size": engine_spec.parallelism.data_parallel_size,
-        "pp_size": engine_spec.parallelism.pipeline_parallel_size,
-        "tp_size": engine_spec.parallelism.tensor_parallel_size,
-        "ep_size": engine_spec.parallelism.expert_parallel_size,
+        "dp_size": 1,
+        "pp_size": 1,
+        "tp_size": engine_spec.num_gpus,
+        "ep_size": 1,
         # Misc
         "enable_memory_saver": engine_spec.enable_memory_saver,
         "skip_server_warmup": True,

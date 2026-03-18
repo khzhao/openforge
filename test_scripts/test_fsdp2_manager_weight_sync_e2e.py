@@ -145,10 +145,10 @@ def build_cfg(
                         "num_gpus_per_replica": gpus_per_replica,
                         "num_cpus_per_replica": cpus_per_rollout_replica,
                         "parallelism": {
-                            "data_parallel_size": gpus_per_replica,
+                            "data_parallel_size": 1,
                             "fsdp_parallel_size": 1,
                             "pipeline_parallel_size": 1,
-                            "tensor_parallel_size": 1,
+                            "tensor_parallel_size": gpus_per_replica,
                             "context_parallel_size": 1,
                             "expert_parallel_size": 1,
                         },
@@ -334,8 +334,9 @@ def main() -> int:
         print(
             "SUCCESS "
             f"modes={','.join(SYNC_MODES)} "
-            f"engines={args.rollout_replicas} "
-            f"train_gpus={args.train_gpus}"
+            f"engines={len(rollout_workers)} "
+            f"train_gpus={args.train_gpus} "
+            f"rollout_tp={args.gpus_per_replica}"
         )
         return 0
     finally:
