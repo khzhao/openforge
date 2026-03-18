@@ -26,7 +26,7 @@ class Session:
 
 @dataclass(slots=True)
 class Trajectory:
-    """One internal branch tracked underneath a user session."""
+    """One internal trajectory tracked underneath a user session."""
 
     trajectory_id: str
     session_id: str

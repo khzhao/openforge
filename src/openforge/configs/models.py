@@ -16,7 +16,7 @@ from .train import TrainConfig
 class DataConfig(OpenForgeBaseModel):
     """Configuration for data source behavior."""
 
-    backend: str
+    path: str | None = None
 
 
 class GatewayConfig(OpenForgeBaseModel):
