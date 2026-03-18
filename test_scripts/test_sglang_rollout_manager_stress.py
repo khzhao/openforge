@@ -76,7 +76,7 @@ def build_cfg(
     total_cpus = train_gpus + rollout_replicas * cpus_per_rollout_replica
     return OpenForgeConfig.model_validate(
         {
-            "data": {"backend": "dummy"},
+            "data": {},
             "gateway": {"host": "127.0.0.1", "port": 0},
             "model": {
                 "model_name_or_path": model_path,
@@ -239,7 +239,6 @@ def build_payload(
             "max_new_tokens": max_new_tokens,
             "ignore_eos": False,
         },
-        "stream": False,
     }
 
 
@@ -251,7 +250,7 @@ def run_generate(
     request_timeout: float,
 ) -> int:
     response = client.generate(
-        payload=build_payload(prompt=prompt, max_new_tokens=max_new_tokens),
+        **build_payload(prompt=prompt, max_new_tokens=max_new_tokens),
         timeout=request_timeout,
     )
     text = response["text"]

@@ -58,7 +58,7 @@ def build_cfg(
 ) -> OpenForgeConfig:
     return OpenForgeConfig.model_validate(
         {
-            "data": {"backend": "dummy"},
+            "data": {},
             "gateway": {"host": "127.0.0.1", "port": 0},
             "model": {
                 "model_name_or_path": model_path,

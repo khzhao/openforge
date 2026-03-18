@@ -31,7 +31,7 @@ def require_visible_gpus(min_count: int) -> int:
 def build_cfg(*, visible_gpus: int, train_gpus: int, rollout_gpus: int) -> OpenForgeConfig:
     return OpenForgeConfig.model_validate(
         {
-            "data": {"backend": "dummy"},
+            "data": {},
             "gateway": {"host": "127.0.0.1", "port": 0},
             "model": {
                 "model_name_or_path": "unused",

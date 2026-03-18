@@ -10,6 +10,7 @@ import pytest
 
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.server import (
+    ConfiguredGatewayRuntimeController,
     GatewayGeneration,
     GatewayService,
     InvalidRolloutRewardError,
@@ -309,3 +310,45 @@ def test_gateway_service_generate_and_end_session_require_active_rollouts() -> N
         await store.close()
 
     asyncio.run(run())
+
+
+def test_gateway_controller_parses_router_payload() -> None:
+    generation = ConfiguredGatewayRuntimeController._parse_generation_payload(
+        {
+            "output_ids": [11, 12],
+            "meta_info": {
+                "output_token_logprobs": [
+                    [-0.3, 11, "foo"],
+                    [-0.4, 12, "bar"],
+                ],
+                "finish_reason": {"type": "stop"},
+                "token_steps": [7, 7],
+            },
+        },
+        fallback_policy_version=3,
+    )
+
+    assert generation.token_ids == [11, 12]
+    assert generation.logprobs == [-0.3, -0.4]
+    assert generation.finish_reason == "stop"
+    assert generation.rollout_model_version == 7
+
+
+def test_gateway_controller_parses_router_payload_without_output_ids() -> None:
+    generation = ConfiguredGatewayRuntimeController._parse_generation_payload(
+        {
+            "meta_info": {
+                "output_token_logprobs": [
+                    [-0.25, 101],
+                    [-0.5, 102],
+                ],
+                "finish_reason": "length",
+            },
+        },
+        fallback_policy_version=9,
+    )
+
+    assert generation.token_ids == [101, 102]
+    assert generation.logprobs == [-0.25, -0.5]
+    assert generation.finish_reason == "length"
+    assert generation.rollout_model_version == 9
