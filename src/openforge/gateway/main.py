@@ -20,7 +20,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = OpenForgeConfig.from_yaml(args.config)
-    app = create_app(cfg.gateway)
+    app = create_app(cfg)
     uvicorn.run(app, host=cfg.gateway.host, port=cfg.gateway.port)
 
 

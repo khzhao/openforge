@@ -109,7 +109,7 @@ docstring-code-format = true
 docstring-code-line-length = "dynamic"
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
+anyio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -142,6 +143,84 @@ def test_sqlite_openforge_store_updates_trajectory() -> None:
             assert updated is not None
             assert updated.status == "completed"
             assert updated.final_reward == 3.5
+            await store.close()
+
+    asyncio.run(run())
+
+
+def test_sqlite_openforge_store_returns_none_for_missing_records() -> None:
+    async def run() -> None:
+        store = SQLiteOpenForgeStore(":memory:")
+
+        assert await store.get_session("missing") is None
+        assert await store.get_trajectory("missing") is None
+        assert await store.list_trajectories("missing") == []
+        assert await store.list_turns("missing") == []
+
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_sqlite_openforge_store_persists_reopened_data_and_orders_turns() -> None:
+    async def write(path: Path) -> None:
+        store = SQLiteOpenForgeStore(path)
+        await store.create_session(Session(session_id="s0", model_name="model-a"))
+        await store.create_trajectory(
+            Trajectory(
+                trajectory_id="t0",
+                session_id="s0",
+                parent_trajectory_id=None,
+                status="completed",
+                final_reward=1.0,
+            )
+        )
+        await store.append_turn(_turn("t0", 1))
+        await store.append_turn(_turn("t0", 0))
+        await store.close()
+
+    async def read(path: Path) -> None:
+        store = SQLiteOpenForgeStore(path)
+
+        session = await store.get_session("s0")
+        trajectory = await store.get_trajectory("t0")
+        turns = await store.list_turns("t0")
+
+        assert session == Session(session_id="s0", model_name="model-a")
+        assert trajectory is not None
+        assert trajectory.status == "completed"
+        assert trajectory.final_reward == 1.0
+        assert [turn.turn_index for turn in turns] == [0, 1]
+
+        await store.close()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "openforge.sqlite3"
+        asyncio.run(write(path))
+        asyncio.run(read(path))
+
+
+def test_sqlite_openforge_store_rejects_duplicate_turn_indices() -> None:
+    async def run() -> None:
+        store = SQLiteOpenForgeStore(":memory:")
+        await store.create_session(Session(session_id="s0", model_name="model-a"))
+        await store.create_trajectory(
+            Trajectory(
+                trajectory_id="t0",
+                session_id="s0",
+                parent_trajectory_id=None,
+                status="active",
+            )
+        )
+        await store.append_turn(_turn("t0", 0))
+
+        try:
+            await store.append_turn(_turn("t0", 0))
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("expected duplicate turn index insert to fail")
+        finally:
             await store.close()
 
     asyncio.run(run())
