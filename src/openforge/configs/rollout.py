@@ -2,32 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import field
 from typing import Any, Literal
 
 from pydantic import model_validator
 
-from .base import OpenForgeBaseModel, Reward
+from .base import OpenForgeBaseModel
 from .topology import ParallelismConfig
 
 RolloutWorkerType = Literal["regular"]
-
-
-@dataclass(slots=True)
-class RolloutDatum:
-    """Single rollout item stored for training consumption."""
-
-    sample_id: str
-    prompt_id: str
-    group_id: str
-    turn_index: int
-    rollout_model_version: int
-    input_ids: list[int]
-    position_ids: list[int]
-    loss_mask: list[bool]
-    old_logprobs: list[float]
-    reward: Reward = None
-    consumed: bool = False
 
 
 class SGLangRequestConfig(OpenForgeBaseModel):

@@ -2,8 +2,6 @@
 
 from pydantic import BaseModel, ConfigDict
 
-Reward = list[float] | float | None
-
 
 class OpenForgeBaseModel(BaseModel):
     """Base class for OpenForge config models."""

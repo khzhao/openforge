@@ -1,0 +1,93 @@
+# Copyright 2026 openforge
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+__all__ = [
+    "Session",
+    "Trajectory",
+    "TrajectoryStatus",
+    "Turn",
+]
+
+
+TrajectoryStatus = Literal["active", "forked", "completed", "trained", "failed"]
+
+
+@dataclass(slots=True)
+class Session:
+    """User-facing conversation handle."""
+
+    session_id: str
+    model_name: str
+
+
+@dataclass(slots=True)
+class Trajectory:
+    """One internal branch tracked underneath a user session."""
+
+    trajectory_id: str
+    session_id: str
+    parent_trajectory_id: str | None
+    status: TrajectoryStatus
+    final_reward: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.final_reward is not None and self.status in {"active", "forked"}:
+            raise ValueError(
+                "final_reward may only be set on completed, trained, or failed trajectories"
+            )
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == "active"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in {"forked", "completed", "trained", "failed"}
+
+
+@dataclass(slots=True)
+class Turn:
+    """One tokenized model completion appended to a trajectory."""
+
+    trajectory_id: str
+    turn_index: int
+    rollout_model_version: int
+    prompt_length: int
+    input_ids: list[int]
+    position_ids: list[int]
+    loss_mask: list[bool]
+    old_logprobs: list[float]
+
+    def __post_init__(self) -> None:
+        if self.turn_index < 0:
+            raise ValueError("turn_index must be >= 0")
+        if self.rollout_model_version < 0:
+            raise ValueError("rollout_model_version must be >= 0")
+        if self.prompt_length < 0 or self.prompt_length > len(self.input_ids):
+            raise ValueError("prompt_length must be between 0 and len(input_ids)")
+        if len(self.position_ids) != len(self.input_ids):
+            raise ValueError("position_ids must have the same length as input_ids")
+
+        predicted_token_count = max(len(self.input_ids) - 1, 0)
+        if len(self.loss_mask) != predicted_token_count:
+            raise ValueError(
+                "loss_mask must have one entry per predicted token: "
+                f"{len(self.loss_mask)} != {predicted_token_count}"
+            )
+        if len(self.old_logprobs) != predicted_token_count:
+            raise ValueError(
+                "old_logprobs must have one entry per predicted token: "
+                f"{len(self.old_logprobs)} != {predicted_token_count}"
+            )
+
+    @property
+    def prompt_token_ids(self) -> list[int]:
+        return self.input_ids[: self.prompt_length]
+
+    @property
+    def completion_token_ids(self) -> list[int]:
+        return self.input_ids[self.prompt_length :]

@@ -16,6 +16,7 @@ def create_rollout_manager(
     placement_groups,
     **kwargs,
 ) -> RolloutManager:
+    """Create a rollout manager."""
     manager = RolloutManager(cfg, placement_groups)
     manager.initialize(**kwargs)
     return manager
@@ -28,6 +29,7 @@ def create_train_manager(
     master_port: int,
     placement_groups,
 ) -> TrainManager:
+    """Create a train manager."""
     manager = TrainManager()
     manager.initialize(
         cfg,
@@ -42,4 +44,5 @@ def register_rollout(
     train_manager: TrainManager,
     rollout_manager: RolloutManager,
 ) -> None:
+    """Register a rollout manager with a train manager."""
     train_manager.register_rollout(rollout_manager.engine_workers)
