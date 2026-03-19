@@ -43,8 +43,8 @@ train:
   global_batch_size: 64
   mini_batch_size: 16
   micro_batch_size: 4
-  checkpoints: /tmp/openforge-checkpoints
-  cpus_per_worker: 2
+  checkpoints: ./checkpoints
+  cpus_per_worker: 1
   parallel:
     data_parallel_size: 1
     fsdp_parallel_size: 1

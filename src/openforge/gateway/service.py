@@ -70,6 +70,19 @@ class Service:
             "active_model": self.runtime.current_model(),
         }
 
+    async def current_session(self) -> StartSessionResponse | None:
+        if not self._active_session_ids:
+            return None
+
+        active_session_id = next(iter(self._active_session_ids))
+        session = await self.store.get_session(active_session_id)
+        if session is None:
+            raise SessionNotFoundError(f"unknown session_id: {active_session_id}")
+        return StartSessionResponse(
+            session_id=session.session_id,
+            model=session.model_name,
+        )
+
     async def start_session(
         self,
         *,

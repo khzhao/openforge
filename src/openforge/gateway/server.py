@@ -78,6 +78,13 @@ def create_app(
     async def list_models() -> ModelsResponse:
         return ModelsResponse.model_validate(await service.list_models())
 
+    @app.get("/current_session", response_model=StartSessionResponse)
+    async def current_session() -> StartSessionResponse:
+        session = await service.current_session()
+        if session is None:
+            raise HTTPException(status_code=404, detail="no active session")
+        return session
+
     @app.post("/start_session", response_model=StartSessionResponse)
     async def start_session(payload: StartSessionRequest) -> StartSessionResponse:
         try:

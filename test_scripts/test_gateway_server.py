@@ -245,6 +245,7 @@ def test_gateway_http_health_and_models_reflect_loaded_model(monkeypatch) -> Non
         app = _create_test_app(monkeypatch, store=store, runtime=_FakeRuntime())
         with TestClient(app) as client:
             assert client.get("/health").json() == {"ok": True}
+            assert client.get("/current_session").status_code == 404
             assert client.get("/models").json()["active_model"] is None
             assert client.get("/models").json()["models"] == [
                 {"id": "model-a", "tokenizer": "model-a-tokenizer"}
@@ -253,9 +254,10 @@ def test_gateway_http_health_and_models_reflect_loaded_model(monkeypatch) -> Non
             started = client.post("/start_session", json=_start_session_payload("model-a"))
             assert started.status_code == 200
             assert client.get("/models").json()["active_model"] == "model-a"
+            assert client.get("/current_session").json() == started.json()
 
 
-def test_gateway_http_start_session_reports_unsupported_and_busy_models(
+def test_gateway_http_start_session_reports_errors(
     monkeypatch,
 ) -> None:
     """Return the correct HTTP errors for unsupported or busy model starts."""
@@ -272,6 +274,8 @@ def test_gateway_http_start_session_reports_unsupported_and_busy_models(
 
             created = client.post("/start_session", json=_start_session_payload("model-a"))
             assert created.status_code == 200
+            reused = client.post("/start_session", json=_start_session_payload("model-a"))
+            assert reused.status_code == 409
 
             busy = client.post("/start_session", json=_start_session_payload("model-b"))
             assert busy.status_code == 409

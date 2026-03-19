@@ -103,11 +103,12 @@ class Runtime:
 
         runtime_cfg = self._build_config(runtime_config=runtime_config)
         if self._loaded_model is None:
+            slot = self._start_slot(runtime_cfg)
             self._runtime_cfg = runtime_cfg
             self._loaded_model = runtime_cfg.model.model_name_or_path
             self._tokenizer_name = runtime_cfg.model.tokenizer_name_or_path
             self._tokenizer = None
-            self._slot = self._start_slot(runtime_cfg)
+            self._slot = slot
             return self._loaded_model
 
         if self._loaded_model != runtime_cfg.model.model_name_or_path:
@@ -180,8 +181,10 @@ class Runtime:
         from openforge.utils.networking import get_free_port, get_host_ip
         from openforge.utils.ray import create_placement_groups
 
+        started_ray = False
         if not ray.is_initialized():
             ray.init(log_to_driver=False)
+            started_ray = True
 
         placement_groups = create_placement_groups(cfg)
         train_manager = None
@@ -196,12 +199,16 @@ class Runtime:
             rollout_manager = create_rollout_manager(cfg, placement_groups)
             register_rollout(train_manager, rollout_manager)
         except Exception:
-            if rollout_manager is not None:
-                rollout_manager.shutdown()
-            if train_manager is not None:
-                train_manager.shutdown()
-            else:
-                ray.util.remove_placement_group(placement_groups["actor"][0])
+            try:
+                if rollout_manager is not None:
+                    rollout_manager.shutdown()
+                if train_manager is not None:
+                    train_manager.shutdown()
+                else:
+                    ray.util.remove_placement_group(placement_groups["actor"][0])
+            finally:
+                if started_ray and ray.is_initialized():
+                    ray.shutdown()
             raise
 
         return RuntimeSlot(

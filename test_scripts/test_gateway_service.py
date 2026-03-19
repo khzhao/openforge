@@ -261,6 +261,7 @@ def test_gateway_service_list_models_and_start_session_tracks_active_model() -> 
             "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
             "active_model": None,
         }
+        assert await service.current_session() is None
 
         created = await service.start_session(**_start_session_kwargs("model-a"))
 
@@ -269,14 +270,15 @@ def test_gateway_service_list_models_and_start_session_tracks_active_model() -> 
             "active_model": "model-a",
         }
         assert created.model == "model-a"
+        assert await service.current_session() == created
 
         await store.close()
 
     asyncio.run(run())
 
 
-def test_gateway_service_start_session_rejects_unsupported_busy_and_second_session() -> None:
-    """Reject unsupported models and more than one active session."""
+def test_gateway_service_start_session_rejects_second_active_session() -> None:
+    """Reject a second start_session call while another session is active."""
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(
