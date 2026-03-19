@@ -9,7 +9,7 @@ This script:
 3. Starts ``openforge.gateway.main`` as a real subprocess.
 4. Issues HTTP requests to the live gateway:
    ``/models``, ``/start_session``, ``/start_trajectory``, ``/generate``,
-   ``/get_policy_version``, ``/end_trajectory``, and ``/end_session``.
+   ``/end_trajectory``, and ``/end_session``.
 
 It is intentionally a standalone script, not a pytest test, so it can be used as
 an actual end-to-end smoke in GPU environments.
@@ -371,16 +371,7 @@ def main() -> int:
         assert generated["trajectory_id"] == trajectory_id
         assert isinstance(generated["token_ids"], list) and generated["token_ids"]
         assert isinstance(generated["logprobs"], list)
-
-        policy = request_json(
-            "POST",
-            f"{base_url}/get_policy_version",
-            {"session_id": session_id},
-            timeout=60.0,
-        )
-        record_response("get_policy_version", policy)
-        print("GET_POLICY_VERSION", json.dumps(policy, sort_keys=True), flush=True)
-        assert isinstance(policy["policy_version"], int)
+        assert isinstance(generated["rollout_model_version"], str)
 
         ended_trajectory = request_json(
             "POST",

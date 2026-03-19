@@ -20,9 +20,13 @@ __all__ = [
 ]
 
 
-SUPPORTED_MODELS: dict[str, str] = {
-    "Qwen/Qwen2.5-0.5B-Instruct": "Qwen/Qwen2.5-0.5B-Instruct",
-}
+SUPPORTED_MODELS: list[str] = [
+    "Qwen/Qwen2.5-0.5B-Instruct",
+]
+
+SUPPORTED_TOKENIZERS: list[str] = [
+    "Qwen/Qwen2.5-0.5B-Instruct",
+]
 
 
 class UnsupportedModelError(ValueError):
@@ -39,12 +43,14 @@ class Generation:
 
     token_ids: list[int]
     logprobs: list[float]
+    rollout_model_version: str
     finish_reason: str = "stop"
-    rollout_model_version: int = 1
 
     def __post_init__(self) -> None:
         if len(self.token_ids) != len(self.logprobs):
             raise ValueError("token_ids and logprobs must have the same length")
+        if not self.rollout_model_version:
+            raise ValueError("rollout_model_version must be non-empty")
 
 
 @dataclass(slots=True)
@@ -54,7 +60,6 @@ class RuntimeSlot:
     placement_groups: dict[str, Any]
     train_manager: Any
     rollout_manager: Any
-    policy_version: int
 
     def shutdown(self) -> None:
         try:
@@ -77,7 +82,11 @@ class Runtime:
     def list_models(self) -> list[dict[str, str]]:
         return [
             {"id": model_id, "tokenizer": tokenizer}
-            for model_id, tokenizer in SUPPORTED_MODELS.items()
+            for model_id, tokenizer in zip(
+                SUPPORTED_MODELS,
+                SUPPORTED_TOKENIZERS,
+                strict=True,
+            )
         ]
 
     def current_model(self) -> str | None:
@@ -148,18 +157,7 @@ class Runtime:
             input_ids=[int(token_id) for token_id in prompt_token_ids],
             return_logprob=True,
         )
-        return self._parse_generation_payload(
-            payload,
-            fallback_policy_version=self._slot.policy_version,
-        )
-
-    def get_policy_version(self, model_name: str) -> int:
-        if self._loaded_model != model_name:
-            raise ModelBusyError(f"runtime is not loaded for model {model_name!r}")
-        assert self._slot is not None
-        policy_version = self._resolve_policy_version(self._slot.rollout_manager)
-        self._slot.policy_version = policy_version
-        return policy_version
+        return self._parse_generation_payload(payload)
 
     def shutdown(self) -> None:
         slot = self._slot
@@ -210,7 +208,6 @@ class Runtime:
             placement_groups=placement_groups,
             train_manager=train_manager,
             rollout_manager=rollout_manager,
-            policy_version=self._resolve_policy_version(rollout_manager),
         )
 
     def _build_config(
@@ -240,27 +237,8 @@ class Runtime:
         return payload
 
     @staticmethod
-    def _resolve_policy_version(rollout_manager: Any) -> int:
-        import ray
-
-        versions = ray.get(
-            [
-                worker.get_weight_version.remote()
-                for worker in rollout_manager.engine_workers
-            ]
-        )
-        numeric_versions = [
-            int(version)
-            for version in versions
-            if version is not None and str(version).isdigit()
-        ]
-        return max(numeric_versions, default=0)
-
-    @staticmethod
     def _parse_generation_payload(
         payload: dict[str, Any],
-        *,
-        fallback_policy_version: int,
     ) -> Generation:
         meta_info = payload.get("meta_info", {})
         token_logprobs = meta_info.get("output_token_logprobs", [])
@@ -272,15 +250,12 @@ class Runtime:
         if not logprobs:
             logprobs = [0.0] * len(token_ids)
         finish_reason = Runtime._extract_finish_reason(meta_info)
-        rollout_model_version = Runtime._extract_policy_version(
-            meta_info,
-            fallback=fallback_policy_version,
-        )
+        rollout_model_version = Runtime._extract_rollout_model_version(meta_info)
         return Generation(
             token_ids=token_ids,
             logprobs=logprobs,
-            finish_reason=finish_reason,
             rollout_model_version=rollout_model_version,
+            finish_reason=finish_reason,
         )
 
     @staticmethod
@@ -328,21 +303,16 @@ class Runtime:
         return "stop"
 
     @staticmethod
-    def _extract_policy_version(meta_info: dict[str, Any], *, fallback: int) -> int:
+    def _extract_rollout_model_version(
+        meta_info: dict[str, Any],
+    ) -> str:
         weight_version = meta_info.get("weight_version")
-        if weight_version is not None and str(weight_version).isdigit():
-            return int(weight_version)
-        token_steps = meta_info.get("token_steps")
-        if isinstance(token_steps, list) and token_steps:
-            if isinstance(token_steps[0], list):
-                flattened = [int(step) for group in token_steps for step in group]
-                if flattened:
-                    return flattened[-1]
-            return int(token_steps[-1])
-        token_step = meta_info.get("token_step")
-        if isinstance(token_step, int):
-            return token_step
-        return fallback
+        if weight_version is None:
+            raise ValueError("generate payload missing meta_info.weight_version")
+        version = str(weight_version)
+        if not version:
+            raise ValueError("generate payload has empty meta_info.weight_version")
+        return version
 
     def _get_tokenizer(self):
         if self._tokenizer is None:

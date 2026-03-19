@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 
-from openforge.configs.models import GatewayConfig, GatewayServerConfig
+from openforge.configs.models import GatewayServerConfig
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.runtime import ModelBusyError, Runtime, UnsupportedModelError
 from openforge.gateway.service import (
@@ -26,8 +27,6 @@ from openforge.gateway.types import (
     EndTrajectoryResponse,
     GenerateRequest,
     GenerateResponse,
-    GetPolicyVersionRequest,
-    GetPolicyVersionResponse,
     ModelsResponse,
     StartSessionRequest,
     StartSessionResponse,
@@ -45,41 +44,31 @@ def _build_store(cfg: GatewayServerConfig) -> SQLiteOpenForgeStore:
 
 
 def create_app(
-    config: GatewayServerConfig | GatewayConfig,
-    *,
-    store: SQLiteOpenForgeStore | None = None,
-    runtime: Runtime | None = None,
+    config: GatewayServerConfig,
 ) -> FastAPI:
     """Create the OpenForge gateway app."""
-    runtime_enabled = isinstance(config, GatewayServerConfig)
-    if isinstance(config, GatewayServerConfig):
-        gateway_config = config.gateway
-        store = store or _build_store(config)
-        runtime = runtime or Runtime(cfg=config)
-    else:
-        gateway_config = config
-        if store is None or runtime is None:
-            raise ValueError(
-                "store and runtime must be provided when create_app receives GatewayConfig"
-            )
+    gateway_config = config.gateway
+    store = _build_store(config)
+    runtime = Runtime(cfg=config)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(runtime.shutdown)
+            await store.close()
+            import ray
+
+            if ray.is_initialized():
+                ray.shutdown()
 
     service = Service(store=store, runtime=runtime)
-    app = FastAPI(title="OpenForge Gateway")
+    app = FastAPI(title="OpenForge Gateway", lifespan=lifespan)
     app.state.config = gateway_config
     app.state.runtime = runtime
     app.state.store = store
     app.state.service = service
-
-    if runtime_enabled:
-
-        @app.on_event("shutdown")
-        async def shutdown_runtime() -> None:
-            import ray
-
-            await asyncio.to_thread(runtime.shutdown)
-            await store.close()
-            if ray.is_initialized():
-                ray.shutdown()
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
@@ -143,21 +132,6 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/get_policy_version", response_model=GetPolicyVersionResponse)
-    async def get_policy_version(
-        payload: GetPolicyVersionRequest,
-    ) -> GetPolicyVersionResponse:
-        try:
-            return await service.get_policy_version(session_id=payload.session_id)
-        except SessionNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except SessionClosedError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except UnsupportedModelError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ModelBusyError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/end_trajectory", response_model=EndTrajectoryResponse)
     async def end_trajectory(

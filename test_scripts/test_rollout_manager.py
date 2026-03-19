@@ -15,8 +15,11 @@ from ray._private import worker as ray_worker
 from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.manager import RolloutManager, start_sglang_engines
 from openforge.rollout.sglang.utils import get_local_gpu_id
-from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, ray_noset_visible_devices
-from openforge.utils.ray import create_placement_groups
+from openforge.utils.ray import (
+    NOSET_VISIBLE_DEVICES_ENV_VARS_LIST,
+    create_placement_groups,
+    ray_noset_visible_devices,
+)
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 

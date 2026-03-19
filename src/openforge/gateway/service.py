@@ -11,7 +11,6 @@ from openforge.gateway.types import (
     EndSessionResponse,
     EndTrajectoryResponse,
     GenerateResponse,
-    GetPolicyVersionResponse,
     RuntimeConfig,
     StartSessionResponse,
     StartTrajectoryResponse,
@@ -174,17 +173,6 @@ class Service:
             logprobs=list(generation.logprobs),
             finish_reason=generation.finish_reason,
             rollout_model_version=generation.rollout_model_version,
-        )
-
-    async def get_policy_version(
-        self,
-        *,
-        session_id: str,
-    ) -> GetPolicyVersionResponse:
-        session = await self._require_active_session(session_id)
-        return GetPolicyVersionResponse(
-            session_id=session_id,
-            policy_version=self.runtime.get_policy_version(session.model_name),
         )
 
     async def end_trajectory(

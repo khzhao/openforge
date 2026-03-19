@@ -5,12 +5,13 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import openforge.gateway.server as gateway_server
 from fastapi.testclient import TestClient
 
-from openforge.configs.models import GatewayConfig
+from openforge.configs.cluster import ClusterConfig
+from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.runtime import Generation, ModelBusyError, UnsupportedModelError
-from openforge.gateway.server import create_app
 from openforge.gateway.types import StartSessionRequest
 
 
@@ -106,6 +107,20 @@ def _start_session_payload(model_name: str = "model-a") -> dict[str, object]:
     return request.model_dump(mode="json")
 
 
+def _server_config() -> GatewayServerConfig:
+    return GatewayServerConfig(
+        data=DataConfig(path=None),
+        gateway=GatewayConfig(host="127.0.0.1", port=0),
+        cluster=ClusterConfig(num_nodes=1, gpus_per_node=1, cpus_per_node=1),
+    )
+
+
+def _create_test_app(monkeypatch, *, store: SQLiteOpenForgeStore, runtime: object):
+    monkeypatch.setattr(gateway_server, "_build_store", lambda cfg: store)
+    monkeypatch.setattr(gateway_server, "Runtime", lambda cfg: runtime)
+    return gateway_server.create_app(_server_config())
+
+
 class _FakeRuntime:
     def __init__(self, supported_models: tuple[str, ...] = ("model-a",)) -> None:
         self._supported_models = supported_models
@@ -157,29 +172,20 @@ class _FakeRuntime:
         return Generation(
             token_ids=[10 + prompt_tail, 20 + prompt_tail],
             logprobs=[-0.1, -0.2],
-            rollout_model_version=4,
+            rollout_model_version="v4",
         )
-
-    def get_policy_version(self, model_name: str) -> int:
-        if self._current_model != model_name:
-            raise ModelBusyError(model_name)
-        return 4
 
     def shutdown(self) -> None:
         self.shutdown_count += 1
         self._current_model = None
 
 
-def test_gateway_http_flow() -> None:
+def test_gateway_http_flow(monkeypatch) -> None:
     """Exercise the HTTP flow across session, trajectory, generate, and teardown."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         runtime = _FakeRuntime()
-        app = create_app(
-            GatewayConfig(host="127.0.0.1", port=0),
-            store=store,
-            runtime=runtime,
-        )
+        app = _create_test_app(monkeypatch, store=store, runtime=runtime)
         with TestClient(app) as client:
             models = client.get("/models")
             assert models.status_code == 200
@@ -212,7 +218,7 @@ def test_gateway_http_flow() -> None:
                 "token_ids": [12, 22],
                 "logprobs": [-0.1, -0.2],
                 "finish_reason": "stop",
-                "rollout_model_version": 4,
+                "rollout_model_version": "v4",
             }
             assert runtime.last_sampling_params == {"temperature": 0.5, "top_p": 0.9}
 
@@ -232,15 +238,11 @@ def test_gateway_http_flow() -> None:
             assert ended_session.json()["status"] == "completed"
 
 
-def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
+def test_gateway_http_health_and_models_reflect_loaded_model(monkeypatch) -> None:
     """Expose health and active-model state through the HTTP surface."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-        app = create_app(
-            GatewayConfig(host="127.0.0.1", port=0),
-            store=store,
-            runtime=_FakeRuntime(),
-        )
+        app = _create_test_app(monkeypatch, store=store, runtime=_FakeRuntime())
         with TestClient(app) as client:
             assert client.get("/health").json() == {"ok": True}
             assert client.get("/models").json()["active_model"] is None
@@ -253,12 +255,14 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
             assert client.get("/models").json()["active_model"] == "model-a"
 
 
-def test_gateway_http_start_session_reports_unsupported_and_busy_models() -> None:
+def test_gateway_http_start_session_reports_unsupported_and_busy_models(
+    monkeypatch,
+) -> None:
     """Return the correct HTTP errors for unsupported or busy model starts."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-        app = create_app(
-            GatewayConfig(host="127.0.0.1", port=0),
+        app = _create_test_app(
+            monkeypatch,
             store=store,
             runtime=_FakeRuntime(("model-a", "model-b")),
         )
@@ -273,16 +277,12 @@ def test_gateway_http_start_session_reports_unsupported_and_busy_models() -> Non
             assert busy.status_code == 409
 
 
-def test_gateway_http_releases_model_after_last_session() -> None:
+def test_gateway_http_releases_model_after_last_session(monkeypatch) -> None:
     """Release the model after the last session and allow the next one to start."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         runtime = _FakeRuntime(("model-a", "model-b"))
-        app = create_app(
-            GatewayConfig(host="127.0.0.1", port=0),
-            store=store,
-            runtime=runtime,
-        )
+        app = _create_test_app(monkeypatch, store=store, runtime=runtime)
         with TestClient(app) as client:
             session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
             trajectory_id = client.post(
@@ -318,15 +318,13 @@ def test_gateway_http_releases_model_after_last_session() -> None:
             assert switched.json()["model"] == "model-b"
 
 
-def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
+def test_gateway_http_generate_validates_request_and_unknown_records(
+    monkeypatch,
+) -> None:
     """Validate generate requests and return not-found errors for missing records."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-        app = create_app(
-            GatewayConfig(host="127.0.0.1", port=0),
-            store=store,
-            runtime=_FakeRuntime(),
-        )
+        app = _create_test_app(monkeypatch, store=store, runtime=_FakeRuntime())
         with TestClient(app) as client:
             invalid = client.post(
                 "/generate",
@@ -359,15 +357,13 @@ def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
             assert missing_trajectory.status_code == 404
 
 
-def test_gateway_http_generate_after_end_trajectory_returns_conflict() -> None:
+def test_gateway_http_generate_after_end_trajectory_returns_conflict(
+    monkeypatch,
+) -> None:
     """Reject generation attempts after a trajectory has already completed."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-        app = create_app(
-            GatewayConfig(host="127.0.0.1", port=0),
-            store=store,
-            runtime=_FakeRuntime(),
-        )
+        app = _create_test_app(monkeypatch, store=store, runtime=_FakeRuntime())
         with TestClient(app) as client:
             session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
             trajectory_id = client.post(
@@ -404,15 +400,11 @@ def test_gateway_http_generate_after_end_trajectory_returns_conflict() -> None:
             assert again.status_code == 409
 
 
-def test_gateway_http_end_session_requires_completed_trajectories() -> None:
+def test_gateway_http_end_session_requires_completed_trajectories(monkeypatch) -> None:
     """Reject end_session while there are still active trajectories."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-        app = create_app(
-            GatewayConfig(host="127.0.0.1", port=0),
-            store=store,
-            runtime=_FakeRuntime(),
-        )
+        app = _create_test_app(monkeypatch, store=store, runtime=_FakeRuntime())
         with TestClient(app) as client:
             missing = client.post("/end_session", json={"session_id": "missing"})
             assert missing.status_code == 404
@@ -438,15 +430,11 @@ def test_gateway_http_end_session_requires_completed_trajectories() -> None:
             assert ended.status_code == 200
 
 
-def test_gateway_http_start_trajectory_can_fork_from_parent() -> None:
+def test_gateway_http_start_trajectory_can_fork_from_parent(monkeypatch) -> None:
     """Allow a new trajectory to copy the parent turn history via HTTP."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-        app = create_app(
-            GatewayConfig(host="127.0.0.1", port=0),
-            store=store,
-            runtime=_FakeRuntime(),
-        )
+        app = _create_test_app(monkeypatch, store=store, runtime=_FakeRuntime())
         with TestClient(app) as client:
             session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
             root = client.post("/start_trajectory", json={"session_id": session_id})
@@ -474,11 +462,17 @@ def test_gateway_http_start_trajectory_can_fork_from_parent() -> None:
             assert child.json()["parent_trajectory_id"] == root_id
 
 
-def test_create_app_requires_dependencies_with_gateway_config() -> None:
-    """Require explicit store and runtime dependencies in test-mode app creation."""
-    try:
-        create_app(GatewayConfig(host="127.0.0.1", port=0))
-    except ValueError as exc:
-        assert "store and runtime must be provided" in str(exc)
-    else:
-        raise AssertionError("expected create_app to reject missing dependencies")
+def test_create_app_accepts_server_config_without_injected_dependencies(
+    monkeypatch,
+) -> None:
+    """Allow production-style app creation from the server-owned config alone."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        runtime = _FakeRuntime()
+        cfg = GatewayServerConfig(
+            data=DataConfig(path=str(Path(tmpdir) / "gateway.sqlite3")),
+            gateway=GatewayConfig(host="127.0.0.1", port=0),
+            cluster=ClusterConfig(num_nodes=1, gpus_per_node=1, cpus_per_node=1),
+        )
+        monkeypatch.setattr(gateway_server, "Runtime", lambda cfg: runtime)
+        app = gateway_server.create_app(cfg)
+        assert app.title == "OpenForge Gateway"

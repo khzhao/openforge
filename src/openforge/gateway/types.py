@@ -17,8 +17,6 @@ __all__ = [
     "EndSessionResponse",
     "EndTrajectoryRequest",
     "EndTrajectoryResponse",
-    "GetPolicyVersionRequest",
-    "GetPolicyVersionResponse",
     "GenerateRequest",
     "GenerateResponse",
     "ModelRecord",
@@ -48,7 +46,7 @@ class ModelsResponse(BaseModel):
 class RuntimeConfig(BaseModel):
     """User-facing runtime config for one started session."""
 
-    algo: AlgorithmConfig = Field(default_factory=AlgorithmConfig)
+    algo: AlgorithmConfig
     model: ModelConfig
     train: TrainConfig
     rollout: RolloutConfig
@@ -106,20 +104,7 @@ class GenerateResponse(BaseModel):
     token_ids: list[int]
     logprobs: list[float]
     finish_reason: str
-    rollout_model_version: int
-
-
-class GetPolicyVersionRequest(BaseModel):
-    """Request payload for retrieving the current policy version."""
-
-    session_id: str
-
-
-class GetPolicyVersionResponse(BaseModel):
-    """Response payload for the current policy version."""
-
-    session_id: str
-    policy_version: int
+    rollout_model_version: str
 
 
 class EndTrajectoryRequest(BaseModel):

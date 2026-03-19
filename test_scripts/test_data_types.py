@@ -68,7 +68,7 @@ def test_turn_exposes_prompt_and_completion_token_views() -> None:
     turn = Turn(
         trajectory_id="traj-0",
         turn_index=2,
-        rollout_model_version=3,
+        rollout_model_version="v3",
         prompt_length=3,
         input_ids=[10, 11, 12, 20, 21],
         position_ids=[0, 1, 2, 3, 4],
@@ -86,7 +86,7 @@ def test_turn_validates_lengths() -> None:
         Turn(
             trajectory_id="traj-0",
             turn_index=0,
-            rollout_model_version=0,
+            rollout_model_version="default",
             prompt_length=1,
             input_ids=[1, 2],
             position_ids=[0],
@@ -101,7 +101,7 @@ def test_turn_rejects_negative_turn_index() -> None:
         Turn(
             trajectory_id="traj-0",
             turn_index=-1,
-            rollout_model_version=0,
+            rollout_model_version="default",
             prompt_length=1,
             input_ids=[1, 2],
             position_ids=[0, 1],
@@ -116,7 +116,7 @@ def test_turn_rejects_invalid_prompt_length() -> None:
         Turn(
             trajectory_id="traj-0",
             turn_index=0,
-            rollout_model_version=0,
+            rollout_model_version="default",
             prompt_length=3,
             input_ids=[1, 2],
             position_ids=[0, 1],
@@ -131,7 +131,7 @@ def test_turn_rejects_invalid_loss_mask_length() -> None:
         Turn(
             trajectory_id="traj-0",
             turn_index=0,
-            rollout_model_version=0,
+            rollout_model_version="default",
             prompt_length=1,
             input_ids=[1, 2, 3],
             position_ids=[0, 1, 2],
@@ -146,10 +146,25 @@ def test_turn_rejects_invalid_old_logprobs_length() -> None:
         Turn(
             trajectory_id="traj-0",
             turn_index=0,
-            rollout_model_version=0,
+            rollout_model_version="default",
             prompt_length=1,
             input_ids=[1, 2, 3],
             position_ids=[0, 1, 2],
             loss_mask=[False, True],
+            old_logprobs=[-0.1],
+        )
+
+
+def test_turn_rejects_empty_rollout_model_version() -> None:
+    """Reject an empty rollout model version."""
+    with pytest.raises(ValueError, match="rollout_model_version"):
+        Turn(
+            trajectory_id="traj-0",
+            turn_index=0,
+            rollout_model_version="",
+            prompt_length=1,
+            input_ids=[1, 2],
+            position_ids=[0, 1],
+            loss_mask=[True],
             old_logprobs=[-0.1],
         )

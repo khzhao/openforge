@@ -15,7 +15,7 @@ def _turn(trajectory_id: str, turn_index: int) -> Turn:
     return Turn(
         trajectory_id=trajectory_id,
         turn_index=turn_index,
-        rollout_model_version=7,
+        rollout_model_version="version-7",
         prompt_length=3,
         input_ids=input_ids,
         position_ids=list(range(len(input_ids))),

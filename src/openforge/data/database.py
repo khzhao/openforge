@@ -255,7 +255,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                 CREATE TABLE IF NOT EXISTS turns (
                     trajectory_id TEXT NOT NULL,
                     turn_index INTEGER NOT NULL,
-                    rollout_model_version INTEGER NOT NULL,
+                    rollout_model_version TEXT NOT NULL,
                     prompt_length INTEGER NOT NULL,
                     input_ids_json TEXT NOT NULL,
                     position_ids_json TEXT NOT NULL,
@@ -294,7 +294,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
         return Turn(
             trajectory_id=str(row["trajectory_id"]),
             turn_index=int(row["turn_index"]),
-            rollout_model_version=int(row["rollout_model_version"]),
+            rollout_model_version=str(row["rollout_model_version"]),
             prompt_length=int(row["prompt_length"]),
             input_ids=list(json.loads(str(row["input_ids_json"]))),
             position_ids=list(json.loads(str(row["position_ids_json"]))),

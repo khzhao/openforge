@@ -170,13 +170,8 @@ class _FakeRuntime:
         return Generation(
             token_ids=[100 + prompt_tail, 200 + prompt_tail],
             logprobs=[-0.1, -0.2],
-            rollout_model_version=5,
+            rollout_model_version="v5",
         )
-
-    def get_policy_version(self, model_name: str) -> int:
-        if self._current_model != model_name:
-            raise ModelBusyError(model_name)
-        return 5
 
     def shutdown(self) -> None:
         self.shutdown_count += 1
@@ -203,6 +198,7 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
             assert generated.session_id == session.session_id
             assert generated.trajectory_id == root.trajectory_id
             assert generated.token_ids == [103, 203]
+            assert generated.rollout_model_version == "v5"
             assert runtime.last_sampling_params == {
                 "temperature": 0.7,
                 "max_new_tokens": 32,
@@ -450,13 +446,12 @@ def test_parse_generation_payload_prefers_weight_version() -> None:
             "meta_info": {
                 "output_token_logprobs": [[-0.1, 10, None], [-0.2, 11, None]],
                 "finish_reason": "stop",
-                "weight_version": "37",
+                "weight_version": "default",
             },
         },
-        fallback_policy_version=5,
     )
 
-    assert generation.rollout_model_version == 37
+    assert generation.rollout_model_version == "default"
 
 
 def test_gateway_controller_parses_router_payload() -> None:
@@ -470,16 +465,15 @@ def test_gateway_controller_parses_router_payload() -> None:
                     [-0.4, 12, "bar"],
                 ],
                 "finish_reason": {"type": "stop"},
-                "token_steps": [7, 7],
+                "weight_version": "policy-7",
             },
         },
-        fallback_policy_version=3,
     )
 
     assert generation.token_ids == [11, 12]
     assert generation.logprobs == [-0.3, -0.4]
     assert generation.finish_reason == "stop"
-    assert generation.rollout_model_version == 7
+    assert generation.rollout_model_version == "policy-7"
 
 
 def test_gateway_controller_parses_router_payload_without_output_ids() -> None:
@@ -492,12 +486,26 @@ def test_gateway_controller_parses_router_payload_without_output_ids() -> None:
                     [-0.5, 102],
                 ],
                 "finish_reason": "length",
+                "weight_version": "default",
             },
         },
-        fallback_policy_version=9,
     )
 
     assert generation.token_ids == [101, 102]
     assert generation.logprobs == [-0.25, -0.5]
     assert generation.finish_reason == "length"
-    assert generation.rollout_model_version == 9
+    assert generation.rollout_model_version == "default"
+
+
+def test_parse_generation_payload_requires_weight_version() -> None:
+    """Reject generate payloads that do not report a weight version."""
+    with pytest.raises(ValueError, match="weight_version"):
+        Runtime._parse_generation_payload(
+            {
+                "output_ids": [10],
+                "meta_info": {
+                    "output_token_logprobs": [[-0.1, 10, None]],
+                    "finish_reason": "stop",
+                },
+            }
+        )

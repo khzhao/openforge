@@ -55,7 +55,7 @@ class Turn:
 
     trajectory_id: str
     turn_index: int
-    rollout_model_version: int
+    rollout_model_version: str
     prompt_length: int
     input_ids: list[int]
     position_ids: list[int]
@@ -65,8 +65,8 @@ class Turn:
     def __post_init__(self) -> None:
         if self.turn_index < 0:
             raise ValueError("turn_index must be >= 0")
-        if self.rollout_model_version < 0:
-            raise ValueError("rollout_model_version must be >= 0")
+        if not self.rollout_model_version:
+            raise ValueError("rollout_model_version must be non-empty")
         if self.prompt_length < 0 or self.prompt_length > len(self.input_ids):
             raise ValueError("prompt_length must be between 0 and len(input_ids)")
         if len(self.position_ids) != len(self.input_ids):
