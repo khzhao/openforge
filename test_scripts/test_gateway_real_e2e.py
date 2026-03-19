@@ -126,10 +126,9 @@ def write_temp_config(
     gpus_per_replica: int,
     cpus_per_node: int,
 ) -> Path:
-    """Write a temporary OpenForge YAML config for the live smoke."""
+    """Write a temporary gateway-server YAML config for the live smoke."""
     root = Path(tempfile.mkdtemp(prefix="openforge-gateway-e2e-"))
     sqlite_path = root / "gateway.sqlite3"
-    checkpoints = root / "checkpoints"
     config_path = root / "config.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -139,86 +138,113 @@ def write_temp_config(
             gateway:
               host: {gateway_host}
               port: {gateway_port}
-            model:
-              model_name_or_path: {model_path}
-              tokenizer_name_or_path: {model_path}
-              attn_implementation: sdpa
             cluster:
               num_nodes: 1
               gpus_per_node: {visible_gpus}
               cpus_per_node: {cpus_per_node}
-            train:
-              backend: fsdp2
-              config:
-                gradient_checkpointing: false
-                reshard_after_forward: false
-                mixed_precision:
-                  param_dtype: bfloat16
-                  reduce_dtype: float32
-                offload:
-                  mode: none
-                  pin_memory: false
-                amp:
-                  enabled: false
-                  precision: float32
-                  use_grad_scaler: false
-                optim:
-                  lr: 1.0e-5
-                  adam_beta1: 0.9
-                  adam_beta2: 0.95
-                  adam_eps: 1.0e-8
-                  weight_decay: 0.0
-                  max_grad_norm: 1.0
-                scheduler:
-                  type: constant
-                  warmup_steps: 1
-                  min_lr: 0.0
-                  num_cycles: 0.5
-              global_batch_size: 1
-              mini_batch_size: 1
-              micro_batch_size: 1
-              checkpoints: {checkpoints}
-              cpus_per_worker: 1
-              parallel:
-                data_parallel_size: {train_gpus}
-                fsdp_parallel_size: 1
-                pipeline_parallel_size: 1
-                tensor_parallel_size: 1
-                context_parallel_size: 1
-                expert_parallel_size: 1
-            rollout:
-              backend: sglang
-              request:
-                temperature: 0.0
-                top_p: 1.0
-                top_k: 1
-                max_new_tokens: 8
-                stop: []
-                stop_token_ids: []
-                skip_special_tokens: true
-                no_stop_trim: false
-                spaces_between_words: true
-              engine_groups:
-                - name: regular
-                  worker_type: regular
-                  replicas: {rollout_replicas}
-                  num_gpus_per_replica: {gpus_per_replica}
-                  num_cpus_per_replica: 1
-                  parallelism:
-                    data_parallel_size: 1
-                    fsdp_parallel_size: 1
-                    pipeline_parallel_size: 1
-                    tensor_parallel_size: {gpus_per_replica}
-                    context_parallel_size: 1
-                    expert_parallel_size: 1
-                  enable_memory_saver: false
-            algo: {{}}
             """
         ).strip()
         + "\n",
         encoding="utf-8",
     )
     return config_path
+
+
+def build_start_session_payload(
+    *,
+    model_path: str,
+    train_gpus: int,
+    rollout_replicas: int,
+    gpus_per_replica: int,
+    checkpoint_root: str,
+) -> dict[str, Any]:
+    """Build the user-facing start_session payload."""
+    return {
+        "runtime": {
+            "algo": {"kl_coef": 0.0},
+            "model": {
+                "model_name_or_path": model_path,
+                "tokenizer_name_or_path": model_path,
+                "attn_implementation": "sdpa",
+            },
+            "train": {
+                "backend": "fsdp2",
+                "config": {
+                    "gradient_checkpointing": False,
+                    "reshard_after_forward": False,
+                    "mixed_precision": {
+                        "param_dtype": "bfloat16",
+                        "reduce_dtype": "float32",
+                    },
+                    "offload": {"mode": "none", "pin_memory": False},
+                    "amp": {
+                        "enabled": False,
+                        "precision": "float32",
+                        "use_grad_scaler": False,
+                    },
+                    "optim": {
+                        "lr": 1.0e-5,
+                        "adam_beta1": 0.9,
+                        "adam_beta2": 0.95,
+                        "adam_eps": 1.0e-8,
+                        "weight_decay": 0.0,
+                        "max_grad_norm": 1.0,
+                    },
+                    "scheduler": {
+                        "type": "constant",
+                        "warmup_steps": 1,
+                        "min_lr": 0.0,
+                        "num_cycles": 0.5,
+                    },
+                },
+                "global_batch_size": 1,
+                "mini_batch_size": 1,
+                "micro_batch_size": 1,
+                "checkpoints": checkpoint_root,
+                "cpus_per_worker": 1,
+                "parallel": {
+                    "data_parallel_size": train_gpus,
+                    "fsdp_parallel_size": 1,
+                    "pipeline_parallel_size": 1,
+                    "tensor_parallel_size": 1,
+                    "context_parallel_size": 1,
+                    "expert_parallel_size": 1,
+                },
+            },
+            "rollout": {
+                "backend": "sglang",
+                "request": {
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "top_k": 1,
+                    "max_new_tokens": 8,
+                    "stop": [],
+                    "stop_token_ids": [],
+                    "skip_special_tokens": True,
+                    "no_stop_trim": False,
+                    "spaces_between_words": True,
+                },
+                "engine_groups": [
+                    {
+                        "name": "regular",
+                        "worker_type": "regular",
+                        "replicas": rollout_replicas,
+                        "num_gpus_per_replica": gpus_per_replica,
+                        "num_cpus_per_replica": 1,
+                        "parallelism": {
+                            "data_parallel_size": 1,
+                            "fsdp_parallel_size": 1,
+                            "pipeline_parallel_size": 1,
+                            "tensor_parallel_size": gpus_per_replica,
+                            "context_parallel_size": 1,
+                            "expert_parallel_size": 1,
+                        },
+                        "enable_memory_saver": False,
+                    }
+                ],
+            },
+        },
+    }
 
 
 def make_artifact_dir(path: str | None) -> Path:
@@ -244,6 +270,11 @@ def main() -> int:
     gateway_log_path = artifact_dir / "gateway_process.log"
     response_log_path = artifact_dir / "responses.jsonl"
     summary_path = artifact_dir / "summary.json"
+    for path in (gateway_log_path, response_log_path, summary_path):
+        if path.exists():
+            path.unlink()
+    checkpoint_root = str(artifact_dir / "checkpoints")
+    Path(checkpoint_root).mkdir(parents=True, exist_ok=True)
     config_path = write_temp_config(
         model_path=model_path,
         gateway_host=args.gateway_host,
@@ -293,7 +324,13 @@ def main() -> int:
         started = request_json(
             "POST",
             f"{base_url}/start_session",
-            {"model": model_path},
+            build_start_session_payload(
+                model_path=model_path,
+                train_gpus=args.train_gpus,
+                rollout_replicas=args.rollout_replicas,
+                gpus_per_replica=args.gpus_per_replica,
+                checkpoint_root=checkpoint_root,
+            ),
             timeout=float(args.request_timeout),
         )
         record_response("start_session", started)

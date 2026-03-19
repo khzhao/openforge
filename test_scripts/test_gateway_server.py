@@ -9,15 +9,104 @@ from fastapi.testclient import TestClient
 
 from openforge.configs.models import GatewayConfig
 from openforge.data import SQLiteOpenForgeStore
-from openforge.gateway.server import (
-    GatewayGeneration,
-    ModelBusyError,
-    UnsupportedModelError,
-    create_app,
-)
+from openforge.gateway.runtime import Generation, ModelBusyError, UnsupportedModelError
+from openforge.gateway.server import create_app
+from openforge.gateway.types import StartSessionRequest
 
 
-class _FakeController:
+def _start_session_payload(model_name: str = "model-a") -> dict[str, object]:
+    request = StartSessionRequest.model_validate(
+        {
+            "runtime": {
+                "algo": {"kl_coef": 0.0},
+                "model": {
+                    "model_name_or_path": model_name,
+                    "tokenizer_name_or_path": f"{model_name}-tokenizer",
+                    "attn_implementation": "sdpa",
+                },
+                "train": {
+                    "backend": "fsdp2",
+                    "config": {
+                        "gradient_checkpointing": False,
+                        "reshard_after_forward": False,
+                        "mixed_precision": {
+                            "param_dtype": "bfloat16",
+                            "reduce_dtype": "float32",
+                        },
+                        "offload": {"mode": "none", "pin_memory": False},
+                        "amp": {
+                            "enabled": False,
+                            "precision": "float32",
+                            "use_grad_scaler": False,
+                        },
+                        "optim": {
+                            "lr": 1.0e-5,
+                            "adam_beta1": 0.9,
+                            "adam_beta2": 0.95,
+                            "adam_eps": 1.0e-8,
+                            "weight_decay": 0.0,
+                            "max_grad_norm": 1.0,
+                        },
+                        "scheduler": {
+                            "type": "constant",
+                            "warmup_steps": 1,
+                            "min_lr": 0.0,
+                            "num_cycles": 0.5,
+                        },
+                    },
+                    "global_batch_size": 1,
+                    "mini_batch_size": 1,
+                    "micro_batch_size": 1,
+                    "checkpoints": "/tmp/openforge-test-checkpoints",
+                    "cpus_per_worker": 1,
+                    "parallel": {
+                        "data_parallel_size": 1,
+                        "fsdp_parallel_size": 1,
+                        "pipeline_parallel_size": 1,
+                        "tensor_parallel_size": 1,
+                        "context_parallel_size": 1,
+                        "expert_parallel_size": 1,
+                    },
+                },
+                "rollout": {
+                    "backend": "sglang",
+                    "request": {
+                        "temperature": 0.0,
+                        "top_p": 1.0,
+                        "top_k": 1,
+                        "max_new_tokens": 8,
+                        "stop": [],
+                        "stop_token_ids": [],
+                        "skip_special_tokens": True,
+                        "no_stop_trim": False,
+                        "spaces_between_words": True,
+                    },
+                    "engine_groups": [
+                        {
+                            "name": "regular",
+                            "worker_type": "regular",
+                            "replicas": 1,
+                            "num_gpus_per_replica": 1,
+                            "num_cpus_per_replica": 1,
+                            "parallelism": {
+                                "data_parallel_size": 1,
+                                "fsdp_parallel_size": 1,
+                                "pipeline_parallel_size": 1,
+                                "tensor_parallel_size": 1,
+                                "context_parallel_size": 1,
+                                "expert_parallel_size": 1,
+                            },
+                            "enable_memory_saver": False,
+                        }
+                    ],
+                },
+            },
+        }
+    )
+    return request.model_dump(mode="json")
+
+
+class _FakeRuntime:
     def __init__(self, supported_models: tuple[str, ...] = ("model-a",)) -> None:
         self._supported_models = supported_models
         self._current_model: str | None = None
@@ -33,17 +122,24 @@ class _FakeController:
     def current_model(self) -> str | None:
         return self._current_model
 
-    def ensure_model(self, model_name: str) -> None:
+    def start(self, *, runtime_config) -> str:
+        model_name = str(runtime_config.model.model_name_or_path)
         if model_name not in self._supported_models:
             raise UnsupportedModelError(model_name)
         if self._current_model is None:
             self._current_model = model_name
-            return
+            return model_name
         if self._current_model != model_name:
             raise ModelBusyError(model_name)
+        return model_name
 
-    def tokenize_messages(self, model_name: str, messages: list[dict[str, str]]) -> list[int]:
-        self.ensure_model(model_name)
+    def tokenize_messages(
+        self,
+        model_name: str,
+        messages: list[dict[str, str]],
+    ) -> list[int]:
+        if self._current_model != model_name:
+            raise ModelBusyError(model_name)
         token_count = sum(len(message["content"].split()) for message in messages)
         return list(range(1, token_count + 2))
 
@@ -53,15 +149,21 @@ class _FakeController:
         *,
         prompt_token_ids: list[int],
         sampling_params: dict[str, object] | None = None,
-    ) -> GatewayGeneration:
-        self.ensure_model(model_name)
+    ) -> Generation:
+        if self._current_model != model_name:
+            raise ModelBusyError(model_name)
         self.last_sampling_params = sampling_params
         prompt_tail = int(prompt_token_ids[-1]) if prompt_token_ids else 0
-        return GatewayGeneration(
+        return Generation(
             token_ids=[10 + prompt_tail, 20 + prompt_tail],
             logprobs=[-0.1, -0.2],
             rollout_model_version=4,
         )
+
+    def get_policy_version(self, model_name: str) -> int:
+        if self._current_model != model_name:
+            raise ModelBusyError(model_name)
+        return 4
 
     def shutdown(self) -> None:
         self.shutdown_count += 1
@@ -69,13 +171,14 @@ class _FakeController:
 
 
 def test_gateway_http_flow() -> None:
+    """Exercise the HTTP flow across session, trajectory, generate, and teardown."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-        controller = _FakeController()
+        runtime = _FakeRuntime()
         app = create_app(
             GatewayConfig(host="127.0.0.1", port=0),
             store=store,
-            controller=controller,
+            runtime=runtime,
         )
         with TestClient(app) as client:
             models = client.get("/models")
@@ -85,7 +188,7 @@ def test_gateway_http_flow() -> None:
                 "active_model": None,
             }
 
-            started = client.post("/start_session", json={"model": "model-a"})
+            started = client.post("/start_session", json=_start_session_payload("model-a"))
             assert started.status_code == 200
             session_id = started.json()["session_id"]
 
@@ -111,7 +214,7 @@ def test_gateway_http_flow() -> None:
                 "finish_reason": "stop",
                 "rollout_model_version": 4,
             }
-            assert controller.last_sampling_params == {"temperature": 0.5, "top_p": 0.9}
+            assert runtime.last_sampling_params == {"temperature": 0.5, "top_p": 0.9}
 
             ended_trajectory = client.post(
                 "/end_trajectory",
@@ -130,12 +233,13 @@ def test_gateway_http_flow() -> None:
 
 
 def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
+    """Expose health and active-model state through the HTTP surface."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
             GatewayConfig(host="127.0.0.1", port=0),
             store=store,
-            controller=_FakeController(),
+            runtime=_FakeRuntime(),
         )
         with TestClient(app) as client:
             assert client.get("/health").json() == {"ok": True}
@@ -144,41 +248,43 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
                 {"id": "model-a", "tokenizer": "model-a-tokenizer"}
             ]
 
-            started = client.post("/start_session", json={"model": "model-a"})
+            started = client.post("/start_session", json=_start_session_payload("model-a"))
             assert started.status_code == 200
             assert client.get("/models").json()["active_model"] == "model-a"
 
 
 def test_gateway_http_start_session_reports_unsupported_and_busy_models() -> None:
+    """Return the correct HTTP errors for unsupported or busy model starts."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
             GatewayConfig(host="127.0.0.1", port=0),
             store=store,
-            controller=_FakeController(("model-a", "model-b")),
+            runtime=_FakeRuntime(("model-a", "model-b")),
         )
         with TestClient(app) as client:
-            unsupported = client.post("/start_session", json={"model": "model-c"})
+            unsupported = client.post("/start_session", json=_start_session_payload("model-c"))
             assert unsupported.status_code == 404
 
-            created = client.post("/start_session", json={"model": "model-a"})
+            created = client.post("/start_session", json=_start_session_payload("model-a"))
             assert created.status_code == 200
 
-            busy = client.post("/start_session", json={"model": "model-b"})
+            busy = client.post("/start_session", json=_start_session_payload("model-b"))
             assert busy.status_code == 409
 
 
 def test_gateway_http_releases_model_after_last_session() -> None:
+    """Release the model after the last session and allow the next one to start."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-        controller = _FakeController(("model-a", "model-b"))
+        runtime = _FakeRuntime(("model-a", "model-b"))
         app = create_app(
             GatewayConfig(host="127.0.0.1", port=0),
             store=store,
-            controller=controller,
+            runtime=runtime,
         )
         with TestClient(app) as client:
-            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
             trajectory_id = client.post(
                 "/start_trajectory",
                 json={"session_id": session_id},
@@ -204,21 +310,22 @@ def test_gateway_http_releases_model_after_last_session() -> None:
             ended_session = client.post("/end_session", json={"session_id": session_id})
 
             assert ended_session.status_code == 200
-            assert controller.shutdown_count == 1
+            assert runtime.shutdown_count == 1
             assert client.get("/models").json()["active_model"] is None
 
-            switched = client.post("/start_session", json={"model": "model-b"})
+            switched = client.post("/start_session", json=_start_session_payload("model-b"))
             assert switched.status_code == 200
             assert switched.json()["model"] == "model-b"
 
 
 def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
+    """Validate generate requests and return not-found errors for missing records."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
             GatewayConfig(host="127.0.0.1", port=0),
             store=store,
-            controller=_FakeController(),
+            runtime=_FakeRuntime(),
         )
         with TestClient(app) as client:
             invalid = client.post(
@@ -240,7 +347,7 @@ def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
             )
             assert missing_session.status_code == 404
 
-            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
             missing_trajectory = client.post(
                 "/generate",
                 json={
@@ -253,15 +360,16 @@ def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
 
 
 def test_gateway_http_generate_after_end_trajectory_returns_conflict() -> None:
+    """Reject generation attempts after a trajectory has already completed."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
             GatewayConfig(host="127.0.0.1", port=0),
             store=store,
-            controller=_FakeController(),
+            runtime=_FakeRuntime(),
         )
         with TestClient(app) as client:
-            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
             trajectory_id = client.post(
                 "/start_trajectory",
                 json={"session_id": session_id},
@@ -297,18 +405,19 @@ def test_gateway_http_generate_after_end_trajectory_returns_conflict() -> None:
 
 
 def test_gateway_http_end_session_requires_completed_trajectories() -> None:
+    """Reject end_session while there are still active trajectories."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
             GatewayConfig(host="127.0.0.1", port=0),
             store=store,
-            controller=_FakeController(),
+            runtime=_FakeRuntime(),
         )
         with TestClient(app) as client:
             missing = client.post("/end_session", json={"session_id": "missing"})
             assert missing.status_code == 404
 
-            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
             trajectory_id = client.post(
                 "/start_trajectory",
                 json={"session_id": session_id},
@@ -330,15 +439,16 @@ def test_gateway_http_end_session_requires_completed_trajectories() -> None:
 
 
 def test_gateway_http_start_trajectory_can_fork_from_parent() -> None:
+    """Allow a new trajectory to copy the parent turn history via HTTP."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
             GatewayConfig(host="127.0.0.1", port=0),
             store=store,
-            controller=_FakeController(),
+            runtime=_FakeRuntime(),
         )
         with TestClient(app) as client:
-            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
             root = client.post("/start_trajectory", json={"session_id": session_id})
             assert root.status_code == 200
             root_id = root.json()["trajectory_id"]
@@ -365,9 +475,10 @@ def test_gateway_http_start_trajectory_can_fork_from_parent() -> None:
 
 
 def test_create_app_requires_dependencies_with_gateway_config() -> None:
+    """Require explicit store and runtime dependencies in test-mode app creation."""
     try:
         create_app(GatewayConfig(host="127.0.0.1", port=0))
     except ValueError as exc:
-        assert "store and controller must be provided" in str(exc)
+        assert "store and runtime must be provided" in str(exc)
     else:
         raise AssertionError("expected create_app to reject missing dependencies")

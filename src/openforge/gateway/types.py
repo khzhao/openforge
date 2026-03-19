@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from openforge.configs.algo import AlgorithmConfig
+from openforge.configs.models import ModelConfig
+from openforge.configs.rollout import RolloutConfig
+from openforge.configs.train import TrainConfig
 
 __all__ = [
     "ChatMessage",
@@ -17,45 +21,14 @@ __all__ = [
     "GetPolicyVersionResponse",
     "GenerateRequest",
     "GenerateResponse",
-    "GenerateResult",
     "ModelRecord",
     "ModelsResponse",
+    "RuntimeConfig",
     "StartSessionRequest",
     "StartSessionResponse",
-    "StartSessionResult",
     "StartTrajectoryRequest",
     "StartTrajectoryResponse",
-    "StartTrajectoryResult",
 ]
-
-
-@dataclass(slots=True)
-class StartSessionResult:
-    """Internal result for a newly started session."""
-
-    session_id: str
-    model: str
-
-
-@dataclass(slots=True)
-class StartTrajectoryResult:
-    """Internal result for a newly started trajectory."""
-
-    session_id: str
-    trajectory_id: str
-    parent_trajectory_id: str | None
-
-
-@dataclass(slots=True)
-class GenerateResult:
-    """Internal result for one generated trajectory continuation."""
-
-    session_id: str
-    trajectory_id: str
-    token_ids: list[int]
-    logprobs: list[float]
-    finish_reason: str
-    rollout_model_version: int
 
 
 class ModelRecord(BaseModel):
@@ -72,10 +45,19 @@ class ModelsResponse(BaseModel):
     active_model: str | None
 
 
+class RuntimeConfig(BaseModel):
+    """User-facing runtime config for one started session."""
+
+    algo: AlgorithmConfig = Field(default_factory=AlgorithmConfig)
+    model: ModelConfig
+    train: TrainConfig
+    rollout: RolloutConfig
+
+
 class StartSessionRequest(BaseModel):
     """Request payload for starting a training session."""
 
-    model: str
+    runtime: RuntimeConfig
 
 
 class StartSessionResponse(BaseModel):

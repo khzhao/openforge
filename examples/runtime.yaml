@@ -1,24 +1,16 @@
 # Copyright 2026 openforge
 
-data:
-  backend: test
+# User-facing runtime/session config.
+# This is the runtime payload embedded inside POST /start_session.
 
-gateway:
-  host: 127.0.0.1
-  port: 8000
+algo:
+  kl_coef: 0.0
 
 model:
   model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
   tokenizer_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
   reference_model_name_or_path: null
-
-algo:
-  kl_coef: 0.0
-
-cluster:
-  num_nodes: 1
-  gpus_per_node: 4
-  cpus_per_node: 16
+  attn_implementation: sdpa
 
 train:
   backend: fsdp2
@@ -55,7 +47,7 @@ train:
   cpus_per_worker: 2
   parallel:
     data_parallel_size: 1
-    fsdp_parallel_size: 3
+    fsdp_parallel_size: 1
     pipeline_parallel_size: 1
     tensor_parallel_size: 1
     context_parallel_size: 1

@@ -9,22 +9,117 @@ from pathlib import Path
 import pytest
 
 from openforge.data import SQLiteOpenForgeStore
-from openforge.gateway.server import (
+from openforge.gateway.runtime import (
+    Generation,
+    ModelBusyError,
+    Runtime,
+    UnsupportedModelError,
+)
+from openforge.gateway.service import (
     ActiveSessionError,
     ActiveTrajectoriesRemainError,
-    ConfiguredGatewayRuntimeController,
-    GatewayGeneration,
-    GatewayService,
-    ModelBusyError,
+    Service,
     SessionClosedError,
     SessionNotFoundError,
     TrajectoryNotActiveError,
     TrajectoryNotFoundError,
-    UnsupportedModelError,
 )
+from openforge.gateway.types import StartSessionRequest
 
 
-class _FakeController:
+def _start_session_kwargs(model_name: str = "model-a") -> dict[str, object]:
+    request = StartSessionRequest.model_validate(
+        {
+            "runtime": {
+                "algo": {"kl_coef": 0.0},
+                "model": {
+                    "model_name_or_path": model_name,
+                    "tokenizer_name_or_path": f"{model_name}-tokenizer",
+                    "attn_implementation": "sdpa",
+                },
+                "train": {
+                    "backend": "fsdp2",
+                    "config": {
+                        "gradient_checkpointing": False,
+                        "reshard_after_forward": False,
+                        "mixed_precision": {
+                            "param_dtype": "bfloat16",
+                            "reduce_dtype": "float32",
+                        },
+                        "offload": {"mode": "none", "pin_memory": False},
+                        "amp": {
+                            "enabled": False,
+                            "precision": "float32",
+                            "use_grad_scaler": False,
+                        },
+                        "optim": {
+                            "lr": 1.0e-5,
+                            "adam_beta1": 0.9,
+                            "adam_beta2": 0.95,
+                            "adam_eps": 1.0e-8,
+                            "weight_decay": 0.0,
+                            "max_grad_norm": 1.0,
+                        },
+                        "scheduler": {
+                            "type": "constant",
+                            "warmup_steps": 1,
+                            "min_lr": 0.0,
+                            "num_cycles": 0.5,
+                        },
+                    },
+                    "global_batch_size": 1,
+                    "mini_batch_size": 1,
+                    "micro_batch_size": 1,
+                    "checkpoints": "/tmp/openforge-test-checkpoints",
+                    "cpus_per_worker": 1,
+                    "parallel": {
+                        "data_parallel_size": 1,
+                        "fsdp_parallel_size": 1,
+                        "pipeline_parallel_size": 1,
+                        "tensor_parallel_size": 1,
+                        "context_parallel_size": 1,
+                        "expert_parallel_size": 1,
+                    },
+                },
+                "rollout": {
+                    "backend": "sglang",
+                    "request": {
+                        "temperature": 0.0,
+                        "top_p": 1.0,
+                        "top_k": 1,
+                        "max_new_tokens": 8,
+                        "stop": [],
+                        "stop_token_ids": [],
+                        "skip_special_tokens": True,
+                        "no_stop_trim": False,
+                        "spaces_between_words": True,
+                    },
+                    "engine_groups": [
+                        {
+                            "name": "regular",
+                            "worker_type": "regular",
+                            "replicas": 1,
+                            "num_gpus_per_replica": 1,
+                            "num_cpus_per_replica": 1,
+                            "parallelism": {
+                                "data_parallel_size": 1,
+                                "fsdp_parallel_size": 1,
+                                "pipeline_parallel_size": 1,
+                                "tensor_parallel_size": 1,
+                                "context_parallel_size": 1,
+                                "expert_parallel_size": 1,
+                            },
+                            "enable_memory_saver": False,
+                        }
+                    ],
+                },
+            },
+        }
+    )
+    return {"runtime_config": request.runtime}
+
+
+class _FakeRuntime:
     def __init__(self, supported_models: tuple[str, ...] = ("model-a",)) -> None:
         self._supported_models = supported_models
         self._current_model: str | None = None
@@ -40,21 +135,24 @@ class _FakeController:
     def current_model(self) -> str | None:
         return self._current_model
 
-    def ensure_model(self, model_name: str) -> None:
+    def start(self, *, runtime_config) -> str:
+        model_name = str(runtime_config.model.model_name_or_path)
         if model_name not in self._supported_models:
             raise UnsupportedModelError(model_name)
         if self._current_model is None:
             self._current_model = model_name
-            return
+            return model_name
         if self._current_model != model_name:
             raise ModelBusyError(model_name)
+        return model_name
 
     def tokenize_messages(
         self,
         model_name: str,
         messages: list[dict[str, str]],
     ) -> list[int]:
-        self.ensure_model(model_name)
+        if self._current_model != model_name:
+            raise ModelBusyError(model_name)
         token_count = sum(len(message["content"].split()) for message in messages)
         return list(range(1, token_count + 2))
 
@@ -64,15 +162,21 @@ class _FakeController:
         *,
         prompt_token_ids: list[int],
         sampling_params: dict[str, object] | None = None,
-    ) -> GatewayGeneration:
-        self.ensure_model(model_name)
+    ) -> Generation:
+        if self._current_model != model_name:
+            raise ModelBusyError(model_name)
         self.last_sampling_params = sampling_params
         prompt_tail = int(prompt_token_ids[-1]) if prompt_token_ids else 0
-        return GatewayGeneration(
+        return Generation(
             token_ids=[100 + prompt_tail, 200 + prompt_tail],
             logprobs=[-0.1, -0.2],
             rollout_model_version=5,
         )
+
+    def get_policy_version(self, model_name: str) -> int:
+        if self._current_model != model_name:
+            raise ModelBusyError(model_name)
+        return 5
 
     def shutdown(self) -> None:
         self.shutdown_count += 1
@@ -80,13 +184,14 @@ class _FakeController:
 
 
 def test_gateway_service_start_generate_fork_and_end() -> None:
+    """Exercise the main service lifecycle across session, trajectory, and turn writes."""
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-            controller = _FakeController()
-            service = GatewayService(store=store, controller=controller)
+            runtime = _FakeRuntime()
+            service = Service(store=store, runtime=runtime)
 
-            session = await service.start_session("model-a")
+            session = await service.start_session(**_start_session_kwargs("model-a"))
             root = await service.start_trajectory(session_id=session.session_id)
 
             generated = await service.generate(
@@ -98,7 +203,7 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
             assert generated.session_id == session.session_id
             assert generated.trajectory_id == root.trajectory_id
             assert generated.token_ids == [103, 203]
-            assert controller.last_sampling_params == {
+            assert runtime.last_sampling_params == {
                 "temperature": 0.7,
                 "max_new_tokens": 32,
             }
@@ -131,10 +236,8 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
             )
 
             ended = await service.end_session(session_id=session.session_id)
-            assert ended == {
-                "session_id": session.session_id,
-                "status": "completed",
-            }
+            assert ended.session_id == session.session_id
+            assert ended.status == "completed"
 
             completed = await store.list_completed_trajectories(model_name="model-a")
             assert sorted(
@@ -152,17 +255,18 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
 
 
 def test_gateway_service_list_models_and_start_session_tracks_active_model() -> None:
+    """Verify model listing and active-model tracking through session start."""
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
-        controller = _FakeController()
-        service = GatewayService(store=store, controller=controller)
+        runtime = _FakeRuntime()
+        service = Service(store=store, runtime=runtime)
 
         assert await service.list_models() == {
             "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
             "active_model": None,
         }
 
-        created = await service.start_session("model-a")
+        created = await service.start_session(**_start_session_kwargs("model-a"))
 
         assert await service.list_models() == {
             "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
@@ -176,23 +280,24 @@ def test_gateway_service_list_models_and_start_session_tracks_active_model() -> 
 
 
 def test_gateway_service_start_session_rejects_unsupported_busy_and_second_session() -> None:
+    """Reject unsupported models and more than one active session."""
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
-        service = GatewayService(
+        service = Service(
             store=store,
-            controller=_FakeController(("model-a", "model-b")),
+            runtime=_FakeRuntime(("model-a", "model-b")),
         )
 
         with pytest.raises(UnsupportedModelError):
-            await service.start_session("model-c")
+            await service.start_session(**_start_session_kwargs("model-c"))
 
-        await service.start_session("model-a")
-
-        with pytest.raises(ActiveSessionError):
-            await service.start_session("model-a")
+        await service.start_session(**_start_session_kwargs("model-a"))
 
         with pytest.raises(ActiveSessionError):
-            await service.start_session("model-b")
+            await service.start_session(**_start_session_kwargs("model-a"))
+
+        with pytest.raises(ActiveSessionError):
+            await service.start_session(**_start_session_kwargs("model-b"))
 
         await store.close()
 
@@ -200,12 +305,13 @@ def test_gateway_service_start_session_rejects_unsupported_busy_and_second_sessi
 
 
 def test_gateway_service_releases_runtime_after_last_session_and_allows_switch() -> None:
+    """Release the runtime after the last session and allow a model switch."""
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
-        controller = _FakeController(("model-a", "model-b"))
-        service = GatewayService(store=store, controller=controller)
+        runtime = _FakeRuntime(("model-a", "model-b"))
+        service = Service(store=store, runtime=runtime)
 
-        session = await service.start_session("model-a")
+        session = await service.start_session(**_start_session_kwargs("model-a"))
         trajectory = await service.start_trajectory(session_id=session.session_id)
         await service.generate(
             session_id=session.session_id,
@@ -219,13 +325,13 @@ def test_gateway_service_releases_runtime_after_last_session_and_allows_switch()
         )
         ended = await service.end_session(session_id=session.session_id)
 
-        assert ended["status"] == "completed"
-        assert controller.shutdown_count == 1
-        assert controller.current_model() is None
+        assert ended.status == "completed"
+        assert runtime.shutdown_count == 1
+        assert runtime.current_model() is None
 
-        created_again = await service.start_session("model-b")
+        created_again = await service.start_session(**_start_session_kwargs("model-b"))
         assert created_again.model == "model-b"
-        assert controller.current_model() == "model-b"
+        assert runtime.current_model() == "model-b"
 
         await store.close()
 
@@ -233,9 +339,10 @@ def test_gateway_service_releases_runtime_after_last_session_and_allows_switch()
 
 
 def test_gateway_service_generate_unknown_session_raises() -> None:
+    """Raise a not-found error when generation targets an unknown session."""
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
-        service = GatewayService(store=store, controller=_FakeController())
+        service = Service(store=store, runtime=_FakeRuntime())
 
         with pytest.raises(SessionNotFoundError, match="unknown session_id"):
             await service.generate(
@@ -250,10 +357,11 @@ def test_gateway_service_generate_unknown_session_raises() -> None:
 
 
 def test_gateway_service_trajectory_lifecycle_errors() -> None:
+    """Raise the expected errors across invalid trajectory lifecycle operations."""
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
-        service = GatewayService(store=store, controller=_FakeController())
-        session = await service.start_session("model-a")
+        service = Service(store=store, runtime=_FakeRuntime())
+        session = await service.start_session(**_start_session_kwargs("model-a"))
         root = await service.start_trajectory(session_id=session.session_id)
 
         with pytest.raises(TrajectoryNotFoundError, match="unknown trajectory_id"):
@@ -293,10 +401,11 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
 
 
 def test_gateway_service_end_session_requires_all_trajectories_completed() -> None:
+    """Require all trajectories to complete before ending the session."""
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
-        service = GatewayService(store=store, controller=_FakeController())
-        session = await service.start_session("model-a")
+        service = Service(store=store, runtime=_FakeRuntime())
+        session = await service.start_session(**_start_session_kwargs("model-a"))
         root = await service.start_trajectory(session_id=session.session_id)
         child = await service.start_trajectory(session_id=session.session_id)
 
@@ -323,7 +432,7 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
             final_reward=0.0,
         )
         ended = await service.end_session(session_id=session.session_id)
-        assert ended["status"] == "completed"
+        assert ended.status == "completed"
 
         with pytest.raises(SessionClosedError, match="is not active"):
             await service.start_trajectory(session_id=session.session_id)
@@ -334,7 +443,8 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
 
 
 def test_parse_generation_payload_prefers_weight_version() -> None:
-    generation = ConfiguredGatewayRuntimeController._parse_generation_payload(
+    """Prefer the explicit weight version over token-step fallbacks."""
+    generation = Runtime._parse_generation_payload(
         {
             "output_ids": [10, 11],
             "meta_info": {
@@ -350,7 +460,8 @@ def test_parse_generation_payload_prefers_weight_version() -> None:
 
 
 def test_gateway_controller_parses_router_payload() -> None:
-    generation = ConfiguredGatewayRuntimeController._parse_generation_payload(
+    """Parse the standard router payload shape into a gateway generation."""
+    generation = Runtime._parse_generation_payload(
         {
             "output_ids": [11, 12],
             "meta_info": {
@@ -372,7 +483,8 @@ def test_gateway_controller_parses_router_payload() -> None:
 
 
 def test_gateway_controller_parses_router_payload_without_output_ids() -> None:
-    generation = ConfiguredGatewayRuntimeController._parse_generation_payload(
+    """Reconstruct token ids from logprob entries when output ids are missing."""
+    generation = Runtime._parse_generation_payload(
         {
             "meta_info": {
                 "output_token_logprobs": [

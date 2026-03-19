@@ -104,3 +104,20 @@ class OpenForgeConfig(OpenForgeBaseModel):
         if not isinstance(raw, dict):
             raise ValueError("YAML root must be a mapping")
         return cls.model_validate(raw)
+
+
+class GatewayServerConfig(OpenForgeBaseModel):
+    """Server-owned gateway configuration."""
+
+    data: DataConfig
+    gateway: GatewayConfig
+    cluster: ClusterConfig
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "GatewayServerConfig":
+        """Load GatewayServerConfig from a YAML file."""
+        with Path(path).open(encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("YAML root must be a mapping")
+        return cls.model_validate(raw)

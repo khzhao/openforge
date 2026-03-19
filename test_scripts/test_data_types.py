@@ -8,6 +8,7 @@ from openforge.data import Session, Trajectory, Turn
 
 
 def test_session_and_trajectory_construct() -> None:
+    """Construct the core session and active trajectory records."""
     session = Session(session_id="session-0", model_name="model-a")
     trajectory = Trajectory(
         trajectory_id="traj-0",
@@ -22,6 +23,7 @@ def test_session_and_trajectory_construct() -> None:
 
 
 def test_completed_trajectory_can_store_final_reward() -> None:
+    """Allow completed trajectories to store a final reward."""
     trajectory = Trajectory(
         trajectory_id="traj-0",
         session_id="session-0",
@@ -35,6 +37,7 @@ def test_completed_trajectory_can_store_final_reward() -> None:
 
 
 def test_active_trajectory_cannot_store_final_reward() -> None:
+    """Reject final rewards on active trajectories."""
     with pytest.raises(ValueError, match="final_reward"):
         Trajectory(
             trajectory_id="traj-0",
@@ -45,14 +48,15 @@ def test_active_trajectory_cannot_store_final_reward() -> None:
         )
 
 
-@pytest.mark.parametrize("status", ["forked", "completed", "trained", "failed"])
+@pytest.mark.parametrize("status", ["completed", "trained", "failed"])
 def test_terminal_trajectory_statuses_are_terminal(status: str) -> None:
+    """Mark completed, trained, and failed trajectories as terminal."""
     trajectory = Trajectory(
         trajectory_id="traj-0",
         session_id="session-0",
         parent_trajectory_id="traj-parent",
         status=status,
-        final_reward=1.0 if status != "forked" else None,
+        final_reward=1.0,
     )
 
     assert trajectory.is_active is False
@@ -60,6 +64,7 @@ def test_terminal_trajectory_statuses_are_terminal(status: str) -> None:
 
 
 def test_turn_exposes_prompt_and_completion_token_views() -> None:
+    """Expose prompt and completion token slices from one stored turn."""
     turn = Turn(
         trajectory_id="traj-0",
         turn_index=2,
@@ -76,6 +81,7 @@ def test_turn_exposes_prompt_and_completion_token_views() -> None:
 
 
 def test_turn_validates_lengths() -> None:
+    """Reject position arrays that do not align with input ids."""
     with pytest.raises(ValueError, match="position_ids"):
         Turn(
             trajectory_id="traj-0",
@@ -90,6 +96,7 @@ def test_turn_validates_lengths() -> None:
 
 
 def test_turn_rejects_negative_turn_index() -> None:
+    """Reject negative turn indices."""
     with pytest.raises(ValueError, match="turn_index"):
         Turn(
             trajectory_id="traj-0",
@@ -104,6 +111,7 @@ def test_turn_rejects_negative_turn_index() -> None:
 
 
 def test_turn_rejects_invalid_prompt_length() -> None:
+    """Reject prompt lengths outside the input id range."""
     with pytest.raises(ValueError, match="prompt_length"):
         Turn(
             trajectory_id="traj-0",
@@ -118,6 +126,7 @@ def test_turn_rejects_invalid_prompt_length() -> None:
 
 
 def test_turn_rejects_invalid_loss_mask_length() -> None:
+    """Reject loss masks that do not cover every predicted token."""
     with pytest.raises(ValueError, match="loss_mask"):
         Turn(
             trajectory_id="traj-0",
@@ -132,6 +141,7 @@ def test_turn_rejects_invalid_loss_mask_length() -> None:
 
 
 def test_turn_rejects_invalid_old_logprobs_length() -> None:
+    """Reject logprob arrays that do not cover every predicted token."""
     with pytest.raises(ValueError, match="old_logprobs"):
         Turn(
             trajectory_id="traj-0",

@@ -4,7 +4,7 @@ import argparse
 
 import uvicorn
 
-from openforge.configs.models import OpenForgeConfig
+from openforge.configs.models import GatewayServerConfig
 from openforge.gateway.server import create_app
 
 
@@ -15,11 +15,11 @@ def main() -> None:
         "--config",
         type=str,
         required=True,
-        help="Path to OpenForge YAML config file.",
+        help="Path to Gateway server YAML config file.",
     )
     args = parser.parse_args()
 
-    cfg = OpenForgeConfig.from_yaml(args.config)
+    cfg = GatewayServerConfig.from_yaml(args.config)
     app = create_app(cfg)
     uvicorn.run(app, host=cfg.gateway.host, port=cfg.gateway.port)
 
