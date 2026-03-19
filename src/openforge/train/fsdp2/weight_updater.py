@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 from openforge.utils.distributed import init_custom_process_group
+from openforge.utils.networking import get_free_port
 from openforge.utils.packed import (
     build_tensor_bucket_meta,
     flatten_tensor_bucket,
@@ -19,20 +20,6 @@ from openforge.utils.packed import (
 __all__ = ["WeightUpdater"]
 
 WeightUpdateMode = Literal["auto", "disk", "tensor", "distributed"]
-
-
-def allocate_distributed_master_endpoint(
-    publisher: Any,
-    *,
-    start_port: int = 20000,
-) -> tuple[str, int]:
-    master_address, master_port = ray.get(
-        [
-            publisher.node_ip_address.remote(),
-            publisher.get_free_port.remote(start=start_port),
-        ]
-    )
-    return master_address, master_port
 
 
 class WeightUpdater:
@@ -174,9 +161,9 @@ class WeightUpdater:
         flattened_buckets = [flatten_tensor_bucket(bucket) for bucket in named_buckets]
 
         group_name = f"openforge-weight-update-{uuid.uuid4().hex[:10]}"
-        master_address, master_port = allocate_distributed_master_endpoint(
-            self.train_group.workers[0]
-        )
+        # Rank 0 for this custom process group lives in the driver process.
+        master_address = "127.0.0.1"
+        master_port = get_free_port(start=20000)
         world_size = 1 + sum(rollout_world_sizes)
         rank_offset = 1
         ray.get(
