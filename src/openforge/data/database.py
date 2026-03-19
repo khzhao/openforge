@@ -186,10 +186,9 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                         prompt_length,
                         input_ids_json,
                         position_ids_json,
-                        loss_mask_json,
-                        old_logprobs_json
+                        loss_mask_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         turn.trajectory_id,
@@ -199,7 +198,6 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                         json.dumps(turn.input_ids),
                         json.dumps(turn.position_ids),
                         json.dumps(turn.loss_mask),
-                        json.dumps(turn.old_logprobs),
                     ),
                 )
 
@@ -214,8 +212,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     prompt_length,
                     input_ids_json,
                     position_ids_json,
-                    loss_mask_json,
-                    old_logprobs_json
+                    loss_mask_json
                 FROM turns
                 WHERE trajectory_id = ?
                 ORDER BY turn_index ASC
@@ -260,7 +257,6 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     input_ids_json TEXT NOT NULL,
                     position_ids_json TEXT NOT NULL,
                     loss_mask_json TEXT NOT NULL,
-                    old_logprobs_json TEXT NOT NULL,
                     PRIMARY KEY (trajectory_id, turn_index),
                     FOREIGN KEY(trajectory_id) REFERENCES trajectories(trajectory_id)
                 )
@@ -299,5 +295,4 @@ class SQLiteOpenForgeStore(OpenForgeStore):
             input_ids=list(json.loads(str(row["input_ids_json"]))),
             position_ids=list(json.loads(str(row["position_ids_json"]))),
             loss_mask=list(json.loads(str(row["loss_mask_json"]))),
-            old_logprobs=list(json.loads(str(row["old_logprobs_json"]))),
         )

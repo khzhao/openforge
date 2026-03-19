@@ -73,7 +73,6 @@ def test_turn_exposes_prompt_and_completion_token_views() -> None:
         input_ids=[10, 11, 12, 20, 21],
         position_ids=[0, 1, 2, 3, 4],
         loss_mask=[False, False, True, True],
-        old_logprobs=[-1.0, -1.1, -0.1, -0.2],
     )
 
     assert turn.prompt_token_ids == [10, 11, 12]
@@ -91,7 +90,6 @@ def test_turn_validates_lengths() -> None:
             input_ids=[1, 2],
             position_ids=[0],
             loss_mask=[True],
-            old_logprobs=[-0.1],
         )
 
 
@@ -106,7 +104,6 @@ def test_turn_rejects_negative_turn_index() -> None:
             input_ids=[1, 2],
             position_ids=[0, 1],
             loss_mask=[True],
-            old_logprobs=[-0.1],
         )
 
 
@@ -121,7 +118,6 @@ def test_turn_rejects_invalid_prompt_length() -> None:
             input_ids=[1, 2],
             position_ids=[0, 1],
             loss_mask=[True],
-            old_logprobs=[-0.1],
         )
 
 
@@ -136,22 +132,6 @@ def test_turn_rejects_invalid_loss_mask_length() -> None:
             input_ids=[1, 2, 3],
             position_ids=[0, 1, 2],
             loss_mask=[True],
-            old_logprobs=[-0.1, -0.2],
-        )
-
-
-def test_turn_rejects_invalid_old_logprobs_length() -> None:
-    """Reject logprob arrays that do not cover every predicted token."""
-    with pytest.raises(ValueError, match="old_logprobs"):
-        Turn(
-            trajectory_id="traj-0",
-            turn_index=0,
-            rollout_model_version="default",
-            prompt_length=1,
-            input_ids=[1, 2, 3],
-            position_ids=[0, 1, 2],
-            loss_mask=[False, True],
-            old_logprobs=[-0.1],
         )
 
 
@@ -166,5 +146,4 @@ def test_turn_rejects_empty_rollout_model_version() -> None:
             input_ids=[1, 2],
             position_ids=[0, 1],
             loss_mask=[True],
-            old_logprobs=[-0.1],
         )

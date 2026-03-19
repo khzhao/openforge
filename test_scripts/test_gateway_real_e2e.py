@@ -370,7 +370,6 @@ def main() -> int:
         assert generated["session_id"] == session_id
         assert generated["trajectory_id"] == trajectory_id
         assert isinstance(generated["token_ids"], list) and generated["token_ids"]
-        assert isinstance(generated["logprobs"], list)
         assert isinstance(generated["rollout_model_version"], str)
 
         ended_trajectory = request_json(

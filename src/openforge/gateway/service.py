@@ -141,7 +141,6 @@ class Service:
                     input_ids=list(turn.input_ids),
                     position_ids=list(turn.position_ids),
                     loss_mask=list(turn.loss_mask),
-                    old_logprobs=list(turn.old_logprobs),
                 )
             )
 
@@ -187,7 +186,6 @@ class Service:
             session_id=session_id,
             trajectory_id=trajectory_id,
             token_ids=list(generation.token_ids),
-            logprobs=list(generation.logprobs),
             finish_reason=generation.finish_reason,
             rollout_model_version=generation.rollout_model_version,
         )
@@ -286,5 +284,4 @@ class Service:
             input_ids=[*prompt_token_ids, *generation.token_ids],
             position_ids=list(range(prompt_length + completion_length)),
             loss_mask=[False] * prompt_prediction_count + [True] * completion_length,
-            old_logprobs=[0.0] * prompt_prediction_count + list(generation.logprobs),
         )

@@ -22,7 +22,9 @@ def _server_config() -> GatewayServerConfig:
     )
 
 
-def _runtime_config(model_name: str = "Qwen/Qwen2.5-0.5B-Instruct") -> RuntimeConfig:
+def _runtime_config(
+    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
+) -> RuntimeConfig:
     request = StartSessionRequest.model_validate(
         {
             "runtime": {
@@ -225,3 +227,33 @@ def test_runtime_tokenize_messages_propagates_chat_template_failure() -> None:
         runtime.tokenize_messages([{"role": "user", "content": "hello"}])
 
     assert tokenizer.encode_called is False
+
+
+def test_runtime_generate_disables_rollout_logprobs() -> None:
+    runtime = Runtime(cfg=_server_config())
+    runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
+
+    captured: dict[str, object] = {}
+
+    class FakeRolloutManager:
+        def generate(self, sampling_params, **kwargs):
+            captured["sampling_params"] = sampling_params
+            captured["kwargs"] = kwargs
+            return {
+                "output_ids": [11, 12],
+                "meta_info": {
+                    "finish_reason": "stop",
+                    "weight_version": "default",
+                },
+            }
+
+    class FakeSlot:
+        def __init__(self) -> None:
+            self.rollout_manager = FakeRolloutManager()
+
+    runtime._slot = FakeSlot()
+
+    generation = runtime.generate(prompt_token_ids=[1, 2, 3])
+
+    assert generation.token_ids == [11, 12]
+    assert captured["kwargs"] == {"input_ids": [1, 2, 3], "return_logprob": False}

@@ -42,13 +42,10 @@ class Generation:
     """One generated token sequence returned by the runtime."""
 
     token_ids: list[int]
-    logprobs: list[float | None]
     rollout_model_version: str
     finish_reason: str = "stop"
 
     def __post_init__(self) -> None:
-        if len(self.token_ids) != len(self.logprobs):
-            raise ValueError("token_ids and logprobs must have the same length")
         if not self.rollout_model_version:
             raise ValueError("rollout_model_version must be non-empty")
 
@@ -138,7 +135,7 @@ class Runtime:
         payload = self._slot.rollout_manager.generate(
             self._build_sampling_params(sampling_params),
             input_ids=[int(token_id) for token_id in prompt_token_ids],
-            return_logprob=True,
+            return_logprob=False,
         )
         return self._parse_generation_payload(payload)
 
@@ -233,19 +230,14 @@ class Runtime:
         payload: dict[str, Any],
     ) -> Generation:
         meta_info = payload.get("meta_info", {})
-        token_logprobs = meta_info.get("output_token_logprobs", [])
         token_ids = Runtime._extract_token_ids(
             payload,
-            token_logprobs=token_logprobs,
+            token_logprobs=meta_info.get("output_token_logprobs", []),
         )
-        logprobs = Runtime._extract_logprobs(token_logprobs)
-        if not logprobs:
-            logprobs = [None] * len(token_ids)
         finish_reason = Runtime._extract_finish_reason(meta_info)
         rollout_model_version = Runtime._extract_rollout_model_version(meta_info)
         return Generation(
             token_ids=token_ids,
-            logprobs=logprobs,
             rollout_model_version=rollout_model_version,
             finish_reason=finish_reason,
         )
@@ -272,18 +264,6 @@ class Runtime:
             if isinstance(item, dict) and "token_id" in item:
                 extracted_ids.append(int(item["token_id"]))
         return extracted_ids
-
-    @staticmethod
-    def _extract_logprobs(token_logprobs: Sequence[Any]) -> list[float | None]:
-        extracted: list[float | None] = []
-        for item in token_logprobs:
-            if isinstance(item, (list, tuple)) and item:
-                extracted.append(None if item[0] is None else float(item[0]))
-                continue
-            if isinstance(item, dict):
-                value = item.get("logprob", item.get("token_logprob"))
-                extracted.append(None if value is None else float(value))
-        return extracted
 
     @staticmethod
     def _extract_finish_reason(meta_info: dict[str, Any]) -> str:

@@ -20,7 +20,6 @@ def _turn(trajectory_id: str, turn_index: int) -> Turn:
         input_ids=input_ids,
         position_ids=list(range(len(input_ids))),
         loss_mask=[False, False, True],
-        old_logprobs=[-2.0, -1.0, -0.1],
     )
 
 

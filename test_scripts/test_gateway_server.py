@@ -165,7 +165,6 @@ class _FakeRuntime:
         prompt_tail = int(prompt_token_ids[-1]) if prompt_token_ids else 0
         return Generation(
             token_ids=[10 + prompt_tail, 20 + prompt_tail],
-            logprobs=[-0.1, -0.2],
             rollout_model_version="v4",
         )
 
@@ -222,7 +221,6 @@ def test_gateway_http_flow(monkeypatch) -> None:
                 "session_id": session_id,
                 "trajectory_id": trajectory_id,
                 "token_ids": [12, 22],
-                "logprobs": [-0.1, -0.2],
                 "finish_reason": "stop",
                 "rollout_model_version": "v4",
             }

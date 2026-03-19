@@ -60,7 +60,6 @@ class Turn:
     input_ids: list[int]
     position_ids: list[int]
     loss_mask: list[bool]
-    old_logprobs: list[float | None]
 
     def __post_init__(self) -> None:
         if self.turn_index < 0:
@@ -77,11 +76,6 @@ class Turn:
             raise ValueError(
                 "loss_mask must have one entry per predicted token: "
                 f"{len(self.loss_mask)} != {predicted_token_count}"
-            )
-        if len(self.old_logprobs) != predicted_token_count:
-            raise ValueError(
-                "old_logprobs must have one entry per predicted token: "
-                f"{len(self.old_logprobs)} != {predicted_token_count}"
             )
 
     @property

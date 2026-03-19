@@ -163,7 +163,6 @@ class _FakeRuntime:
         prompt_tail = int(prompt_token_ids[-1]) if prompt_token_ids else 0
         return Generation(
             token_ids=[100 + prompt_tail, 200 + prompt_tail],
-            logprobs=[-0.1, -0.2],
             rollout_model_version="v5",
         )
 
@@ -206,6 +205,7 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
                 "temperature": 0.7,
                 "max_new_tokens": 32,
             }
+            root_turns = await store.list_turns(root.trajectory_id)
 
             child = await service.start_trajectory(
                 session_id=session.session_id,
@@ -506,7 +506,6 @@ def test_gateway_controller_parses_router_payload() -> None:
     )
 
     assert generation.token_ids == [11, 12]
-    assert generation.logprobs == [-0.3, -0.4]
     assert generation.finish_reason == "stop"
     assert generation.rollout_model_version == "policy-7"
 
@@ -527,12 +526,11 @@ def test_gateway_controller_parses_router_payload_without_output_ids() -> None:
     )
 
     assert generation.token_ids == [101, 102]
-    assert generation.logprobs == [-0.25, -0.5]
     assert generation.finish_reason == "length"
     assert generation.rollout_model_version == "default"
 
 
-def test_gateway_controller_uses_null_logprobs_when_missing() -> None:
+def test_gateway_controller_parses_router_payload_without_logprobs() -> None:
     generation = Runtime._parse_generation_payload(
         {
             "output_ids": [11, 12],
@@ -544,7 +542,8 @@ def test_gateway_controller_uses_null_logprobs_when_missing() -> None:
     )
 
     assert generation.token_ids == [11, 12]
-    assert generation.logprobs == [None, None]
+    assert generation.finish_reason == "stop"
+    assert generation.rollout_model_version == "default"
 
 
 def test_parse_generation_payload_requires_weight_version() -> None:
