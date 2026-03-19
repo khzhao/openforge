@@ -229,6 +229,7 @@ def build_payload(
     *,
     prompt: str,
     max_new_tokens: int,
+    ignore_eos: bool = False,
 ) -> dict[str, Any]:
     return {
         "text": prompt,
@@ -237,7 +238,7 @@ def build_payload(
             "top_p": 1.0,
             "top_k": 1,
             "max_new_tokens": max_new_tokens,
-            "ignore_eos": False,
+            "ignore_eos": ignore_eos,
         },
     }
 
@@ -256,6 +257,44 @@ def run_generate(
     text = response["text"]
     assert isinstance(text, str) and text.strip(), f"Bad generate response: {response}"
     return len(text)
+
+
+def assert_completion_length(response: dict[str, Any], *, expected_tokens: int) -> None:
+    output_ids = response.get("output_ids")
+    if not isinstance(output_ids, list):
+        raise RuntimeError(f"Bad generate response: {response!r}")
+    if len(output_ids) != expected_tokens:
+        raise RuntimeError(
+            f"expected {expected_tokens} completion tokens, got {len(output_ids)}: {response!r}"
+        )
+
+    meta_info = response.get("meta_info")
+    if isinstance(meta_info, dict):
+        completion_tokens = meta_info.get("completion_tokens")
+        if completion_tokens is not None and int(completion_tokens) != expected_tokens:
+            raise RuntimeError(
+                "client did not respect sampling_params.max_new_tokens: "
+                f"expected {expected_tokens}, got completion_tokens={completion_tokens}"
+            )
+
+
+def validate_client_sampling_params(
+    clients: list[SGLangClient],
+    *,
+    request_timeout: float,
+) -> None:
+    prompt = "Validate sampling params on the direct SGLang client path."
+    for client in clients:
+        for max_new_tokens in (1, 4):
+            response = client.generate(
+                **build_payload(
+                    prompt=prompt,
+                    max_new_tokens=max_new_tokens,
+                    ignore_eos=True,
+                ),
+                timeout=request_timeout,
+            )
+            assert_completion_length(response, expected_tokens=max_new_tokens)
 
 
 def stress_clients(
@@ -354,6 +393,10 @@ def main() -> int:
         for client in clients:
             assert client.get_model_info(timeout=10.0)
             assert client.get_server_info(timeout=10.0)
+        validate_client_sampling_params(
+            clients,
+            request_timeout=args.request_timeout,
+        )
 
         total_requests, total_chars, elapsed = stress_clients(
             clients,

@@ -85,12 +85,14 @@ class Engine:
     def generate(
         self,
         *,
-        payload: dict[str, Any],
+        sampling_params: dict[str, Any],
         timeout: float | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         return self.client.generate(
-            payload=payload,
+            sampling_params=sampling_params,
             timeout=self.REQUEST_TIMEOUT_SECONDS if timeout is None else timeout,
+            **kwargs,
         )
 
     def pause_generation(self, *, mode: str = "abort") -> dict[str, Any]:

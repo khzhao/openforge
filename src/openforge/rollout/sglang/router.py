@@ -2,6 +2,7 @@
 
 import time
 from multiprocessing.process import BaseProcess
+from typing import Any
 
 import requests
 from loguru import logger
@@ -102,7 +103,11 @@ class Router:
             return False
         return response.status_code == 200
 
-    def generate(self, sampling_params, **kwargs):
+    def generate(
+        self,
+        sampling_params: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         """Send one non-streaming generate request through the router."""
         response = requests.post(
             f"{self.url}/generate",

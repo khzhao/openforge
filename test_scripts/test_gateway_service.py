@@ -27,9 +27,13 @@ class _FakeController:
         self._supported_models = supported_models
         self._current_model: str | None = None
         self.last_sampling_params: dict[str, object] | None = None
+        self.shutdown_count = 0
 
-    def list_models(self) -> list[str]:
-        return list(self._supported_models)
+    def list_models(self) -> list[dict[str, str]]:
+        return [
+            {"id": model_name, "tokenizer": f"{model_name}-tokenizer"}
+            for model_name in self._supported_models
+        ]
 
     def current_model(self) -> str | None:
         return self._current_model
@@ -70,6 +74,10 @@ class _FakeController:
             )
             for choice_index in range(n)
         ]
+
+    def shutdown(self) -> None:
+        self.shutdown_count += 1
+        self._current_model = None
 
 
 def test_gateway_service_create_generate_fork_and_end_session() -> None:
@@ -133,14 +141,14 @@ def test_gateway_service_list_models_and_create_session_tracks_current_model() -
         service = GatewayService(store=store, controller=controller)
 
         assert await service.list_models() == {
-            "models": ["model-a"],
+            "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
             "current_model": None,
         }
 
         created = await service.create_session("model-a")
 
         assert await service.list_models() == {
-            "models": ["model-a"],
+            "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
             "current_model": "model-a",
         }
 
@@ -168,6 +176,41 @@ def test_gateway_service_create_session_rejects_unsupported_and_busy_models() ->
 
         with pytest.raises(ModelBusyError):
             await service.create_session("model-b")
+
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_gateway_service_releases_runtime_after_last_session_and_allows_switch() -> None:
+    async def run() -> None:
+        store = SQLiteOpenForgeStore(":memory:")
+        controller = _FakeController(("model-a", "model-b"))
+        service = GatewayService(store=store, controller=controller)
+
+        created = await service.create_session("model-a")
+        generated = await service.generate(
+            session_id=created.session_id,
+            messages=[{"role": "user", "content": "hello"}],
+            n=1,
+        )
+        ended = await service.end_session(
+            session_id=created.session_id,
+            rewards=[
+                RolloutReward(
+                    rollout_id=generated.choices[0].rollout_id,
+                    reward=1.0,
+                )
+            ],
+        )
+
+        assert ended["status"] == "completed"
+        assert controller.shutdown_count == 1
+        assert controller.current_model() is None
+
+        created_again = await service.create_session("model-b")
+        assert created_again.model == "model-b"
+        assert controller.current_model() == "model-b"
 
         await store.close()
 
@@ -266,6 +309,22 @@ def test_gateway_service_end_session_unknown_session_raises() -> None:
         await store.close()
 
     asyncio.run(run())
+
+
+def test_parse_generation_payload_prefers_weight_version() -> None:
+    generation = ConfiguredGatewayRuntimeController._parse_generation_payload(
+        {
+            "output_ids": [10, 11],
+            "meta_info": {
+                "output_token_logprobs": [[-0.1, 10, None], [-0.2, 11, None]],
+                "finish_reason": "stop",
+                "weight_version": "37",
+            },
+        },
+        fallback_policy_version=5,
+    )
+
+    assert generation.rollout_model_version == 37
 
 
 def test_gateway_service_generate_and_end_session_require_active_rollouts() -> None:

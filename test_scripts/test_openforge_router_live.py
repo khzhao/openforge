@@ -306,6 +306,7 @@ def build_generate_payload_from_input_ids(
     *,
     input_ids: list[int],
     max_new_tokens: int,
+    ignore_eos: bool = False,
 ) -> dict[str, Any]:
     return {
         "input_ids": input_ids,
@@ -314,7 +315,7 @@ def build_generate_payload_from_input_ids(
             "top_p": 1.0,
             "top_k": 1,
             "max_new_tokens": max_new_tokens,
-            "ignore_eos": False,
+            "ignore_eos": ignore_eos,
             "skip_special_tokens": True,
             "no_stop_trim": True,
             "spaces_between_special_tokens": False,
@@ -350,6 +351,48 @@ def run_router_generate(
     if not isinstance(meta_info, dict):
         raise RuntimeError(f"Missing meta_info in router generate response: {payload!r}")
     return request_index, payload
+
+
+def assert_completion_length(payload: dict[str, Any], *, expected_tokens: int) -> None:
+    output_ids = payload.get("output_ids")
+    if not isinstance(output_ids, list):
+        raise RuntimeError(f"Bad router generate response: {payload!r}")
+    if len(output_ids) != expected_tokens:
+        raise RuntimeError(
+            f"expected {expected_tokens} completion tokens, got {len(output_ids)}: {payload!r}"
+        )
+    meta_info = payload.get("meta_info")
+    if isinstance(meta_info, dict):
+        completion_tokens = meta_info.get("completion_tokens")
+        if completion_tokens is not None and int(completion_tokens) != expected_tokens:
+            raise RuntimeError(
+                "router did not respect sampling_params.max_new_tokens: "
+                f"expected {expected_tokens}, got completion_tokens={completion_tokens}"
+            )
+
+
+def validate_router_sampling_params(
+    router_url: str,
+    *,
+    tokenizer: Any,
+    request_timeout: float,
+) -> None:
+    input_ids = tokenizer.encode(
+        "Validate sampling params through the OpenForge router.",
+        add_special_tokens=False,
+    )
+    for max_new_tokens in (1, 6):
+        response = requests.post(
+            f"{router_url}/generate",
+            json=build_generate_payload_from_input_ids(
+                input_ids=input_ids,
+                max_new_tokens=max_new_tokens,
+                ignore_eos=True,
+            ),
+            timeout=request_timeout,
+        )
+        response.raise_for_status()
+        assert_completion_length(response.json(), expected_tokens=max_new_tokens)
 
 
 def stress_router(
@@ -476,6 +519,11 @@ def main() -> int:
         for url in engine_urls:
             router.add_worker(url)
         router.launch()
+        validate_router_sampling_params(
+            router.url,
+            tokenizer=tokenizer,
+            request_timeout=args.request_timeout,
+        )
 
         total_requests, total_chars, elapsed, response_payloads = stress_router(
             router.url,

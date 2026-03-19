@@ -22,9 +22,13 @@ class _FakeController:
         self._supported_models = supported_models
         self._current_model: str | None = None
         self.last_sampling_params: dict[str, object] | None = None
+        self.shutdown_count = 0
 
-    def list_models(self) -> list[str]:
-        return list(self._supported_models)
+    def list_models(self) -> list[dict[str, str]]:
+        return [
+            {"id": model_name, "tokenizer": f"{model_name}-tokenizer"}
+            for model_name in self._supported_models
+        ]
 
     def current_model(self) -> str | None:
         return self._current_model
@@ -61,6 +65,10 @@ class _FakeController:
             for choice_index in range(n)
         ]
 
+    def shutdown(self) -> None:
+        self.shutdown_count += 1
+        self._current_model = None
+
 
 def test_gateway_http_flow() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -75,7 +83,10 @@ def test_gateway_http_flow() -> None:
 
         models = client.get("/models")
         assert models.status_code == 200
-        assert models.json() == {"models": ["model-a"], "current_model": None}
+        assert models.json() == {
+            "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
+            "current_model": None,
+        }
 
         created = client.post("/create_session", json={"model": "model-a"})
         assert created.status_code == 200
@@ -121,6 +132,9 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
 
         assert client.get("/health").json() == {"ok": True}
         assert client.get("/models").json()["current_model"] is None
+        assert client.get("/models").json()["models"] == [
+            {"id": "model-a", "tokenizer": "model-a-tokenizer"}
+        ]
 
         created = client.post("/create_session", json={"model": "model-a"})
         assert created.status_code == 200
@@ -145,6 +159,44 @@ def test_gateway_http_create_session_reports_unsupported_and_busy_models() -> No
 
         busy = client.post("/create_session", json={"model": "model-b"})
         assert busy.status_code == 409
+
+
+def test_gateway_http_releases_model_after_last_session() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+        controller = _FakeController(("model-a", "model-b"))
+        app = create_app(
+            GatewayConfig(host="127.0.0.1", port=0),
+            store=store,
+            controller=controller,
+        )
+        client = TestClient(app)
+
+        session_id = client.post("/create_session", json={"model": "model-a"}).json()["session_id"]
+        generated = client.post(
+            "/generate",
+            json={
+                "session_id": session_id,
+                "messages": [{"role": "user", "content": "hello"}],
+                "n": 1,
+            },
+        )
+        rollout_id = generated.json()["choices"][0]["rollout_id"]
+        ended = client.post(
+            "/end_session",
+            json={
+                "session_id": session_id,
+                "rewards": [{"rollout_id": rollout_id, "reward": 1.0}],
+            },
+        )
+
+        assert ended.status_code == 200
+        assert controller.shutdown_count == 1
+        assert client.get("/models").json()["current_model"] is None
+
+        switched = client.post("/create_session", json={"model": "model-b"})
+        assert switched.status_code == 200
+        assert switched.json()["model"] == "model-b"
 
 
 def test_gateway_http_generate_validates_request_and_unknown_session() -> None:

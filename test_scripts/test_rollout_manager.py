@@ -202,6 +202,61 @@ def verify_engine_info(
         ports.add(addr.port)
 
 
+def assert_completion_length(payload: dict[str, object], *, expected_tokens: int) -> None:
+    output_ids = payload.get("output_ids")
+    if not isinstance(output_ids, list):
+        raise RuntimeError(f"generate payload missing output_ids: {payload!r}")
+    if len(output_ids) != expected_tokens:
+        raise RuntimeError(
+            f"expected {expected_tokens} completion tokens, got {len(output_ids)}: {payload!r}"
+        )
+
+    meta_info = payload.get("meta_info")
+    if isinstance(meta_info, dict):
+        completion_tokens = meta_info.get("completion_tokens")
+        if completion_tokens is not None and int(completion_tokens) != expected_tokens:
+            raise RuntimeError(
+                "sampling_params.max_new_tokens was not respected: "
+                f"expected {expected_tokens}, got completion_tokens={completion_tokens}"
+            )
+
+
+def validate_engine_sampling_params(engine_worker: object) -> None:
+    prompt = "Validate sampling params on the direct engine path."
+    for max_new_tokens in (1, 4):
+        payload = ray.get(
+            engine_worker.generate.remote(
+                text=prompt,
+                sampling_params={
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "top_k": 1,
+                    "max_new_tokens": max_new_tokens,
+                    "ignore_eos": True,
+                },
+                return_logprob=True,
+            )
+        )
+        assert_completion_length(payload, expected_tokens=max_new_tokens)
+
+
+def validate_manager_sampling_params(manager: RolloutManager) -> None:
+    prompt = "Validate sampling params through the rollout manager."
+    for max_new_tokens in (2, 5):
+        payload = manager.generate(
+            {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 1,
+                "max_new_tokens": max_new_tokens,
+                "ignore_eos": True,
+            },
+            text=prompt,
+            return_logprob=True,
+        )
+        assert_completion_length(payload, expected_tokens=max_new_tokens)
+
+
 def main() -> int:
     with patch.dict(
         os.environ,
@@ -245,12 +300,14 @@ def main() -> int:
             gpus_per_replica=args.gpus_per_replica,
             session_dir=session_dir,
         )
+        validate_engine_sampling_params(engine_info["engine_workers"][0])
     finally:
         for worker in engine_info["engine_workers"]:
             ray.kill(worker)
 
     manager = RolloutManager(cfg, placement_groups)
     manager.initialize()
+    validate_manager_sampling_params(manager)
     manager.shutdown()
 
     ray.util.remove_placement_group(actor_pg)

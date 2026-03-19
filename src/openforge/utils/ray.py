@@ -41,26 +41,6 @@ class CanaryWorker:
         return ip_addr, gpu_id
 
 
-@ray.remote(num_cpus=0.1, num_gpus=0)
-class LockWorker:
-    """Worker that can acquire and release a lock."""
-
-    def __init__(self):
-        self._locked = False
-
-    def acquire(self) -> bool:
-        """Try to acquire the lock."""
-        if not self._locked:
-            self._locked = True
-            return True
-        return False
-
-    def release(self) -> None:
-        """Release the lock, allowing others to acquire."""
-        assert self._locked, "Lock is not acquired, cannot release."
-        self._locked = False
-
-
 def get_current_ray_node_ip_address() -> str:
     """Get the IP address of the current Ray node."""
     assert ray.is_initialized(), (

@@ -38,10 +38,19 @@ class SGLangClient:
     def generate(
         self,
         *,
-        payload: dict[str, Any],
+        sampling_params: dict[str, Any],
         timeout: float = 30.0,
+        **kwargs: Any,
     ) -> dict[str, Any]:
-        return self._post_json("/generate", payload=payload, timeout=timeout)
+        return self._post_json(
+            "/generate",
+            payload={
+                **kwargs,
+                "sampling_params": sampling_params,
+                "stream": False,
+            },
+            timeout=timeout,
+        )
 
     def pause_generation(
         self,

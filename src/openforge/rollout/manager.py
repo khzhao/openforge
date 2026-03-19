@@ -15,7 +15,7 @@ from openforge.rollout.types import (
     RouterSpec,
 )
 from openforge.utils.networking import get_free_port, get_host_ip
-from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, LockWorker
+from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 
 __all__ = [
     "RolloutManager",
@@ -36,7 +36,6 @@ class RolloutManager:
         """Initialize the rollout manager."""
         self.cfg = cfg
         self.placement_groups = placement_groups
-        self.lock_worker = LockWorker.options(num_cpus=0.2, num_gpus=0).remote()
 
     def initialize(
         self,
