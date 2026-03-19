@@ -42,7 +42,7 @@ class Generation:
     """One generated token sequence returned by the runtime."""
 
     token_ids: list[int]
-    logprobs: list[float]
+    logprobs: list[float | None]
     rollout_model_version: str
     finish_reason: str = "stop"
 
@@ -119,34 +119,22 @@ class Runtime:
 
     def tokenize_messages(
         self,
-        model_name: str,
         messages: Sequence[dict[str, str]],
     ) -> list[int]:
-        if self._loaded_model != model_name:
-            raise ModelBusyError(f"runtime is not loaded for model {model_name!r}")
         tokenizer = self._get_tokenizer()
-        try:
-            token_ids = tokenizer.apply_chat_template(
-                list(messages),
-                tokenize=True,
-                add_generation_prompt=True,
-            )
-        except Exception as exc:
-            raise ValueError(
-                f"failed to tokenize messages with chat template: {exc}"
-            ) from exc
+        token_ids = tokenizer.apply_chat_template(
+            list(messages),
+            tokenize=True,
+            add_generation_prompt=True,
+        )
         return [int(token_id) for token_id in token_ids]
 
     def generate(
         self,
-        model_name: str,
         *,
         prompt_token_ids: Sequence[int],
         sampling_params: dict[str, Any] | None = None,
     ) -> Generation:
-        if self._loaded_model != model_name:
-            raise ModelBusyError(f"runtime is not loaded for model {model_name!r}")
-        assert self._slot is not None
         payload = self._slot.rollout_manager.generate(
             self._build_sampling_params(sampling_params),
             input_ids=[int(token_id) for token_id in prompt_token_ids],
@@ -235,8 +223,6 @@ class Runtime:
         self,
         overrides: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        if self._runtime_cfg is None:
-            raise RuntimeError("runtime is not loaded")
         payload = self._runtime_cfg.rollout.request.model_dump()
         if overrides:
             payload.update(overrides)
@@ -254,7 +240,7 @@ class Runtime:
         )
         logprobs = Runtime._extract_logprobs(token_logprobs)
         if not logprobs:
-            logprobs = [0.0] * len(token_ids)
+            logprobs = [None] * len(token_ids)
         finish_reason = Runtime._extract_finish_reason(meta_info)
         rollout_model_version = Runtime._extract_rollout_model_version(meta_info)
         return Generation(
@@ -288,15 +274,15 @@ class Runtime:
         return extracted_ids
 
     @staticmethod
-    def _extract_logprobs(token_logprobs: Sequence[Any]) -> list[float]:
-        extracted: list[float] = []
+    def _extract_logprobs(token_logprobs: Sequence[Any]) -> list[float | None]:
+        extracted: list[float | None] = []
         for item in token_logprobs:
             if isinstance(item, (list, tuple)) and item:
-                extracted.append(float(item[0] or 0.0))
+                extracted.append(None if item[0] is None else float(item[0]))
                 continue
             if isinstance(item, dict):
-                value = item.get("logprob", item.get("token_logprob", 0.0))
-                extracted.append(float(value or 0.0))
+                value = item.get("logprob", item.get("token_logprob"))
+                extracted.append(None if value is None else float(value))
         return extracted
 
     @staticmethod
@@ -322,7 +308,6 @@ class Runtime:
 
     def _get_tokenizer(self):
         if self._tokenizer is None:
-            assert self._tokenizer_name is not None
             self._tokenizer = AutoTokenizer.from_pretrained(self._tokenizer_name)
         return self._tokenizer
 

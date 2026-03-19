@@ -128,7 +128,6 @@ def test_runtime_start_rolls_back_state_when_slot_creation_fails(monkeypatch) ->
     assert runtime.current_model() is None
     assert runtime._slot is None
     assert runtime._runtime_cfg is None
-    assert runtime._tokenizer_name is None
 
 
 def test_runtime_start_slot_shuts_down_ray_when_startup_fails(monkeypatch) -> None:
@@ -194,8 +193,6 @@ def test_runtime_shutdown_also_shuts_down_ray(monkeypatch) -> None:
     )
 
     runtime._slot = FakeSlot()
-    runtime._loaded_model = "Qwen/Qwen2.5-0.5B-Instruct"
-    runtime._tokenizer_name = "Qwen/Qwen2.5-0.5B-Instruct"
     runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
 
     runtime.shutdown()
@@ -206,10 +203,9 @@ def test_runtime_shutdown_also_shuts_down_ray(monkeypatch) -> None:
     assert runtime._slot is None
 
 
-def test_runtime_tokenize_messages_raises_when_chat_template_fails() -> None:
+def test_runtime_tokenize_messages_propagates_chat_template_failure() -> None:
     runtime = Runtime(cfg=_server_config())
-    runtime._loaded_model = "Qwen/Qwen2.5-0.5B-Instruct"
-    runtime._tokenizer_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
 
     class FakeTokenizer:
         def __init__(self) -> None:
@@ -225,13 +221,7 @@ def test_runtime_tokenize_messages_raises_when_chat_template_fails() -> None:
     tokenizer = FakeTokenizer()
     runtime._tokenizer = tokenizer
 
-    with pytest.raises(
-        ValueError,
-        match="failed to tokenize messages with chat template: template boom",
-    ):
-        runtime.tokenize_messages(
-            "Qwen/Qwen2.5-0.5B-Instruct",
-            [{"role": "user", "content": "hello"}],
-        )
+    with pytest.raises(RuntimeError, match="template boom"):
+        runtime.tokenize_messages([{"role": "user", "content": "hello"}])
 
     assert tokenizer.encode_called is False

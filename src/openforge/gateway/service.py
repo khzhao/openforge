@@ -159,15 +159,19 @@ class Service:
         messages: list[dict[str, str]],
         sampling_params: dict[str, object] | None = None,
     ) -> GenerateResponse:
-        session = await self._require_active_session(session_id)
+        await self._require_active_session(session_id)
         await self._require_active_trajectory(
             session_id=session_id,
             trajectory_id=trajectory_id,
         )
-        prompt_token_ids = self.runtime.tokenize_messages(session.model_name, messages)
+        try:
+            prompt_token_ids = self.runtime.tokenize_messages(messages)
+        except Exception as exc:
+            raise ValueError(
+                f"failed to tokenize messages with chat template: {exc}"
+            ) from exc
         turn_index = len(await self.store.list_turns(trajectory_id))
         generation = self.runtime.generate(
-            session.model_name,
             prompt_token_ids=prompt_token_ids,
             sampling_params=None if sampling_params is None else dict(sampling_params),
         )

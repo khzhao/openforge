@@ -148,23 +148,17 @@ class _FakeRuntime:
 
     def tokenize_messages(
         self,
-        model_name: str,
         messages: list[dict[str, str]],
     ) -> list[int]:
-        if self._current_model != model_name:
-            raise ModelBusyError(model_name)
         token_count = sum(len(message["content"].split()) for message in messages)
         return list(range(1, token_count + 2))
 
     def generate(
         self,
-        model_name: str,
         *,
         prompt_token_ids: list[int],
         sampling_params: dict[str, object] | None = None,
     ) -> Generation:
-        if self._current_model != model_name:
-            raise ModelBusyError(model_name)
         self.last_sampling_params = sampling_params
         prompt_tail = int(prompt_token_ids[-1]) if prompt_token_ids else 0
         return Generation(
@@ -178,8 +172,17 @@ class _FakeRuntime:
         self._current_model = None
 
 
+class _FailingTokenizeRuntime(_FakeRuntime):
+    def tokenize_messages(
+        self,
+        messages: list[dict[str, str]],
+    ) -> list[int]:
+        raise RuntimeError("template boom")
+
+
 def test_gateway_service_start_generate_fork_and_end() -> None:
     """Exercise the main service lifecycle across session, trajectory, and turn writes."""
+
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
@@ -252,6 +255,7 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
 
 def test_gateway_service_list_models_and_start_session_tracks_active_model() -> None:
     """Verify model listing and active-model tracking through session start."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         runtime = _FakeRuntime()
@@ -279,6 +283,7 @@ def test_gateway_service_list_models_and_start_session_tracks_active_model() -> 
 
 def test_gateway_service_start_session_rejects_second_active_session() -> None:
     """Reject a second start_session call while another session is active."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(
@@ -302,8 +307,11 @@ def test_gateway_service_start_session_rejects_second_active_session() -> None:
     asyncio.run(run())
 
 
-def test_gateway_service_releases_runtime_after_last_session_and_allows_switch() -> None:
+def test_gateway_service_releases_runtime_after_last_session_and_allows_switch() -> (
+    None
+):
     """Release the runtime after the last session and allow a model switch."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         runtime = _FakeRuntime(("model-a", "model-b"))
@@ -338,6 +346,7 @@ def test_gateway_service_releases_runtime_after_last_session_and_allows_switch()
 
 def test_gateway_service_generate_unknown_session_raises() -> None:
     """Raise a not-found error when generation targets an unknown session."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(store=store, runtime=_FakeRuntime())
@@ -354,8 +363,31 @@ def test_gateway_service_generate_unknown_session_raises() -> None:
     asyncio.run(run())
 
 
+def test_gateway_service_generate_wraps_tokenization_failure() -> None:
+    async def run() -> None:
+        store = SQLiteOpenForgeStore(":memory:")
+        service = Service(store=store, runtime=_FailingTokenizeRuntime())
+        session = await service.start_session(**_start_session_kwargs("model-a"))
+        trajectory = await service.start_trajectory(session_id=session.session_id)
+
+        with pytest.raises(
+            ValueError,
+            match="failed to tokenize messages with chat template: template boom",
+        ):
+            await service.generate(
+                session_id=session.session_id,
+                trajectory_id=trajectory.trajectory_id,
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        await store.close()
+
+    asyncio.run(run())
+
+
 def test_gateway_service_trajectory_lifecycle_errors() -> None:
     """Raise the expected errors across invalid trajectory lifecycle operations."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(store=store, runtime=_FakeRuntime())
@@ -400,6 +432,7 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
 
 def test_gateway_service_end_session_requires_all_trajectories_completed() -> None:
     """Require all trajectories to complete before ending the session."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(store=store, runtime=_FakeRuntime())
@@ -497,6 +530,21 @@ def test_gateway_controller_parses_router_payload_without_output_ids() -> None:
     assert generation.logprobs == [-0.25, -0.5]
     assert generation.finish_reason == "length"
     assert generation.rollout_model_version == "default"
+
+
+def test_gateway_controller_uses_null_logprobs_when_missing() -> None:
+    generation = Runtime._parse_generation_payload(
+        {
+            "output_ids": [11, 12],
+            "meta_info": {
+                "finish_reason": "stop",
+                "weight_version": "default",
+            },
+        }
+    )
+
+    assert generation.token_ids == [11, 12]
+    assert generation.logprobs == [None, None]
 
 
 def test_parse_generation_payload_requires_weight_version() -> None:

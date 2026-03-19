@@ -102,7 +102,7 @@ class GenerateResponse(BaseModel):
     session_id: str
     trajectory_id: str
     token_ids: list[int]
-    logprobs: list[float]
+    logprobs: list[float | None]
     finish_reason: str
     rollout_model_version: str
 

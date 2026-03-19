@@ -150,23 +150,17 @@ class _FakeRuntime:
 
     def tokenize_messages(
         self,
-        model_name: str,
         messages: list[dict[str, str]],
     ) -> list[int]:
-        if self._current_model != model_name:
-            raise ModelBusyError(model_name)
         token_count = sum(len(message["content"].split()) for message in messages)
         return list(range(1, token_count + 2))
 
     def generate(
         self,
-        model_name: str,
         *,
         prompt_token_ids: list[int],
         sampling_params: dict[str, object] | None = None,
     ) -> Generation:
-        if self._current_model != model_name:
-            raise ModelBusyError(model_name)
         self.last_sampling_params = sampling_params
         prompt_tail = int(prompt_token_ids[-1]) if prompt_token_ids else 0
         return Generation(
@@ -183,14 +177,9 @@ class _FakeRuntime:
 class _FailingTokenizeRuntime(_FakeRuntime):
     def tokenize_messages(
         self,
-        model_name: str,
         messages: list[dict[str, str]],
     ) -> list[int]:
-        if self._current_model != model_name:
-            raise ModelBusyError(model_name)
-        raise ValueError(
-            "failed to tokenize messages with chat template: template boom"
-        )
+        raise RuntimeError("template boom")
 
 
 def test_gateway_http_flow(monkeypatch) -> None:

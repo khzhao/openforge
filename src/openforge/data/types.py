@@ -60,7 +60,7 @@ class Turn:
     input_ids: list[int]
     position_ids: list[int]
     loss_mask: list[bool]
-    old_logprobs: list[float]
+    old_logprobs: list[float | None]
 
     def __post_init__(self) -> None:
         if self.turn_index < 0:
