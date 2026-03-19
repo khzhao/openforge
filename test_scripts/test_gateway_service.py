@@ -10,16 +10,18 @@ import pytest
 
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.server import (
+    ActiveSessionError,
+    ActiveTrajectoriesRemainError,
     ConfiguredGatewayRuntimeController,
     GatewayGeneration,
     GatewayService,
-    InvalidRolloutRewardError,
     ModelBusyError,
-    NoActiveTrajectoriesError,
+    SessionClosedError,
     SessionNotFoundError,
+    TrajectoryNotActiveError,
+    TrajectoryNotFoundError,
     UnsupportedModelError,
 )
-from openforge.gateway.types import RolloutReward
 
 
 class _FakeController:
@@ -61,80 +63,95 @@ class _FakeController:
         model_name: str,
         *,
         prompt_token_ids: list[int],
-        n: int,
         sampling_params: dict[str, object] | None = None,
-    ) -> list[GatewayGeneration]:
+    ) -> GatewayGeneration:
         self.ensure_model(model_name)
         self.last_sampling_params = sampling_params
-        return [
-            GatewayGeneration(
-                token_ids=[100 + choice_index, 200 + choice_index],
-                logprobs=[-0.1, -0.2],
-                rollout_model_version=5,
-            )
-            for choice_index in range(n)
-        ]
+        prompt_tail = int(prompt_token_ids[-1]) if prompt_token_ids else 0
+        return GatewayGeneration(
+            token_ids=[100 + prompt_tail, 200 + prompt_tail],
+            logprobs=[-0.1, -0.2],
+            rollout_model_version=5,
+        )
 
     def shutdown(self) -> None:
         self.shutdown_count += 1
         self._current_model = None
 
 
-def test_gateway_service_create_generate_fork_and_end_session() -> None:
+def test_gateway_service_start_generate_fork_and_end() -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
             controller = _FakeController()
             service = GatewayService(store=store, controller=controller)
 
-            created = await service.create_session("model-a")
+            session = await service.start_session("model-a")
+            root = await service.start_trajectory(session_id=session.session_id)
+
             generated = await service.generate(
-                session_id=created.session_id,
+                session_id=session.session_id,
+                trajectory_id=root.trajectory_id,
                 messages=[{"role": "user", "content": "hello world"}],
-                n=1,
                 sampling_params={"temperature": 0.7, "max_new_tokens": 32},
             )
-            assert len(generated.choices) == 1
-            root_rollout_id = generated.choices[0].rollout_id
+            assert generated.session_id == session.session_id
+            assert generated.trajectory_id == root.trajectory_id
+            assert generated.token_ids == [103, 203]
             assert controller.last_sampling_params == {
                 "temperature": 0.7,
                 "max_new_tokens": 32,
             }
 
-            forked = await service.generate(
-                session_id=created.session_id,
-                messages=[{"role": "user", "content": "fork now"}],
-                n=2,
+            child = await service.start_trajectory(
+                session_id=session.session_id,
+                parent_trajectory_id=root.trajectory_id,
             )
-            assert len(forked.choices) == 2
-            child_rollout_ids = [choice.rollout_id for choice in forked.choices]
-            assert root_rollout_id not in child_rollout_ids
+            child_turns = await store.list_turns(child.trajectory_id)
+            assert len(child_turns) == 1
+            assert child_turns[0].turn_index == 0
+            assert child_turns[0].input_ids == [1, 2, 3, 103, 203]
 
-            trajectories = await store.list_trajectories(created.session_id)
-            turns_per_child = {
-                trajectory.trajectory_id: len(await store.list_turns(trajectory.trajectory_id))
-                for trajectory in trajectories
-                if trajectory.status == "active"
+            child_generated = await service.generate(
+                session_id=session.session_id,
+                trajectory_id=child.trajectory_id,
+                messages=[{"role": "user", "content": "continue child"}],
+            )
+            assert child_generated.trajectory_id == child.trajectory_id
+
+            await service.end_trajectory(
+                session_id=session.session_id,
+                trajectory_id=root.trajectory_id,
+                final_reward=1.0,
+            )
+            await service.end_trajectory(
+                session_id=session.session_id,
+                trajectory_id=child.trajectory_id,
+                final_reward=0.5,
+            )
+
+            ended = await service.end_session(session_id=session.session_id)
+            assert ended == {
+                "session_id": session.session_id,
+                "status": "completed",
             }
-            assert sorted(turns_per_child.values()) == [2, 2]
-
-            ended = await service.end_session(
-                session_id=created.session_id,
-                rewards=[
-                    RolloutReward(rollout_id=child_rollout_ids[0], reward=1.0),
-                    RolloutReward(rollout_id=child_rollout_ids[1], reward=0.5),
-                ],
-            )
-            assert ended["status"] == "completed"
 
             completed = await store.list_completed_trajectories(model_name="model-a")
-            assert sorted(trajectory.final_reward for trajectory in completed) == [0.5, 1.0]
+            assert sorted(
+                (trajectory.trajectory_id, trajectory.final_reward)
+                for trajectory in completed
+            ) == sorted(
+                [
+                    (root.trajectory_id, 1.0),
+                    (child.trajectory_id, 0.5),
+                ]
+            )
             await store.close()
 
     asyncio.run(run())
 
 
-def test_gateway_service_list_models_and_create_session_tracks_current_model() -> None:
+def test_gateway_service_list_models_and_start_session_tracks_active_model() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         controller = _FakeController()
@@ -142,26 +159,23 @@ def test_gateway_service_list_models_and_create_session_tracks_current_model() -
 
         assert await service.list_models() == {
             "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
-            "current_model": None,
+            "active_model": None,
         }
 
-        created = await service.create_session("model-a")
+        created = await service.start_session("model-a")
 
         assert await service.list_models() == {
             "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
-            "current_model": "model-a",
+            "active_model": "model-a",
         }
-
-        trajectories = await store.list_trajectories(created.session_id, status="active")
-        assert len(trajectories) == 1
-        assert trajectories[0].parent_trajectory_id is None
+        assert created.model == "model-a"
 
         await store.close()
 
     asyncio.run(run())
 
 
-def test_gateway_service_create_session_rejects_unsupported_and_busy_models() -> None:
+def test_gateway_service_start_session_rejects_unsupported_busy_and_second_session() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = GatewayService(
@@ -170,12 +184,15 @@ def test_gateway_service_create_session_rejects_unsupported_and_busy_models() ->
         )
 
         with pytest.raises(UnsupportedModelError):
-            await service.create_session("model-c")
+            await service.start_session("model-c")
 
-        await service.create_session("model-a")
+        await service.start_session("model-a")
 
-        with pytest.raises(ModelBusyError):
-            await service.create_session("model-b")
+        with pytest.raises(ActiveSessionError):
+            await service.start_session("model-a")
+
+        with pytest.raises(ActiveSessionError):
+            await service.start_session("model-b")
 
         await store.close()
 
@@ -188,27 +205,25 @@ def test_gateway_service_releases_runtime_after_last_session_and_allows_switch()
         controller = _FakeController(("model-a", "model-b"))
         service = GatewayService(store=store, controller=controller)
 
-        created = await service.create_session("model-a")
-        generated = await service.generate(
-            session_id=created.session_id,
+        session = await service.start_session("model-a")
+        trajectory = await service.start_trajectory(session_id=session.session_id)
+        await service.generate(
+            session_id=session.session_id,
+            trajectory_id=trajectory.trajectory_id,
             messages=[{"role": "user", "content": "hello"}],
-            n=1,
         )
-        ended = await service.end_session(
-            session_id=created.session_id,
-            rewards=[
-                RolloutReward(
-                    rollout_id=generated.choices[0].rollout_id,
-                    reward=1.0,
-                )
-            ],
+        await service.end_trajectory(
+            session_id=session.session_id,
+            trajectory_id=trajectory.trajectory_id,
+            final_reward=1.0,
         )
+        ended = await service.end_session(session_id=session.session_id)
 
         assert ended["status"] == "completed"
         assert controller.shutdown_count == 1
         assert controller.current_model() is None
 
-        created_again = await service.create_session("model-b")
+        created_again = await service.start_session("model-b")
         assert created_again.model == "model-b"
         assert controller.current_model() == "model-b"
 
@@ -225,8 +240,8 @@ def test_gateway_service_generate_unknown_session_raises() -> None:
         with pytest.raises(SessionNotFoundError, match="unknown session_id"):
             await service.generate(
                 session_id="missing",
+                trajectory_id="traj_missing",
                 messages=[{"role": "user", "content": "hello"}],
-                n=1,
             )
 
         await store.close()
@@ -234,77 +249,84 @@ def test_gateway_service_generate_unknown_session_raises() -> None:
     asyncio.run(run())
 
 
-def test_gateway_service_continue_after_fork_advances_all_active_rollouts() -> None:
+def test_gateway_service_trajectory_lifecycle_errors() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = GatewayService(store=store, controller=_FakeController())
+        session = await service.start_session("model-a")
+        root = await service.start_trajectory(session_id=session.session_id)
 
-        created = await service.create_session("model-a")
-        forked = await service.generate(
-            session_id=created.session_id,
-            messages=[{"role": "user", "content": "fork"}],
-            n=2,
+        with pytest.raises(TrajectoryNotFoundError, match="unknown trajectory_id"):
+            await service.generate(
+                session_id=session.session_id,
+                trajectory_id="traj_missing",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        await service.generate(
+            session_id=session.session_id,
+            trajectory_id=root.trajectory_id,
+            messages=[{"role": "user", "content": "hello"}],
         )
-        active_rollout_ids = [choice.rollout_id for choice in forked.choices]
-
-        continued = await service.generate(
-            session_id=created.session_id,
-            messages=[{"role": "user", "content": "continue"}],
-            n=1,
+        await service.end_trajectory(
+            session_id=session.session_id,
+            trajectory_id=root.trajectory_id,
+            final_reward=1.0,
         )
 
-        assert len(continued.choices) == 2
-        assert {choice.rollout_id for choice in continued.choices} == set(active_rollout_ids)
+        with pytest.raises(TrajectoryNotActiveError, match="is not active"):
+            await service.generate(
+                session_id=session.session_id,
+                trajectory_id=root.trajectory_id,
+                messages=[{"role": "user", "content": "again"}],
+            )
 
-        for rollout_id in active_rollout_ids:
-            turns = await store.list_turns(rollout_id)
-            assert [turn.turn_index for turn in turns] == [0, 1]
+        with pytest.raises(TrajectoryNotActiveError, match="is not active"):
+            await service.start_trajectory(
+                session_id=session.session_id,
+                parent_trajectory_id=root.trajectory_id,
+            )
 
         await store.close()
 
     asyncio.run(run())
 
 
-def test_gateway_service_requires_exact_active_rollout_rewards() -> None:
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
-            service = GatewayService(store=store, controller=_FakeController())
-            created = await service.create_session("model-a")
-            generated = await service.generate(
-                session_id=created.session_id,
-                messages=[{"role": "user", "content": "hello"}],
-                n=2,
-            )
-
-            with pytest.raises(
-                InvalidRolloutRewardError,
-                match="exactly the active rollout ids",
-            ):
-                await service.end_session(
-                    session_id=created.session_id,
-                    rewards=[
-                        RolloutReward(
-                            rollout_id=generated.choices[0].rollout_id,
-                            reward=1.0,
-                        )
-                    ],
-                )
-            await store.close()
-
-    asyncio.run(run())
-
-
-def test_gateway_service_end_session_unknown_session_raises() -> None:
+def test_gateway_service_end_session_requires_all_trajectories_completed() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = GatewayService(store=store, controller=_FakeController())
+        session = await service.start_session("model-a")
+        root = await service.start_trajectory(session_id=session.session_id)
+        child = await service.start_trajectory(session_id=session.session_id)
 
-        with pytest.raises(SessionNotFoundError, match="unknown session_id"):
-            await service.end_session(
-                session_id="missing",
-                rewards=[],
-            )
+        await service.generate(
+            session_id=session.session_id,
+            trajectory_id=root.trajectory_id,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        await service.end_trajectory(
+            session_id=session.session_id,
+            trajectory_id=root.trajectory_id,
+            final_reward=1.0,
+        )
+
+        with pytest.raises(
+            ActiveTrajectoriesRemainError,
+            match="all trajectories must be ended",
+        ):
+            await service.end_session(session_id=session.session_id)
+
+        await service.end_trajectory(
+            session_id=session.session_id,
+            trajectory_id=child.trajectory_id,
+            final_reward=0.0,
+        )
+        ended = await service.end_session(session_id=session.session_id)
+        assert ended["status"] == "completed"
+
+        with pytest.raises(SessionClosedError, match="is not active"):
+            await service.start_trajectory(session_id=session.session_id)
 
         await store.close()
 
@@ -325,50 +347,6 @@ def test_parse_generation_payload_prefers_weight_version() -> None:
     )
 
     assert generation.rollout_model_version == 37
-
-
-def test_gateway_service_generate_and_end_session_require_active_rollouts() -> None:
-    async def run() -> None:
-        store = SQLiteOpenForgeStore(":memory:")
-        service = GatewayService(store=store, controller=_FakeController())
-        created = await service.create_session("model-a")
-
-        generated = await service.generate(
-            session_id=created.session_id,
-            messages=[{"role": "user", "content": "hello"}],
-            n=1,
-        )
-        await service.end_session(
-            session_id=created.session_id,
-            rewards=[
-                RolloutReward(
-                    rollout_id=generated.choices[0].rollout_id,
-                    reward=1.0,
-                )
-            ],
-        )
-
-        with pytest.raises(NoActiveTrajectoriesError, match="no active trajectories"):
-            await service.generate(
-                session_id=created.session_id,
-                messages=[{"role": "user", "content": "again"}],
-                n=1,
-            )
-
-        with pytest.raises(NoActiveTrajectoriesError, match="no active trajectories"):
-            await service.end_session(
-                session_id=created.session_id,
-                rewards=[
-                    RolloutReward(
-                        rollout_id=generated.choices[0].rollout_id,
-                        reward=1.0,
-                    )
-                ],
-            )
-
-        await store.close()
-
-    asyncio.run(run())
 
 
 def test_gateway_controller_parses_router_payload() -> None:

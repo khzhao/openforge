@@ -44,26 +44,24 @@ class _FakeController:
 
     def tokenize_messages(self, model_name: str, messages: list[dict[str, str]]) -> list[int]:
         self.ensure_model(model_name)
-        return [1, 2, 3]
+        token_count = sum(len(message["content"].split()) for message in messages)
+        return list(range(1, token_count + 2))
 
     def generate(
         self,
         model_name: str,
         *,
         prompt_token_ids: list[int],
-        n: int,
         sampling_params: dict[str, object] | None = None,
-    ) -> list[GatewayGeneration]:
+    ) -> GatewayGeneration:
         self.ensure_model(model_name)
         self.last_sampling_params = sampling_params
-        return [
-            GatewayGeneration(
-                token_ids=[10 + choice_index, 20 + choice_index],
-                logprobs=[-0.1, -0.2],
-                rollout_model_version=4,
-            )
-            for choice_index in range(n)
-        ]
+        prompt_tail = int(prompt_token_ids[-1]) if prompt_token_ids else 0
+        return GatewayGeneration(
+            token_ids=[10 + prompt_tail, 20 + prompt_tail],
+            logprobs=[-0.1, -0.2],
+            rollout_model_version=4,
+        )
 
     def shutdown(self) -> None:
         self.shutdown_count += 1
@@ -79,45 +77,56 @@ def test_gateway_http_flow() -> None:
             store=store,
             controller=controller,
         )
-        client = TestClient(app)
+        with TestClient(app) as client:
+            models = client.get("/models")
+            assert models.status_code == 200
+            assert models.json() == {
+                "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
+                "active_model": None,
+            }
 
-        models = client.get("/models")
-        assert models.status_code == 200
-        assert models.json() == {
-            "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
-            "current_model": None,
-        }
+            started = client.post("/start_session", json={"model": "model-a"})
+            assert started.status_code == 200
+            session_id = started.json()["session_id"]
 
-        created = client.post("/create_session", json={"model": "model-a"})
-        assert created.status_code == 200
-        session_id = created.json()["session_id"]
+            trajectory = client.post("/start_trajectory", json={"session_id": session_id})
+            assert trajectory.status_code == 200
+            trajectory_id = trajectory.json()["trajectory_id"]
 
-        generated = client.post(
-            "/generate",
-            json={
+            generated = client.post(
+                "/generate",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "sampling_params": {"temperature": 0.5, "top_p": 0.9},
+                },
+            )
+            assert generated.status_code == 200
+            assert generated.json() == {
                 "session_id": session_id,
-                "messages": [{"role": "user", "content": "hello"}],
-                "n": 2,
-                "sampling_params": {"temperature": 0.5, "top_p": 0.9},
-            },
-        )
-        assert generated.status_code == 200
-        choices = generated.json()["choices"]
-        assert len(choices) == 2
-        assert controller.last_sampling_params == {"temperature": 0.5, "top_p": 0.9}
+                "trajectory_id": trajectory_id,
+                "token_ids": [12, 22],
+                "logprobs": [-0.1, -0.2],
+                "finish_reason": "stop",
+                "rollout_model_version": 4,
+            }
+            assert controller.last_sampling_params == {"temperature": 0.5, "top_p": 0.9}
 
-        ended = client.post(
-            "/end_session",
-            json={
-                "session_id": session_id,
-                "rewards": [
-                    {"rollout_id": choices[0]["rollout_id"], "reward": 1.0},
-                    {"rollout_id": choices[1]["rollout_id"], "reward": 0.0},
-                ],
-            },
-        )
-        assert ended.status_code == 200
-        assert ended.json()["status"] == "completed"
+            ended_trajectory = client.post(
+                "/end_trajectory",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
+                    "final_reward": 1.0,
+                },
+            )
+            assert ended_trajectory.status_code == 200
+            assert ended_trajectory.json()["status"] == "completed"
+
+            ended_session = client.post("/end_session", json={"session_id": session_id})
+            assert ended_session.status_code == 200
+            assert ended_session.json()["status"] == "completed"
 
 
 def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
@@ -128,20 +137,19 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
             store=store,
             controller=_FakeController(),
         )
-        client = TestClient(app)
+        with TestClient(app) as client:
+            assert client.get("/health").json() == {"ok": True}
+            assert client.get("/models").json()["active_model"] is None
+            assert client.get("/models").json()["models"] == [
+                {"id": "model-a", "tokenizer": "model-a-tokenizer"}
+            ]
 
-        assert client.get("/health").json() == {"ok": True}
-        assert client.get("/models").json()["current_model"] is None
-        assert client.get("/models").json()["models"] == [
-            {"id": "model-a", "tokenizer": "model-a-tokenizer"}
-        ]
-
-        created = client.post("/create_session", json={"model": "model-a"})
-        assert created.status_code == 200
-        assert client.get("/models").json()["current_model"] == "model-a"
+            started = client.post("/start_session", json={"model": "model-a"})
+            assert started.status_code == 200
+            assert client.get("/models").json()["active_model"] == "model-a"
 
 
-def test_gateway_http_create_session_reports_unsupported_and_busy_models() -> None:
+def test_gateway_http_start_session_reports_unsupported_and_busy_models() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
@@ -149,16 +157,15 @@ def test_gateway_http_create_session_reports_unsupported_and_busy_models() -> No
             store=store,
             controller=_FakeController(("model-a", "model-b")),
         )
-        client = TestClient(app)
+        with TestClient(app) as client:
+            unsupported = client.post("/start_session", json={"model": "model-c"})
+            assert unsupported.status_code == 404
 
-        unsupported = client.post("/create_session", json={"model": "model-c"})
-        assert unsupported.status_code == 404
+            created = client.post("/start_session", json={"model": "model-a"})
+            assert created.status_code == 200
 
-        created = client.post("/create_session", json={"model": "model-a"})
-        assert created.status_code == 200
-
-        busy = client.post("/create_session", json={"model": "model-b"})
-        assert busy.status_code == 409
+            busy = client.post("/start_session", json={"model": "model-b"})
+            assert busy.status_code == 409
 
 
 def test_gateway_http_releases_model_after_last_session() -> None:
@@ -170,36 +177,42 @@ def test_gateway_http_releases_model_after_last_session() -> None:
             store=store,
             controller=controller,
         )
-        client = TestClient(app)
+        with TestClient(app) as client:
+            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            trajectory_id = client.post(
+                "/start_trajectory",
+                json={"session_id": session_id},
+            ).json()["trajectory_id"]
+            generated = client.post(
+                "/generate",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+            assert generated.status_code == 200
+            ended_trajectory = client.post(
+                "/end_trajectory",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
+                    "final_reward": 1.0,
+                },
+            )
+            assert ended_trajectory.status_code == 200
+            ended_session = client.post("/end_session", json={"session_id": session_id})
 
-        session_id = client.post("/create_session", json={"model": "model-a"}).json()["session_id"]
-        generated = client.post(
-            "/generate",
-            json={
-                "session_id": session_id,
-                "messages": [{"role": "user", "content": "hello"}],
-                "n": 1,
-            },
-        )
-        rollout_id = generated.json()["choices"][0]["rollout_id"]
-        ended = client.post(
-            "/end_session",
-            json={
-                "session_id": session_id,
-                "rewards": [{"rollout_id": rollout_id, "reward": 1.0}],
-            },
-        )
+            assert ended_session.status_code == 200
+            assert controller.shutdown_count == 1
+            assert client.get("/models").json()["active_model"] is None
 
-        assert ended.status_code == 200
-        assert controller.shutdown_count == 1
-        assert client.get("/models").json()["current_model"] is None
-
-        switched = client.post("/create_session", json={"model": "model-b"})
-        assert switched.status_code == 200
-        assert switched.json()["model"] == "model-b"
+            switched = client.post("/start_session", json={"model": "model-b"})
+            assert switched.status_code == 200
+            assert switched.json()["model"] == "model-b"
 
 
-def test_gateway_http_generate_validates_request_and_unknown_session() -> None:
+def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
@@ -207,30 +220,39 @@ def test_gateway_http_generate_validates_request_and_unknown_session() -> None:
             store=store,
             controller=_FakeController(),
         )
-        client = TestClient(app)
+        with TestClient(app) as client:
+            invalid = client.post(
+                "/generate",
+                json={
+                    "session_id": "missing",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+            assert invalid.status_code == 422
 
-        invalid = client.post(
-            "/generate",
-            json={
-                "session_id": "missing",
-                "messages": [{"role": "user", "content": "hello"}],
-                "n": 0,
-            },
-        )
-        assert invalid.status_code == 422
+            missing_session = client.post(
+                "/generate",
+                json={
+                    "session_id": "missing",
+                    "trajectory_id": "traj_missing",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+            assert missing_session.status_code == 404
 
-        missing = client.post(
-            "/generate",
-            json={
-                "session_id": "missing",
-                "messages": [{"role": "user", "content": "hello"}],
-                "n": 1,
-            },
-        )
-        assert missing.status_code == 404
+            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            missing_trajectory = client.post(
+                "/generate",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": "traj_missing",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+            assert missing_trajectory.status_code == 404
 
 
-def test_gateway_http_generate_after_end_session_returns_conflict() -> None:
+def test_gateway_http_generate_after_end_trajectory_returns_conflict() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
@@ -238,39 +260,43 @@ def test_gateway_http_generate_after_end_session_returns_conflict() -> None:
             store=store,
             controller=_FakeController(),
         )
-        client = TestClient(app)
+        with TestClient(app) as client:
+            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            trajectory_id = client.post(
+                "/start_trajectory",
+                json={"session_id": session_id},
+            ).json()["trajectory_id"]
+            generated = client.post(
+                "/generate",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+            assert generated.status_code == 200
+            ended_trajectory = client.post(
+                "/end_trajectory",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
+                    "final_reward": 1.0,
+                },
+            )
+            assert ended_trajectory.status_code == 200
 
-        session_id = client.post("/create_session", json={"model": "model-a"}).json()["session_id"]
-        generated = client.post(
-            "/generate",
-            json={
-                "session_id": session_id,
-                "messages": [{"role": "user", "content": "hello"}],
-                "n": 1,
-            },
-        )
-        rollout_id = generated.json()["choices"][0]["rollout_id"]
-        ended = client.post(
-            "/end_session",
-            json={
-                "session_id": session_id,
-                "rewards": [{"rollout_id": rollout_id, "reward": 1.0}],
-            },
-        )
-        assert ended.status_code == 200
-
-        again = client.post(
-            "/generate",
-            json={
-                "session_id": session_id,
-                "messages": [{"role": "user", "content": "hello again"}],
-                "n": 1,
-            },
-        )
-        assert again.status_code == 409
+            again = client.post(
+                "/generate",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
+                    "messages": [{"role": "user", "content": "hello again"}],
+                },
+            )
+            assert again.status_code == 409
 
 
-def test_gateway_http_end_session_reports_missing_or_incomplete_rewards() -> None:
+def test_gateway_http_end_session_requires_completed_trajectories() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = create_app(
@@ -278,33 +304,64 @@ def test_gateway_http_end_session_reports_missing_or_incomplete_rewards() -> Non
             store=store,
             controller=_FakeController(),
         )
-        client = TestClient(app)
+        with TestClient(app) as client:
+            missing = client.post("/end_session", json={"session_id": "missing"})
+            assert missing.status_code == 404
 
-        missing = client.post(
-            "/end_session",
-            json={"session_id": "missing", "rewards": []},
-        )
-        assert missing.status_code == 404
+            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            trajectory_id = client.post(
+                "/start_trajectory",
+                json={"session_id": session_id},
+            ).json()["trajectory_id"]
+            incomplete = client.post("/end_session", json={"session_id": session_id})
+            assert incomplete.status_code == 409
 
-        session_id = client.post("/create_session", json={"model": "model-a"}).json()["session_id"]
-        generated = client.post(
-            "/generate",
-            json={
-                "session_id": session_id,
-                "messages": [{"role": "user", "content": "hello"}],
-                "n": 2,
-            },
-        )
-        choices = generated.json()["choices"]
+            completed = client.post(
+                "/end_trajectory",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
+                    "final_reward": 1.0,
+                },
+            )
+            assert completed.status_code == 200
+            ended = client.post("/end_session", json={"session_id": session_id})
+            assert ended.status_code == 200
 
-        incomplete = client.post(
-            "/end_session",
-            json={
-                "session_id": session_id,
-                "rewards": [{"rollout_id": choices[0]["rollout_id"], "reward": 1.0}],
-            },
+
+def test_gateway_http_start_trajectory_can_fork_from_parent() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+        app = create_app(
+            GatewayConfig(host="127.0.0.1", port=0),
+            store=store,
+            controller=_FakeController(),
         )
-        assert incomplete.status_code == 400
+        with TestClient(app) as client:
+            session_id = client.post("/start_session", json={"model": "model-a"}).json()["session_id"]
+            root = client.post("/start_trajectory", json={"session_id": session_id})
+            assert root.status_code == 200
+            root_id = root.json()["trajectory_id"]
+
+            generated = client.post(
+                "/generate",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": root_id,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+            assert generated.status_code == 200
+
+            child = client.post(
+                "/start_trajectory",
+                json={
+                    "session_id": session_id,
+                    "parent_trajectory_id": root_id,
+                },
+            )
+            assert child.status_code == 200
+            assert child.json()["parent_trajectory_id"] == root_id
 
 
 def test_create_app_requires_dependencies_with_gateway_config() -> None:
