@@ -479,7 +479,6 @@ def test_parse_generation_payload_prefers_weight_version() -> None:
         {
             "output_ids": [10, 11],
             "meta_info": {
-                "output_token_logprobs": [[-0.1, 10, None], [-0.2, 11, None]],
                 "finish_reason": "stop",
                 "weight_version": "default",
             },
@@ -495,10 +494,6 @@ def test_gateway_controller_parses_router_payload() -> None:
         {
             "output_ids": [11, 12],
             "meta_info": {
-                "output_token_logprobs": [
-                    [-0.3, 11, "foo"],
-                    [-0.4, 12, "bar"],
-                ],
                 "finish_reason": {"type": "stop"},
                 "weight_version": "policy-7",
             },
@@ -510,15 +505,11 @@ def test_gateway_controller_parses_router_payload() -> None:
     assert generation.rollout_model_version == "policy-7"
 
 
-def test_gateway_controller_parses_router_payload_without_output_ids() -> None:
-    """Reconstruct token ids from logprob entries when output ids are missing."""
+def test_gateway_controller_parses_router_payload_with_meta_token_ids() -> None:
     generation = Runtime._parse_generation_payload(
         {
             "meta_info": {
-                "output_token_logprobs": [
-                    [-0.25, 101],
-                    [-0.5, 102],
-                ],
+                "token_ids": [101, 102],
                 "finish_reason": "length",
                 "weight_version": "default",
             },
@@ -530,7 +521,19 @@ def test_gateway_controller_parses_router_payload_without_output_ids() -> None:
     assert generation.rollout_model_version == "default"
 
 
-def test_gateway_controller_parses_router_payload_without_logprobs() -> None:
+def test_gateway_controller_requires_output_token_ids() -> None:
+    with pytest.raises(ValueError, match="output_ids or token_ids"):
+        Runtime._parse_generation_payload(
+            {
+                "meta_info": {
+                    "finish_reason": "stop",
+                    "weight_version": "default",
+                },
+            }
+        )
+
+
+def test_gateway_controller_parses_router_payload_without_extra_fields() -> None:
     generation = Runtime._parse_generation_payload(
         {
             "output_ids": [11, 12],
@@ -553,7 +556,6 @@ def test_parse_generation_payload_requires_weight_version() -> None:
             {
                 "output_ids": [10],
                 "meta_info": {
-                    "output_token_logprobs": [[-0.1, 10, None]],
                     "finish_reason": "stop",
                 },
             }

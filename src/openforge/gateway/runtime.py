@@ -135,7 +135,6 @@ class Runtime:
         payload = self._slot.rollout_manager.generate(
             self._build_sampling_params(sampling_params),
             input_ids=[int(token_id) for token_id in prompt_token_ids],
-            return_logprob=False,
         )
         return self._parse_generation_payload(payload)
 
@@ -230,10 +229,7 @@ class Runtime:
         payload: dict[str, Any],
     ) -> Generation:
         meta_info = payload.get("meta_info", {})
-        token_ids = Runtime._extract_token_ids(
-            payload,
-            token_logprobs=meta_info.get("output_token_logprobs", []),
-        )
+        token_ids = Runtime._extract_token_ids(payload)
         finish_reason = Runtime._extract_finish_reason(meta_info)
         rollout_model_version = Runtime._extract_rollout_model_version(meta_info)
         return Generation(
@@ -245,8 +241,6 @@ class Runtime:
     @staticmethod
     def _extract_token_ids(
         payload: dict[str, Any],
-        *,
-        token_logprobs: Sequence[Any],
     ) -> list[int]:
         for source in (payload, payload.get("meta_info", {})):
             if not isinstance(source, dict):
@@ -255,15 +249,7 @@ class Runtime:
                 token_ids = source.get(key)
                 if isinstance(token_ids, list):
                     return [int(token_id) for token_id in token_ids]
-
-        extracted_ids: list[int] = []
-        for item in token_logprobs:
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
-                extracted_ids.append(int(item[1]))
-                continue
-            if isinstance(item, dict) and "token_id" in item:
-                extracted_ids.append(int(item["token_id"]))
-        return extracted_ids
+        raise ValueError("generate payload missing output_ids or token_ids")
 
     @staticmethod
     def _extract_finish_reason(meta_info: dict[str, Any]) -> str:

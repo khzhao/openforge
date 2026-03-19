@@ -229,7 +229,7 @@ def test_runtime_tokenize_messages_propagates_chat_template_failure() -> None:
     assert tokenizer.encode_called is False
 
 
-def test_runtime_generate_disables_rollout_logprobs() -> None:
+def test_runtime_generate_forwards_prompt_ids() -> None:
     runtime = Runtime(cfg=_server_config())
     runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
 
@@ -256,4 +256,4 @@ def test_runtime_generate_disables_rollout_logprobs() -> None:
     generation = runtime.generate(prompt_token_ids=[1, 2, 3])
 
     assert generation.token_ids == [11, 12]
-    assert captured["kwargs"] == {"input_ids": [1, 2, 3], "return_logprob": False}
+    assert captured["kwargs"] == {"input_ids": [1, 2, 3]}

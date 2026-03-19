@@ -15,7 +15,6 @@ os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
 import ray
 import torch
 from huggingface_hub import snapshot_download
-from tensordict import TensorDict
 from transformers import AutoTokenizer
 
 from openforge.configs.models import OpenForgeConfig
@@ -147,7 +146,7 @@ def build_cfg(
     )
 
 
-def build_microbatch(model_path: str) -> TensorDict:
+def build_sample(model_path: str) -> dict[str, torch.Tensor]:
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     token_ids = tokenizer.encode(
         "OpenForge FSDP2 Manager end-to-end weight sync test.",
@@ -159,15 +158,13 @@ def build_microbatch(model_path: str) -> TensorDict:
     token_ids = token_ids[:32]
 
     tokens = torch.tensor(token_ids, dtype=torch.long)
-    return TensorDict(
-        {
-            "tokens": tokens,
-            "position_ids": torch.arange(tokens.numel(), dtype=torch.long),
-            "rewards": torch.linspace(0.25, 1.0, tokens.numel(), dtype=torch.float32),
-            "loss_mask": torch.ones(tokens.numel() - 1, dtype=torch.float32),
-        },
-        batch_size=[],
-    )
+    return {
+        "tokens": tokens,
+        "position_ids": torch.arange(tokens.numel(), dtype=torch.long),
+        "advantages": torch.linspace(0.25, 1.0, tokens.numel(), dtype=torch.float32),
+        "loss_mask": torch.ones(tokens.numel() - 1, dtype=torch.float32),
+        "lengths": torch.tensor(tokens.numel(), dtype=torch.long),
+    }
 
 
 def assert_snapshot_success(
@@ -289,8 +286,11 @@ def run_weight_sync_e2e(
                 f"{len(rollout_workers)} != {rollout_replicas}"
             )
 
-        batch = build_microbatch(resolved_model_path)
-        per_rank_microbatches = [[batch] for _ in range(cfg.train.num_workers)]
+        sample = build_sample(resolved_model_path)
+        rank_minibatches = [
+            {name: tensor.unsqueeze(0) for name, tensor in sample.items()}
+            for _ in range(cfg.train.num_workers)
+        ]
         global_step = 0
         for mode_index, mode in enumerate(normalized_sync_modes, start=1):
             snapshot_responses = ray.get(
@@ -303,7 +303,7 @@ def run_weight_sync_e2e(
             for _ in range(3):
                 global_step += 1
                 step_results = train_manager.step(
-                    per_rank_microbatches,
+                    rank_minibatches,
                     global_step=global_step,
                 )
             post_step_weights = train_manager.build_tensor_buckets(

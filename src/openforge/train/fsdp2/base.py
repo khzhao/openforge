@@ -106,7 +106,7 @@ class FSDP2Engine(TrainBackend):
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor | None]:
         tokens = batch["tokens"].to(self.device).long()
         loss_mask = batch["loss_mask"].to(self.device).float()
-        rewards = batch["rewards"].to(self.device).float()
+        advantages = batch["advantages"].to(self.device).float()
         position_ids = batch["position_ids"].to(self.device).long()
 
         # 1. Compute log probabilities for the available models
@@ -128,7 +128,7 @@ class FSDP2Engine(TrainBackend):
             dim=-1, index=targets.unsqueeze(-1)
         ).squeeze(-1)
         loss = (
-            -(rewards[1:] * curr_log_probs) * loss_mask
+            -(advantages[1:] * curr_log_probs) * loss_mask
         ).sum() / loss_mask.sum().clamp_min(1.0)
         outputs = {
             "curr_log_probs": curr_log_probs.detach(),
@@ -206,17 +206,26 @@ class FSDP2Engine(TrainBackend):
             dist.destroy_process_group()
 
     def _compute_log_probs(
-        self, *, model: FSDPModule, tokens: torch.Tensor, position_ids: torch.Tensor
+        self,
+        *,
+        model: FSDPModule,
+        tokens: torch.Tensor,
+        position_ids: torch.Tensor,
     ) -> torch.Tensor:
         with torch.autocast(
             device_type=self.device.type,
             dtype=get_torch_dtype(self.cfg.train.config.amp.precision),
             enabled=self.amp_enabled,
         ):
-            logits = model(
-                input_ids=tokens.unsqueeze(0),
-                position_ids=position_ids.unsqueeze(0),
-            ).logits[0, :-1, :]
+            logits = (
+                model(
+                    input_ids=tokens.unsqueeze(0),
+                    position_ids=position_ids.unsqueeze(0),
+                    use_cache=False,
+                )
+                .logits.squeeze(0)
+                .float()[:-1, :]
+            )
         log_probs = F.log_softmax(logits, dim=-1)
         return log_probs
 

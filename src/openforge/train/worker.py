@@ -9,7 +9,6 @@ import ray
 import torch
 import torch.distributed as dist
 from huggingface_hub import save_torch_state_dict
-from tensordict import TensorDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -21,7 +20,7 @@ from openforge.train.fsdp2.base import FSDP2Engine
 from openforge.train.types import TrainStepResult, TrainWorkerSpec, TrainWorkerState
 from openforge.utils.distributed import init_gloo_group
 from openforge.utils.networking import get_free_port
-from openforge.utils.packed import serialize_tensor_bucket
+from openforge.utils.packed import pack_micro_batch, serialize_tensor_bucket
 from openforge.utils.ray import get_current_ray_node_ip_address
 from openforge.utils.torch import get_torch_dtype
 
@@ -51,12 +50,22 @@ class TrainWorker:
 
     def step(
         self,
-        microbatches: Sequence[TensorDict],
+        mini_batch: dict[str, torch.Tensor],
         *,
         global_step: int | None = None,
     ) -> TrainStepResult:
-        if not microbatches:
-            raise ValueError("step requires at least one microbatch")
+        batch_size = int(mini_batch["lengths"].shape[0])
+        assert batch_size > 0, "step requires at least one sample"
+
+        micro_batch_size = self.spec.cfg.train.micro_batch_size
+        microbatches = [
+            {
+                key: value[index : index + micro_batch_size]
+                for key, value in mini_batch.items()
+            }
+            for index in range(0, batch_size, micro_batch_size)
+        ]
+        microbatches = [pack_micro_batch(micro_batch) for micro_batch in microbatches]
 
         self.engine.zero_grad()
         last_index = len(microbatches) - 1

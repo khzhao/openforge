@@ -6,7 +6,6 @@ import ray
 import torch
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from tensordict import TensorDict
 
 from openforge.configs.models import OpenForgeConfig
 from openforge.train.fsdp2.weight_updater import WeightUpdater
@@ -85,19 +84,18 @@ class TrainManager:
 
     def step(
         self,
-        per_rank_microbatches: Sequence[Sequence[TensorDict]],
+        rank_minibatches: Sequence[dict[str, torch.Tensor]],
         *,
         global_step: int | None = None,
     ) -> list[TrainStepResult]:
-        if len(per_rank_microbatches) != self.world_size:
-            raise ValueError(
-                "Expected one microbatch sequence per training rank: "
-                f"{self.world_size} != {len(per_rank_microbatches)}"
-            )
+        assert len(rank_minibatches) == self.world_size, (
+            "Expected one mini-batch per training rank: "
+            f"{self.world_size} != {len(rank_minibatches)}"
+        )
         return ray.get(
             [
                 worker.step.remote(
-                    per_rank_microbatches[rank],
+                    rank_minibatches[rank],
                     global_step=global_step,
                 )
                 for rank, worker in enumerate(self.workers)

@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from contextlib import AbstractContextManager
 
-from tensordict import TensorDict
+import torch
 
 from openforge.train.types import TrainStepResult, TrainWorkerSpec
 
@@ -22,11 +22,14 @@ class TrainBackend(ABC):
         """Clear gradients before a new update or accumulation cycle."""
 
     @abstractmethod
-    def forward(self, batch: TensorDict) -> TensorDict:
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor | None]:
         """Run forward pass and return backend-defined outputs."""
 
     @abstractmethod
-    def backward(self, forward_out: TensorDict) -> None:
+    def backward(self, forward_out: dict[str, torch.Tensor]) -> None:
         """Run backward pass from forward outputs."""
 
     @abstractmethod
