@@ -6,13 +6,13 @@ from typing import Any
 
 import requests
 from loguru import logger
-from sglang.srt.utils import kill_process_tree
 
 from openforge.rollout.types import RouterSpec
 
 from .utils import (
     generate_sglang_router_args,
     launch_sglang_router,
+    stop_spawned_process,
 )
 
 __all__ = ["Router"]
@@ -47,19 +47,10 @@ class Router:
 
     def shutdown(self) -> None:
         """Terminate the router process tree."""
-        if self.process is None:
-            return
-
-        if self.process.is_alive():
-            try:
-                kill_process_tree(self.process.pid, include_parent=True)
-            except Exception:
-                self.process.terminate()
-            self.process.join(timeout=self.PROCESS_TERMINATION_TIMEOUT_SECONDS)
-            if self.process.is_alive():
-                self.process.kill()
-                self.process.join(timeout=self.PROCESS_TERMINATION_TIMEOUT_SECONDS)
-
+        stop_spawned_process(
+            self.process,
+            timeout=self.PROCESS_TERMINATION_TIMEOUT_SECONDS,
+        )
         self.process = None
 
     def is_healthy(self) -> bool:

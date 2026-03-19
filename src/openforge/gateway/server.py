@@ -58,10 +58,6 @@ def create_app(
         finally:
             await asyncio.to_thread(runtime.shutdown)
             await store.close()
-            import ray
-
-            if ray.is_initialized():
-                ray.shutdown()
 
     service = Service(store=store, runtime=runtime)
     app = FastAPI(title="OpenForge Gateway", lifespan=lifespan)

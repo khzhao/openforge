@@ -123,10 +123,13 @@ class EngineGroup:
     def shutdown(self) -> None:
         """Terminate all child engine actors started by this group."""
         workers = self.engine_workers
-        ray.get([worker.stop.remote() for worker in workers])
-        for worker in workers:
-            ray.kill(worker)
-        self.engine_info = {}
+        try:
+            if workers:
+                ray.get([worker.stop.remote() for worker in workers])
+        finally:
+            for worker in workers:
+                ray.kill(worker)
+            self.engine_info = {}
 
     @property
     def engine_specs(self) -> list[EngineSpec]:

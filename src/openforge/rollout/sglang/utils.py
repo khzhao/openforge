@@ -12,6 +12,41 @@ from sglang_router.router_args import RouterArgs
 from openforge.rollout.types import EngineAddr, EngineSpec, RouterSpec
 
 
+def _stop_spawn_resource_tracker() -> None:
+    """Stop the local multiprocessing resource tracker when no children remain."""
+    try:
+        from multiprocessing import resource_tracker
+
+        tracker = resource_tracker._resource_tracker
+        if getattr(tracker, "_pid", None):
+            tracker._stop()
+    except Exception:
+        pass
+
+
+def stop_spawned_process(
+    process: BaseProcess | None,
+    *,
+    timeout: float,
+) -> None:
+    """Stop one multiprocessing child and clean up its resource tracker."""
+    if process is None:
+        return
+
+    try:
+        if process.is_alive():
+            try:
+                kill_process_tree(process.pid, include_parent=True)
+            except Exception:
+                process.terminate()
+            process.join(timeout=timeout)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=timeout)
+    finally:
+        _stop_spawn_resource_tracker()
+
+
 def get_local_gpu_id(global_gpu_id: int) -> int:
     """Get the local GPU id for the given physical GPU id."""
     cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -48,10 +83,7 @@ def serve_sglang(server_args: ServerArgs | dict[str, Any]) -> None:
 
     server_args = _coerce_server_args(server_args)
     server_args.host = str(server_args.host).strip("[]")
-    try:
-        launch_server(server_args)
-    finally:
-        kill_process_tree(os.getpid(), include_parent=False)
+    launch_server(server_args)
 
 
 def launch_sglang_process(server_args: ServerArgs | dict[str, Any]) -> BaseProcess:
@@ -128,10 +160,7 @@ def serve_sglang_router(router_args: RouterArgs | dict[str, Any]) -> None:
 
     router_args = _coerce_router_args(router_args)
     router_args.host = str(router_args.host).strip("[]")
-    try:
-        launch_router(router_args)
-    finally:
-        kill_process_tree(os.getpid(), include_parent=False)
+    launch_router(router_args)
 
 
 def launch_sglang_router(router_args: RouterArgs | dict[str, Any]) -> BaseProcess:

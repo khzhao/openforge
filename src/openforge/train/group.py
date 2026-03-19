@@ -198,6 +198,12 @@ class TrainManager:
         )
 
     def shutdown(self) -> None:
-        ray.get([worker.shutdown.remote() for worker in self.workers])
-        self.workers.clear()
-        ray.util.remove_placement_group(self.pg)
+        workers = list(self.workers)
+        try:
+            if workers:
+                ray.get([worker.shutdown.remote() for worker in workers])
+        finally:
+            for worker in workers:
+                ray.kill(worker)
+            self.workers.clear()
+            ray.util.remove_placement_group(self.pg)

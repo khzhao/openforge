@@ -166,7 +166,9 @@ def test_runtime_start_slot_shuts_down_ray_when_startup_fails(monkeypatch) -> No
         "create_train_manager",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("train boom")),
     )
-    monkeypatch.setattr(runtime_api, "create_rollout_manager", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        runtime_api, "create_rollout_manager", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(runtime_api, "register_rollout", lambda *args, **kwargs: None)
 
     with pytest.raises(RuntimeError, match="train boom"):
@@ -174,3 +176,62 @@ def test_runtime_start_slot_shuts_down_ray_when_startup_fails(monkeypatch) -> No
 
     assert state["removed_pg"] is True
     assert state["shutdown_called"] is True
+
+
+def test_runtime_shutdown_also_shuts_down_ray(monkeypatch) -> None:
+    runtime = Runtime(cfg=_server_config())
+    state = {"slot_shutdown_called": False, "ray_shutdown_called": False}
+
+    class FakeSlot:
+        def shutdown(self) -> None:
+            state["slot_shutdown_called"] = True
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        ray,
+        "shutdown",
+        lambda: state.__setitem__("ray_shutdown_called", True),
+    )
+
+    runtime._slot = FakeSlot()
+    runtime._loaded_model = "Qwen/Qwen2.5-0.5B-Instruct"
+    runtime._tokenizer_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
+
+    runtime.shutdown()
+
+    assert state["slot_shutdown_called"] is True
+    assert state["ray_shutdown_called"] is True
+    assert runtime.current_model() is None
+    assert runtime._slot is None
+
+
+def test_runtime_tokenize_messages_raises_when_chat_template_fails() -> None:
+    runtime = Runtime(cfg=_server_config())
+    runtime._loaded_model = "Qwen/Qwen2.5-0.5B-Instruct"
+    runtime._tokenizer_name = "Qwen/Qwen2.5-0.5B-Instruct"
+
+    class FakeTokenizer:
+        def __init__(self) -> None:
+            self.encode_called = False
+
+        def apply_chat_template(self, *args, **kwargs) -> list[int]:
+            raise RuntimeError("template boom")
+
+        def encode(self, *args, **kwargs) -> list[int]:
+            self.encode_called = True
+            raise AssertionError("encode fallback should not be used")
+
+    tokenizer = FakeTokenizer()
+    runtime._tokenizer = tokenizer
+
+    with pytest.raises(
+        ValueError,
+        match="failed to tokenize messages with chat template: template boom",
+    ):
+        runtime.tokenize_messages(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            [{"role": "user", "content": "hello"}],
+        )
+
+    assert tokenizer.encode_called is False

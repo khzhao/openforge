@@ -5,7 +5,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from loguru import logger
-from sglang.srt.utils import kill_process_tree
 
 from openforge.rollout.types import EngineAddr, EngineSpec
 from openforge.utils.networking import get_free_port
@@ -15,6 +14,7 @@ from .client import SGLangClient
 from .utils import (
     generate_sglang_server_args,
     launch_sglang_process,
+    stop_spawned_process,
 )
 
 __all__ = ["Engine"]
@@ -59,17 +59,14 @@ class Engine:
         self._wait_until_ready()
 
     def stop(self) -> None:
-        if self.process.is_alive():
-            try:
-                kill_process_tree(self.process.pid, include_parent=True)
-            except Exception:
-                self.process.terminate()
-            self.process.join(timeout=self.PROCESS_TERMINATION_TIMEOUT_SECONDS)
-            if self.process.is_alive():
-                self.process.kill()
-                self.process.join(timeout=self.PROCESS_TERMINATION_TIMEOUT_SECONDS)
-        self.process = None
-        self._runtime_executor.shutdown(wait=False, cancel_futures=True)
+        try:
+            stop_spawned_process(
+                self.process,
+                timeout=self.PROCESS_TERMINATION_TIMEOUT_SECONDS,
+            )
+        finally:
+            self.process = None
+            self._runtime_executor.shutdown(wait=False, cancel_futures=True)
 
     def is_healthy(self) -> bool:
         return self.process.is_alive() and self.client.health_generate(

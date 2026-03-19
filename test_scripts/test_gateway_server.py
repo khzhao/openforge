@@ -180,6 +180,19 @@ class _FakeRuntime:
         self._current_model = None
 
 
+class _FailingTokenizeRuntime(_FakeRuntime):
+    def tokenize_messages(
+        self,
+        model_name: str,
+        messages: list[dict[str, str]],
+    ) -> list[int]:
+        if self._current_model != model_name:
+            raise ModelBusyError(model_name)
+        raise ValueError(
+            "failed to tokenize messages with chat template: template boom"
+        )
+
+
 def test_gateway_http_flow(monkeypatch) -> None:
     """Exercise the HTTP flow across session, trajectory, generate, and teardown."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -194,11 +207,15 @@ def test_gateway_http_flow(monkeypatch) -> None:
                 "active_model": None,
             }
 
-            started = client.post("/start_session", json=_start_session_payload("model-a"))
+            started = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            )
             assert started.status_code == 200
             session_id = started.json()["session_id"]
 
-            trajectory = client.post("/start_trajectory", json={"session_id": session_id})
+            trajectory = client.post(
+                "/start_trajectory", json={"session_id": session_id}
+            )
             assert trajectory.status_code == 200
             trajectory_id = trajectory.json()["trajectory_id"]
 
@@ -251,7 +268,9 @@ def test_gateway_http_health_and_models_reflect_loaded_model(monkeypatch) -> Non
                 {"id": "model-a", "tokenizer": "model-a-tokenizer"}
             ]
 
-            started = client.post("/start_session", json=_start_session_payload("model-a"))
+            started = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            )
             assert started.status_code == 200
             assert client.get("/models").json()["active_model"] == "model-a"
             assert client.get("/current_session").json() == started.json()
@@ -269,12 +288,18 @@ def test_gateway_http_start_session_reports_errors(
             runtime=_FakeRuntime(("model-a", "model-b")),
         )
         with TestClient(app) as client:
-            unsupported = client.post("/start_session", json=_start_session_payload("model-c"))
+            unsupported = client.post(
+                "/start_session", json=_start_session_payload("model-c")
+            )
             assert unsupported.status_code == 404
 
-            created = client.post("/start_session", json=_start_session_payload("model-a"))
+            created = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            )
             assert created.status_code == 200
-            reused = client.post("/start_session", json=_start_session_payload("model-a"))
+            reused = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            )
             assert reused.status_code == 409
 
             busy = client.post("/start_session", json=_start_session_payload("model-b"))
@@ -288,7 +313,9 @@ def test_gateway_http_releases_model_after_last_session(monkeypatch) -> None:
         runtime = _FakeRuntime(("model-a", "model-b"))
         app = _create_test_app(monkeypatch, store=store, runtime=runtime)
         with TestClient(app) as client:
-            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
+            session_id = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            ).json()["session_id"]
             trajectory_id = client.post(
                 "/start_trajectory",
                 json={"session_id": session_id},
@@ -317,7 +344,9 @@ def test_gateway_http_releases_model_after_last_session(monkeypatch) -> None:
             assert runtime.shutdown_count == 1
             assert client.get("/models").json()["active_model"] is None
 
-            switched = client.post("/start_session", json=_start_session_payload("model-b"))
+            switched = client.post(
+                "/start_session", json=_start_session_payload("model-b")
+            )
             assert switched.status_code == 200
             assert switched.json()["model"] == "model-b"
 
@@ -349,7 +378,9 @@ def test_gateway_http_generate_validates_request_and_unknown_records(
             )
             assert missing_session.status_code == 404
 
-            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
+            session_id = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            ).json()["session_id"]
             missing_trajectory = client.post(
                 "/generate",
                 json={
@@ -361,6 +392,39 @@ def test_gateway_http_generate_validates_request_and_unknown_records(
             assert missing_trajectory.status_code == 404
 
 
+def test_gateway_http_generate_returns_bad_request_when_tokenization_fails(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+        app = _create_test_app(
+            monkeypatch,
+            store=store,
+            runtime=_FailingTokenizeRuntime(),
+        )
+        with TestClient(app) as client:
+            session_id = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            ).json()["session_id"]
+            trajectory_id = client.post(
+                "/start_trajectory",
+                json={"session_id": session_id},
+            ).json()["trajectory_id"]
+
+            generated = client.post(
+                "/generate",
+                json={
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+            assert generated.status_code == 400
+            assert generated.json() == {
+                "detail": "failed to tokenize messages with chat template: template boom"
+            }
+
+
 def test_gateway_http_generate_after_end_trajectory_returns_conflict(
     monkeypatch,
 ) -> None:
@@ -369,7 +433,9 @@ def test_gateway_http_generate_after_end_trajectory_returns_conflict(
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = _create_test_app(monkeypatch, store=store, runtime=_FakeRuntime())
         with TestClient(app) as client:
-            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
+            session_id = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            ).json()["session_id"]
             trajectory_id = client.post(
                 "/start_trajectory",
                 json={"session_id": session_id},
@@ -413,7 +479,9 @@ def test_gateway_http_end_session_requires_completed_trajectories(monkeypatch) -
             missing = client.post("/end_session", json={"session_id": "missing"})
             assert missing.status_code == 404
 
-            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
+            session_id = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            ).json()["session_id"]
             trajectory_id = client.post(
                 "/start_trajectory",
                 json={"session_id": session_id},
@@ -440,7 +508,9 @@ def test_gateway_http_start_trajectory_can_fork_from_parent(monkeypatch) -> None
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = _create_test_app(monkeypatch, store=store, runtime=_FakeRuntime())
         with TestClient(app) as client:
-            session_id = client.post("/start_session", json=_start_session_payload("model-a")).json()["session_id"]
+            session_id = client.post(
+                "/start_session", json=_start_session_payload("model-a")
+            ).json()["session_id"]
             root = client.post("/start_trajectory", json={"session_id": session_id})
             assert root.status_code == 200
             root_id = root.json()["trajectory_id"]

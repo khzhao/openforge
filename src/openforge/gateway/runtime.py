@@ -57,7 +57,6 @@ class Generation:
 class RuntimeSlot:
     """Active train+rollout runtime resources for the loaded model."""
 
-    placement_groups: dict[str, Any]
     train_manager: Any
     rollout_manager: Any
 
@@ -132,15 +131,10 @@ class Runtime:
                 tokenize=True,
                 add_generation_prompt=True,
             )
-        except Exception:
-            prompt_text = "\n".join(
-                f"{message.get('role', 'user')}: {message.get('content', '')}"
-                for message in messages
-            )
-            token_ids = tokenizer.encode(
-                f"{prompt_text}\nassistant:",
-                add_special_tokens=True,
-            )
+        except Exception as exc:
+            raise ValueError(
+                f"failed to tokenize messages with chat template: {exc}"
+            ) from exc
         return [int(token_id) for token_id in token_ids]
 
     def generate(
@@ -161,14 +155,20 @@ class Runtime:
         return self._parse_generation_payload(payload)
 
     def shutdown(self) -> None:
+        import ray
+
         slot = self._slot
         self._slot = None
         self._runtime_cfg = None
         self._loaded_model = None
         self._tokenizer_name = None
         self._tokenizer = None
-        if slot is not None:
-            slot.shutdown()
+        try:
+            if slot is not None:
+                slot.shutdown()
+        finally:
+            if ray.is_initialized():
+                ray.shutdown()
 
     def _start_slot(self, cfg: OpenForgeConfig) -> RuntimeSlot:
         import ray
@@ -212,7 +212,6 @@ class Runtime:
             raise
 
         return RuntimeSlot(
-            placement_groups=placement_groups,
             train_manager=train_manager,
             rollout_manager=rollout_manager,
         )
