@@ -109,7 +109,11 @@ class Router:
             },
             timeout=max(self.REQUEST_TIMEOUT_SECONDS, self.spec.request_timeout_secs),
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"sglang router generate failed with status "
+                f"{response.status_code}: {response.text!r}"
+            )
         return response.json()
 
     def add_worker(self, worker_url: str) -> None:

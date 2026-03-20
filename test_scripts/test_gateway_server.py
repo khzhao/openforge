@@ -5,11 +5,11 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import openforge.gateway.server as gateway_server
-import openforge.gateway.service as gateway_service
 import pytest
 from fastapi.testclient import TestClient
 
+import openforge.gateway.server as gateway_server
+import openforge.gateway.service as gateway_service
 from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
 from openforge.data import SQLiteOpenForgeStore
@@ -26,6 +26,7 @@ class _FakeTrainLoop:
         self.train_manager = train_manager
         self.started = False
         self.stopped = False
+        self.train_once_calls = 0
         self.__class__.instances.append(self)
 
     def start(self) -> None:
@@ -33,6 +34,10 @@ class _FakeTrainLoop:
 
     async def stop(self) -> None:
         self.stopped = True
+
+    async def train_once(self) -> bool:
+        self.train_once_calls += 1
+        return False
 
 
 @pytest.fixture(autouse=True)
@@ -411,6 +416,7 @@ def test_gateway_http_generate_validates_request_and_unknown_records(
 def test_gateway_http_generate_returns_bad_request_when_tokenization_fails(
     monkeypatch,
 ) -> None:
+    """Return HTTP 400 when message tokenization fails in the service layer."""
     with tempfile.TemporaryDirectory() as tmpdir:
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         app = _create_test_app(

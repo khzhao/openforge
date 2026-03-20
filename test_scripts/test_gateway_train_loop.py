@@ -46,7 +46,7 @@ class _FakeTrainManager:
                 global_batch_size=global_batch_size,
                 mini_batch_size=mini_batch_size,
                 micro_batch_size=micro_batch_size,
-            )
+            ),
         )
         self.step_calls: list[tuple[int, list[object]]] = []
         self.sync_calls: list[tuple[int, str | None]] = []
@@ -148,6 +148,8 @@ async def _completed_multiturn_trajectory(
 
 
 def test_train_loop_train_once_consumes_one_global_batch() -> None:
+    """Consume exactly one global batch worth of completed trajectories."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
@@ -173,7 +175,7 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
         assert trained is True
         assert loop.global_step == 1
         assert loop.policy_version == 1
-        assert train_manager.sync_calls == [(1, "disk")]
+        assert train_manager.sync_calls == [(1, "distributed")]
         assert len(train_manager.step_calls) == 1
         global_step, rank_minibatches = train_manager.step_calls[0]
         assert global_step == 1
@@ -192,8 +194,7 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
         assert rank_minibatches[1]["lengths"].tolist() == [3, 3]
 
         trained_ids = [
-            (await store.get_trajectory(f"t{index}")).status
-            for index in range(4)
+            (await store.get_trajectory(f"t{index}")).status for index in range(4)
         ]
         remaining = await store.get_trajectory("t4")
         assert trained_ids == ["trained", "trained", "trained", "trained"]
@@ -205,6 +206,8 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
 
 
 def test_train_loop_train_once_splits_rank_local_minibatches() -> None:
+    """Split one global batch into rank-local padded minibatches."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
@@ -265,6 +268,8 @@ def test_train_loop_train_once_splits_rank_local_minibatches() -> None:
 
 
 def test_train_loop_builds_group_relative_advantages() -> None:
+    """Compute group-relative advantages before building training samples."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
@@ -344,6 +349,8 @@ def test_train_loop_builds_group_relative_advantages() -> None:
 
 
 def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
+    """Include every stored turn from a completed trajectory in training."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
@@ -438,6 +445,8 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
 
 
 def test_train_loop_counts_batch_size_in_turns() -> None:
+    """Measure batch readiness in stored turns rather than trajectories."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
@@ -491,6 +500,8 @@ def test_train_loop_counts_batch_size_in_turns() -> None:
 
 
 def test_train_loop_waits_for_all_siblings_in_group() -> None:
+    """Wait until every sibling trajectory in a group is completed."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
@@ -560,6 +571,8 @@ def test_train_loop_waits_for_all_siblings_in_group() -> None:
 
 
 def test_train_loop_trains_completed_sibling_group_together() -> None:
+    """Train sibling trajectories from the same parent as one group."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
@@ -634,6 +647,8 @@ def test_train_loop_trains_completed_sibling_group_together() -> None:
 
 
 def test_train_loop_run_polls_until_batch_is_ready() -> None:
+    """Poll until a full batch becomes available and then train it once."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
@@ -692,7 +707,7 @@ def test_train_loop_run_polls_until_batch_is_ready() -> None:
         await loop.stop()
 
         assert len(train_manager.step_calls) == 1
-        assert train_manager.sync_calls == [1]
+        assert train_manager.sync_calls == [(1, "distributed")]
         t0 = await store.get_trajectory("t0")
         t1 = await store.get_trajectory("t1")
         assert t0 is not None

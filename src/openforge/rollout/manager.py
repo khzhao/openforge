@@ -85,6 +85,7 @@ class RolloutManager:
 
     def generate(self, sampling_params: Any, **kwargs: Any) -> dict[str, Any]:
         """Generate text from the rollout manager."""
+        kwargs.setdefault("return_logprob", False)
         return self.router.generate(sampling_params, **kwargs)
 
     @property

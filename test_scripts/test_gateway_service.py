@@ -37,6 +37,7 @@ class _FakeTrainLoop:
         self.train_manager = train_manager
         self.started = False
         self.stopped = False
+        self.train_once_calls = 0
         self.__class__.instances.append(self)
 
     def start(self) -> None:
@@ -44,6 +45,10 @@ class _FakeTrainLoop:
 
     async def stop(self) -> None:
         self.stopped = True
+
+    async def train_once(self) -> bool:
+        self.train_once_calls += 1
+        return False
 
 
 @pytest.fixture(autouse=True)
@@ -236,7 +241,6 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
                 "temperature": 0.7,
                 "max_new_tokens": 32,
             }
-            root_turns = await store.list_turns(root.trajectory_id)
 
             child = await service.start_trajectory(
                 session_id=session.session_id,
@@ -397,6 +401,8 @@ def test_gateway_service_generate_unknown_session_raises() -> None:
 
 
 def test_gateway_service_generate_wraps_tokenization_failure() -> None:
+    """Translate tokenizer failures into the service-layer request error."""
+
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(store=store, runtime=_FailingTokenizeRuntime())
@@ -539,6 +545,7 @@ def test_gateway_controller_parses_router_payload() -> None:
 
 
 def test_gateway_controller_parses_router_payload_with_meta_token_ids() -> None:
+    """Accept token ids from router metadata when the top-level field is absent."""
     generation = Runtime._parse_generation_payload(
         {
             "meta_info": {
@@ -555,6 +562,7 @@ def test_gateway_controller_parses_router_payload_with_meta_token_ids() -> None:
 
 
 def test_gateway_controller_requires_output_token_ids() -> None:
+    """Reject payloads that omit both output token id field variants."""
     with pytest.raises(ValueError, match="output_ids or token_ids"):
         Runtime._parse_generation_payload(
             {
@@ -567,6 +575,7 @@ def test_gateway_controller_requires_output_token_ids() -> None:
 
 
 def test_gateway_controller_parses_router_payload_without_extra_fields() -> None:
+    """Parse the minimal router payload without depending on optional fields."""
     generation = Runtime._parse_generation_payload(
         {
             "output_ids": [11, 12],

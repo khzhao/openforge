@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from uuid import uuid4
 
 from openforge.data import Session, SQLiteOpenForgeStore, Trajectory, Turn
@@ -95,7 +94,7 @@ class Service:
 
         model_name = runtime_config.model.model_name_or_path
         if self.runtime.current_model() not in (None, model_name):
-            await self._shutdown_runtime()
+            self.runtime.shutdown()
         resolved_model_name = self.runtime.start(
             runtime_config=runtime_config,
         )
@@ -247,7 +246,7 @@ class Service:
                 pass
             self._train_loop = None
         if not self._active_session_ids:
-            await self._shutdown_runtime()
+            self.runtime.shutdown()
 
         return EndSessionResponse(session_id=session_id, status="completed")
 
@@ -256,7 +255,7 @@ class Service:
             await self._train_loop.stop()
             self._train_loop = None
         self._active_session_ids.clear()
-        await self._shutdown_runtime()
+        self.runtime.shutdown()
 
     async def _require_active_session(self, session_id: str) -> Session:
         session = await self.store.get_session(session_id)
@@ -278,9 +277,6 @@ class Service:
         if trajectory.status != "active":
             raise TrajectoryNotActiveError(f"trajectory {trajectory_id} is not active")
         return trajectory
-
-    async def _shutdown_runtime(self) -> None:
-        await asyncio.to_thread(self.runtime.shutdown)
 
     @staticmethod
     def _new_id(prefix: str) -> str:

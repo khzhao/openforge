@@ -113,8 +113,7 @@ class TrainLoop:
 
         next_global_step = self.global_step + 1
         next_policy_version = self.policy_version + 1
-        await asyncio.to_thread(
-            self._step_and_sync,
+        self._step_and_sync(
             rank_minibatches,
             global_step=next_global_step,
             policy_version=next_policy_version,
