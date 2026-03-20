@@ -17,7 +17,6 @@ from torch.distributed.fsdp import (
 )
 from transformers import AutoModelForCausalLM
 
-from openforge.runtime import create_algorithm
 from openforge.train.backend import TrainBackend
 from openforge.train.types import TrainWorkerSpec
 from openforge.utils.torch import get_torch_dtype
@@ -35,13 +34,15 @@ class FSDP2Engine(TrainBackend):
             self.initialize(spec)
 
     def initialize(self, spec: TrainWorkerSpec) -> None:
+        from openforge.runtime import create_algorithm
+
         self.spec = spec
         self.cfg = spec.cfg
         self.rank = spec.rank
         self.world_size = spec.world_size
         self.master_addr = spec.master_addr
         self.master_port = spec.master_port
-        self.algorithm = create_algorithm(spec.cfg.algo)
+        self.algorithm = create_algorithm(spec.cfg)
 
         # 1. Initialize the device and device mesh
         self.device = torch.device("cpu")

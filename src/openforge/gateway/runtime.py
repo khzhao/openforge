@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -138,6 +139,11 @@ class Runtime:
         )
         return self._parse_generation_payload(payload)
 
+    def train_manager(self):
+        slot = self._slot
+        assert slot is not None
+        return slot.train_manager
+
     def shutdown(self) -> None:
         import ray
 
@@ -164,6 +170,8 @@ class Runtime:
         )
         from openforge.utils.networking import get_free_port, get_host_ip
         from openforge.utils.ray import create_placement_groups
+
+        os.environ.setdefault("NCCL_CUMEM_ENABLE", "0")
 
         started_ray = False
         if not ray.is_initialized():

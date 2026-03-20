@@ -49,7 +49,7 @@ class _FakeTrainManager:
             )
         )
         self.step_calls: list[tuple[int, list[object]]] = []
-        self.sync_calls: list[int] = []
+        self.sync_calls: list[tuple[int, str | None]] = []
 
     def step(
         self,
@@ -63,8 +63,13 @@ class _FakeTrainManager:
             for rank in range(self.world_size)
         ]
 
-    def sync_rollout_weights(self, *, policy_version: int) -> None:
-        self.sync_calls.append(policy_version)
+    def sync_rollout_weights(
+        self,
+        *,
+        policy_version: int,
+        mode: str | None = None,
+    ) -> None:
+        self.sync_calls.append((policy_version, mode))
 
 
 def _turn(
@@ -168,7 +173,7 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
         assert trained is True
         assert loop.global_step == 1
         assert loop.policy_version == 1
-        assert train_manager.sync_calls == [1]
+        assert train_manager.sync_calls == [(1, "disk")]
         assert len(train_manager.step_calls) == 1
         global_step, rank_minibatches = train_manager.step_calls[0]
         assert global_step == 1

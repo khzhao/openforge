@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 
 import openforge.gateway.server as gateway_server
+import openforge.gateway.service as gateway_service
+import pytest
 from fastapi.testclient import TestClient
 
 from openforge.configs.cluster import ClusterConfig
@@ -13,6 +15,30 @@ from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerCon
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.runtime import Generation, ModelBusyError, UnsupportedModelError
 from openforge.gateway.types import StartSessionRequest
+
+
+class _FakeTrainLoop:
+    instances: list["_FakeTrainLoop"] = []
+
+    def __init__(self, *, session_id: str, store, train_manager) -> None:
+        self.session_id = session_id
+        self.store = store
+        self.train_manager = train_manager
+        self.started = False
+        self.stopped = False
+        self.__class__.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.fixture(autouse=True)
+def _patch_train_loop(monkeypatch):
+    _FakeTrainLoop.instances.clear()
+    monkeypatch.setattr(gateway_service, "TrainLoop", _FakeTrainLoop)
 
 
 def _start_session_payload(model_name: str = "model-a") -> dict[str, object]:
@@ -167,6 +193,9 @@ class _FakeRuntime:
             token_ids=[10 + prompt_tail, 20 + prompt_tail],
             rollout_model_version="v4",
         )
+
+    def train_manager(self):
+        return object()
 
     def shutdown(self) -> None:
         self.shutdown_count += 1

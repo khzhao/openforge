@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from openforge.data import Session, SQLiteOpenForgeStore, Trajectory, Turn
 from openforge.gateway.runtime import Generation, Runtime
+from openforge.gateway.train_loop import TrainLoop
 from openforge.gateway.types import (
     EndSessionResponse,
     EndTrajectoryResponse,
@@ -63,6 +64,7 @@ class Service:
         self.store = store
         self.runtime = runtime
         self._active_session_ids: set[str] = set()
+        self._train_loop: TrainLoop | None = None
 
     async def list_models(self) -> dict[str, object]:
         return {
@@ -103,6 +105,13 @@ class Service:
             Session(session_id=session_id, model_name=resolved_model_name)
         )
         self._active_session_ids.add(session_id)
+        assert self._train_loop is None
+        self._train_loop = TrainLoop(
+            session_id=session_id,
+            store=self.store,
+            train_manager=self.runtime.train_manager(),
+        )
+        self._train_loop.start()
         return StartSessionResponse(session_id=session_id, model=resolved_model_name)
 
     async def start_trajectory(
@@ -232,10 +241,22 @@ class Service:
             )
 
         self._active_session_ids.discard(session_id)
+        if self._train_loop is not None:
+            await self._train_loop.stop()
+            while await self._train_loop.train_once():
+                pass
+            self._train_loop = None
         if not self._active_session_ids:
             await self._shutdown_runtime()
 
         return EndSessionResponse(session_id=session_id, status="completed")
+
+    async def shutdown(self) -> None:
+        if self._train_loop is not None:
+            await self._train_loop.stop()
+            self._train_loop = None
+        self._active_session_ids.clear()
+        await self._shutdown_runtime()
 
     async def _require_active_session(self, session_id: str) -> Session:
         session = await self.store.get_session(session_id)

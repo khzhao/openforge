@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -56,7 +55,7 @@ def create_app(
         try:
             yield
         finally:
-            await asyncio.to_thread(runtime.shutdown)
+            await service.shutdown()
             await store.close()
 
     service = Service(store=store, runtime=runtime)

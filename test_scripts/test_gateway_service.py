@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import openforge.gateway.service as gateway_service
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.runtime import (
     Generation,
@@ -25,6 +26,30 @@ from openforge.gateway.service import (
     TrajectoryNotFoundError,
 )
 from openforge.gateway.types import StartSessionRequest
+
+
+class _FakeTrainLoop:
+    instances: list["_FakeTrainLoop"] = []
+
+    def __init__(self, *, session_id: str, store, train_manager) -> None:
+        self.session_id = session_id
+        self.store = store
+        self.train_manager = train_manager
+        self.started = False
+        self.stopped = False
+        self.__class__.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.fixture(autouse=True)
+def _patch_train_loop(monkeypatch):
+    _FakeTrainLoop.instances.clear()
+    monkeypatch.setattr(gateway_service, "TrainLoop", _FakeTrainLoop)
 
 
 def _start_session_kwargs(model_name: str = "model-a") -> dict[str, object]:
@@ -166,6 +191,9 @@ class _FakeRuntime:
             rollout_model_version="v5",
         )
 
+    def train_manager(self):
+        return object()
+
     def shutdown(self) -> None:
         self.shutdown_count += 1
         self._current_model = None
@@ -189,6 +217,9 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
             service = Service(store=store, runtime=runtime)
 
             session = await service.start_session(**_start_session_kwargs("model-a"))
+            assert len(_FakeTrainLoop.instances) == 1
+            assert _FakeTrainLoop.instances[0].session_id == session.session_id
+            assert _FakeTrainLoop.instances[0].started is True
             root = await service.start_trajectory(session_id=session.session_id)
 
             generated = await service.generate(
@@ -237,6 +268,7 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
             ended = await service.end_session(session_id=session.session_id)
             assert ended.session_id == session.session_id
             assert ended.status == "completed"
+            assert _FakeTrainLoop.instances[0].stopped is True
 
             completed = await store.list_completed_trajectories(model_name="model-a")
             assert sorted(
@@ -334,6 +366,7 @@ def test_gateway_service_releases_runtime_after_last_session_and_allows_switch()
         assert ended.status == "completed"
         assert runtime.shutdown_count == 1
         assert runtime.current_model() is None
+        assert _FakeTrainLoop.instances[0].stopped is True
 
         created_again = await service.start_session(**_start_session_kwargs("model-b"))
         assert created_again.model == "model-b"

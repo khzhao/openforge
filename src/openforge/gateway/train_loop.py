@@ -32,7 +32,7 @@ class TrainLoop:
         self.store = store
         self.train_manager = train_manager
         self.train = train_manager.cfg.train
-        self.algorithm = create_algorithm(train_manager.cfg.algo)
+        self.algorithm = create_algorithm(train_manager.cfg)
         self.world_size = train_manager.world_size
         assert (
             self.train.global_batch_size == self.world_size * self.train.mini_batch_size
@@ -188,7 +188,10 @@ class TrainLoop:
             rank_minibatches,
             global_step=global_step,
         )
-        self.train_manager.sync_rollout_weights(policy_version=policy_version)
+        self.train_manager.sync_rollout_weights(
+            policy_version=policy_version,
+            mode="distributed",
+        )
 
     def _build_samples(
         self,

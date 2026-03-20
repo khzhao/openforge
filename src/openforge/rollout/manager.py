@@ -196,7 +196,9 @@ def start_sglang_engines(
                 placement_group_bundle_index=bundle_indices[gpu_rank_offset],
             ),
             runtime_env={
-                "env_vars": dict.fromkeys(NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, "1")
+                "env_vars": {
+                    **dict.fromkeys(NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, "1"),
+                }
             },
         ).remote()
         engine_specs_and_workers.append((engine_spec, engine_worker))
