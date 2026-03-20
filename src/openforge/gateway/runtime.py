@@ -128,6 +128,26 @@ class Runtime:
         )
         return [int(token_id) for token_id in token_ids]
 
+    def tokenize_messages_batch(
+        self,
+        message_batches: Sequence[Sequence[ChatMessage]],
+    ) -> list[list[int]]:
+        if not message_batches:
+            return []
+        tokenizer = self._get_tokenizer()
+        conversations = [
+            [message.model_dump(mode="json") for message in messages]
+            for messages in message_batches
+        ]
+        token_batches = tokenizer.apply_chat_template(
+            conversations,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        return [
+            [int(token_id) for token_id in token_ids] for token_ids in token_batches
+        ]
+
     def generate(
         self,
         *,
@@ -139,6 +159,32 @@ class Runtime:
             input_ids=[int(token_id) for token_id in input_ids],
         )
         return self._parse_generation_payload(payload)
+
+    def generate_batch(
+        self,
+        *,
+        input_ids: Sequence[Sequence[int]],
+        sampling_params: dict[str, Any] | None = None,
+    ) -> list[Generation]:
+        requests = [[int(token_id) for token_id in ids] for ids in input_ids]
+        if not requests:
+            return []
+
+        sampling_payload = self._build_sampling_params(sampling_params)
+        payload = self._slot.rollout_manager.generate(
+            sampling_payload,
+            input_ids=requests,
+        )
+        if isinstance(payload, dict):
+            payloads = [payload]
+        else:
+            payloads = list(payload)
+        if len(payloads) != len(requests):
+            raise ValueError(
+                "batched generate payload size mismatch: "
+                f"{len(payloads)} != {len(requests)}"
+            )
+        return [self._parse_generation_payload(item) for item in payloads]
 
     def train_manager(self):
         slot = self._slot

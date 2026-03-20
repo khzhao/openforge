@@ -53,8 +53,8 @@ class GRPOAlgorithm:
         entropy: torch.Tensor | None = None,
         ref_log_probs: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        old_log_probs = curr_log_probs.detach()
-        ratio = (curr_log_probs - old_log_probs).exp()
+        base_log_probs = curr_log_probs.detach()
+        ratio = (curr_log_probs - base_log_probs).exp()
         clipped_ratio = ratio.clamp(
             min=1.0 - self.cfg.clip_range,
             max=1.0 + self.cfg.clip_range,

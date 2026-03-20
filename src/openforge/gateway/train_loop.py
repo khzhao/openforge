@@ -35,7 +35,9 @@ class TrainLoop:
         self.algorithm = create_algorithm(train_manager.cfg)
         self.world_size = train_manager.world_size
         assert (
-            self.train.global_batch_size == self.world_size * self.train.mini_batch_size
+            self.train.global_batch_size
+            % (self.world_size * self.train.mini_batch_size)
+            == 0
         )
         assert self.train.mini_batch_size % self.train.micro_batch_size == 0
         self.global_step = 0
@@ -103,18 +105,26 @@ class TrainLoop:
                 )
 
         assert len(samples) == self.train.global_batch_size
-        rank_minibatches: list[dict[str, torch.Tensor]] = []
+        rank_minibatches_per_update: list[list[dict[str, torch.Tensor]]] = []
         offset = 0
-        for _rank in range(self.world_size):
-            rank_minibatches.append(
-                self._collate(samples[offset : offset + self.train.mini_batch_size])
-            )
-            offset += self.train.mini_batch_size
+        samples_per_minibatch = self.world_size * self.train.mini_batch_size
+        while offset < len(samples):
+            rank_minibatches: list[dict[str, torch.Tensor]] = []
+            for _rank in range(self.world_size):
+                rank_minibatches.append(
+                    self._collate(samples[offset : offset + self.train.mini_batch_size])
+                )
+                offset += self.train.mini_batch_size
+            rank_minibatches_per_update.append(rank_minibatches)
+        assert (
+            len(rank_minibatches_per_update) * samples_per_minibatch
+            == self.train.global_batch_size
+        )
 
         next_global_step = self.global_step + 1
         next_policy_version = self.policy_version + 1
         self._step_and_sync(
-            rank_minibatches,
+            rank_minibatches_per_update,
             global_step=next_global_step,
             policy_version=next_policy_version,
         )
@@ -124,7 +134,7 @@ class TrainLoop:
                 Trajectory(
                     trajectory_id=trajectory.trajectory_id,
                     session_id=trajectory.session_id,
-                    parent_trajectory_id=trajectory.parent_trajectory_id,
+                    group_id=trajectory.group_id,
                     status="trained",
                     final_reward=trajectory.final_reward,
                 )
@@ -136,21 +146,14 @@ class TrainLoop:
 
     async def _list_ready_groups(self) -> list[list[Trajectory]]:
         trajectories = await self.store.list_trajectories(self.session_id)
-        parent_ids = {
-            trajectory.parent_trajectory_id
-            for trajectory in trajectories
-            if trajectory.parent_trajectory_id is not None
-        }
         groups: dict[str, list[Trajectory]] = {}
         for trajectory in trajectories:
-            if trajectory.parent_trajectory_id is not None:
-                groups.setdefault(trajectory.parent_trajectory_id, []).append(
-                    trajectory
-                )
-                continue
-            if trajectory.trajectory_id in parent_ids:
-                continue
-            groups[trajectory.trajectory_id] = [trajectory]
+            group_key = (
+                str(trajectory.group_id)
+                if trajectory.group_id is not None
+                else trajectory.trajectory_id
+            )
+            groups.setdefault(group_key, []).append(trajectory)
 
         ready_groups = [
             sorted(group, key=lambda trajectory: trajectory.trajectory_id)
@@ -178,15 +181,16 @@ class TrainLoop:
 
     def _step_and_sync(
         self,
-        rank_minibatches: list[dict[str, torch.Tensor]],
+        rank_minibatches_per_update: list[list[dict[str, torch.Tensor]]],
         *,
         global_step: int,
         policy_version: int,
     ) -> None:
-        self.train_manager.step(
-            rank_minibatches,
-            global_step=global_step,
-        )
+        for rank_minibatches in rank_minibatches_per_update:
+            self.train_manager.step(
+                rank_minibatches,
+                global_step=global_step,
+            )
         self.train_manager.sync_rollout_weights(
             policy_version=policy_version,
             mode="distributed",

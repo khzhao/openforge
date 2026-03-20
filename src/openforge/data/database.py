@@ -12,6 +12,8 @@ from .types import Session, Trajectory, TrajectoryStatus, Turn
 
 __all__ = ["SQLiteOpenForgeStore"]
 
+SQLITE_MAX_VARIABLES = 900
+
 
 class SQLiteOpenForgeStore(OpenForgeStore):
     """SQLite repository for Session, Trajectory, and Turn records."""
@@ -63,34 +65,39 @@ class SQLiteOpenForgeStore(OpenForgeStore):
             model_name=str(row["model_name"]),
         )
 
-    async def create_trajectory(self, trajectory: Trajectory) -> None:
+    async def create_trajectories(self, trajectories: list[Trajectory]) -> None:
+        if not trajectories:
+            return
         async with self._lock:
             with self._conn:
-                self._conn.execute(
+                self._conn.executemany(
                     """
                     INSERT INTO trajectories (
                         trajectory_id,
                         session_id,
-                        parent_trajectory_id,
+                        group_id,
                         status,
                         final_reward
                     )
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (
-                        trajectory.trajectory_id,
-                        trajectory.session_id,
-                        trajectory.parent_trajectory_id,
-                        trajectory.status,
-                        trajectory.final_reward,
-                    ),
+                    [
+                        (
+                            trajectory.trajectory_id,
+                            trajectory.session_id,
+                            trajectory.group_id,
+                            trajectory.status,
+                            trajectory.final_reward,
+                        )
+                        for trajectory in trajectories
+                    ],
                 )
 
     async def get_trajectory(self, trajectory_id: str) -> Trajectory | None:
         async with self._lock:
             row = self._conn.execute(
                 """
-                SELECT trajectory_id, session_id, parent_trajectory_id, status, final_reward
+                SELECT trajectory_id, session_id, group_id, status, final_reward
                 FROM trajectories
                 WHERE trajectory_id = ?
                 """,
@@ -100,6 +107,25 @@ class SQLiteOpenForgeStore(OpenForgeStore):
             return None
         return self._deserialize_trajectory(row)
 
+    async def get_trajectories(self, trajectory_ids: list[str]) -> list[Trajectory]:
+        if not trajectory_ids:
+            return []
+        rows: list[sqlite3.Row] = []
+        async with self._lock:
+            for chunk in self._iter_chunks(trajectory_ids):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(
+                    self._conn.execute(
+                        f"""
+                        SELECT trajectory_id, session_id, group_id, status, final_reward
+                        FROM trajectories
+                        WHERE trajectory_id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+        return [self._deserialize_trajectory(row) for row in rows]
+
     async def list_trajectories(
         self,
         session_id: str,
@@ -107,7 +133,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
         status: TrajectoryStatus | None = None,
     ) -> list[Trajectory]:
         query = """
-            SELECT trajectory_id, session_id, parent_trajectory_id, status, final_reward
+            SELECT trajectory_id, session_id, group_id, status, final_reward
             FROM trajectories
             WHERE session_id = ?
         """
@@ -129,14 +155,14 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     UPDATE trajectories
                     SET
                         session_id = ?,
-                        parent_trajectory_id = ?,
+                        group_id = ?,
                         status = ?,
                         final_reward = ?
                     WHERE trajectory_id = ?
                     """,
                     (
                         trajectory.session_id,
-                        trajectory.parent_trajectory_id,
+                        trajectory.group_id,
                         trajectory.status,
                         trajectory.final_reward,
                         trajectory.trajectory_id,
@@ -150,14 +176,14 @@ class SQLiteOpenForgeStore(OpenForgeStore):
         model_name: str | None = None,
     ) -> list[Trajectory]:
         query = """
-            SELECT
-                t.trajectory_id,
-                t.session_id,
-                t.parent_trajectory_id,
-                t.status,
-                t.final_reward
-            FROM trajectories AS t
-            JOIN sessions AS s
+                SELECT
+                    t.trajectory_id,
+                    t.session_id,
+                    t.group_id,
+                    t.status,
+                    t.final_reward
+                FROM trajectories AS t
+                JOIN sessions AS s
                 ON s.session_id = t.session_id
             WHERE t.status = 'completed'
         """
@@ -174,10 +200,12 @@ class SQLiteOpenForgeStore(OpenForgeStore):
             rows = self._conn.execute(query, params).fetchall()
         return [self._deserialize_trajectory(row) for row in rows]
 
-    async def append_turn(self, turn: Turn) -> None:
+    async def append_turns(self, turns: list[Turn]) -> None:
+        if not turns:
+            return
         async with self._lock:
             with self._conn:
-                self._conn.execute(
+                self._conn.executemany(
                     """
                     INSERT INTO turns (
                         trajectory_id,
@@ -190,15 +218,18 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (
-                        turn.trajectory_id,
-                        turn.turn_index,
-                        turn.rollout_model_version,
-                        turn.prompt_length,
-                        json.dumps(turn.token_ids),
-                        json.dumps(turn.position_ids),
-                        json.dumps(turn.loss_mask),
-                    ),
+                    [
+                        (
+                            turn.trajectory_id,
+                            turn.turn_index,
+                            turn.rollout_model_version,
+                            turn.prompt_length,
+                            json.dumps(turn.token_ids),
+                            json.dumps(turn.position_ids),
+                            json.dumps(turn.loss_mask),
+                        )
+                        for turn in turns
+                    ],
                 )
 
     async def list_turns(self, trajectory_id: str) -> list[Turn]:
@@ -240,13 +271,26 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                 CREATE TABLE IF NOT EXISTS trajectories (
                     trajectory_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
-                    parent_trajectory_id TEXT,
+                    group_id TEXT,
                     status TEXT NOT NULL,
                     final_reward REAL,
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 )
                 """
             )
+            trajectory_columns = {
+                str(row["name"])
+                for row in self._conn.execute(
+                    "PRAGMA table_info(trajectories)"
+                ).fetchall()
+            }
+            if "group_id" not in trajectory_columns:
+                self._conn.execute(
+                    """
+                    ALTER TABLE trajectories
+                    ADD COLUMN group_id TEXT
+                    """
+                )
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS turns (
@@ -280,7 +324,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
         return Trajectory(
             trajectory_id=str(row["trajectory_id"]),
             session_id=str(row["session_id"]),
-            parent_trajectory_id=row["parent_trajectory_id"],
+            group_id=row["group_id"],
             status=str(row["status"]),
             final_reward=row["final_reward"],
         )
@@ -296,3 +340,10 @@ class SQLiteOpenForgeStore(OpenForgeStore):
             position_ids=list(json.loads(str(row["position_ids_json"]))),
             loss_mask=list(json.loads(str(row["loss_mask_json"]))),
         )
+
+    @staticmethod
+    def _iter_chunks(values: list[str]) -> list[list[str]]:
+        return [
+            values[index : index + SQLITE_MAX_VARIABLES]
+            for index in range(0, len(values), SQLITE_MAX_VARIABLES)
+        ]

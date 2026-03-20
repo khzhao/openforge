@@ -20,6 +20,12 @@ from openforge.gateway.service import (
     TrajectoryNotFoundError,
 )
 from openforge.gateway.types import (
+    DiscardTrajectoryRequest,
+    EndTrajectoriesRequest,
+    EndTrajectoriesResponse,
+    ErrorTrajectoriesRequest,
+    ExportCheckpointRequest,
+    ExportCheckpointResponse,
     EndSessionRequest,
     EndSessionResponse,
     EndTrajectoryRequest,
@@ -30,6 +36,8 @@ from openforge.gateway.types import (
     ModelsResponse,
     StartSessionRequest,
     StartSessionResponse,
+    StartTrajectoryGroupsRequest,
+    StartTrajectoryGroupsResponse,
     StartTrajectoryRequest,
     StartTrajectoryResponse,
 )
@@ -96,7 +104,7 @@ def create_app(
         try:
             return await service.start_trajectory(
                 session_id=payload.session_id,
-                parent_trajectory_id=payload.parent_trajectory_id,
+                group_id=payload.group_id,
             )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -107,12 +115,30 @@ def create_app(
         except TrajectoryNotActiveError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/start_trajectory_groups", response_model=StartTrajectoryGroupsResponse)
+    async def start_trajectory_groups(
+        payload: StartTrajectoryGroupsRequest,
+    ) -> StartTrajectoryGroupsResponse:
+        try:
+            return await service.start_trajectory_groups(
+                session_id=payload.session_id,
+                counts=payload.counts,
+                group_ids=payload.group_ids,
+            )
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SessionClosedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/generate", response_model=GenerateResponse)
     async def generate(payload: GenerateRequest) -> GenerateResponse:
         try:
             return await service.generate(
                 session_id=payload.session_id,
                 trajectory_id=payload.trajectory_id,
+                group_id=payload.group_id,
                 messages=payload.messages,
                 sampling_params=payload.sampling_params,
             )
@@ -146,6 +172,27 @@ def create_app(
         except TrajectoryNotActiveError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/end_trajectories", response_model=EndTrajectoriesResponse)
+    async def end_trajectories(
+        payload: EndTrajectoriesRequest,
+    ) -> EndTrajectoriesResponse:
+        try:
+            return await service.end_trajectories(
+                session_id=payload.session_id,
+                trajectory_ids=payload.trajectory_ids,
+                final_rewards=payload.final_rewards,
+            )
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SessionClosedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TrajectoryNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TrajectoryNotActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/error_trajectory", response_model=EndTrajectoryResponse)
     async def error_trajectory(
         payload: ErrorTrajectoryRequest,
@@ -164,10 +211,59 @@ def create_app(
         except TrajectoryNotActiveError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/error_trajectories", response_model=EndTrajectoriesResponse)
+    async def error_trajectories(
+        payload: ErrorTrajectoriesRequest,
+    ) -> EndTrajectoriesResponse:
+        try:
+            return await service.error_trajectories(
+                session_id=payload.session_id,
+                trajectory_ids=payload.trajectory_ids,
+            )
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SessionClosedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except TrajectoryNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TrajectoryNotActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/discard_trajectory", response_model=EndTrajectoryResponse)
+    async def discard_trajectory(
+        payload: DiscardTrajectoryRequest,
+    ) -> EndTrajectoryResponse:
+        try:
+            return await service.discard_trajectory(
+                session_id=payload.session_id,
+                trajectory_id=payload.trajectory_id,
+            )
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SessionClosedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except TrajectoryNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TrajectoryNotActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/end_session", response_model=EndSessionResponse)
     async def end_session(payload: EndSessionRequest) -> EndSessionResponse:
         try:
             return await service.end_session(session_id=payload.session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SessionClosedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ActiveTrajectoriesRemainError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/export_checkpoint", response_model=ExportCheckpointResponse)
+    async def export_checkpoint(
+        payload: ExportCheckpointRequest,
+    ) -> ExportCheckpointResponse:
+        try:
+            return await service.export_checkpoint(session_id=payload.session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except SessionClosedError as exc:

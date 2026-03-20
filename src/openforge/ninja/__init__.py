@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import time
 from functools import wraps
 from multiprocessing.process import BaseProcess
 from threading import Lock
 from typing import Any, Callable
+from uuid import uuid4
 
 import httpx
 
 from openforge.configs.models import GatewayServerConfig
 from openforge.gateway.types import RuntimeConfig
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 __all__ = [
     "Client",
@@ -96,6 +101,8 @@ class Gateway:
 class Session:
     """Own one active gateway session."""
 
+    REQUEST_TIMEOUT_SECONDS = 300.0
+
     def __init__(self, runtime_config: RuntimeConfig) -> None:
         self.runtime_config = runtime_config
         self._http: httpx.Client | None = None
@@ -111,6 +118,111 @@ class Session:
         assert self._http is not None, "no active session"
         return self._http
 
+    def client(
+        self,
+        *,
+        group_id: str | None = None,
+    ) -> Client:
+        return Client(
+            base_url=str(self.http.base_url),
+            timeout=self.REQUEST_TIMEOUT_SECONDS,
+            session_id=self.session_id,
+            trajectory_id=f"traj_{uuid4().hex}",
+            group_id=group_id,
+        )
+
+    def trajectory_groups(
+        self,
+        *,
+        counts: list[int],
+        group_ids: list[str | None],
+    ) -> list[list[Client]]:
+        if len(counts) != len(group_ids):
+            raise ValueError("counts must align with group_ids")
+        if not counts:
+            return []
+        if any(count <= 0 for count in counts):
+            raise ValueError("count must be >= 1")
+        response = self.http.post(
+            "/start_trajectory_groups",
+            json={
+                "session_id": self.session_id,
+                "counts": counts,
+                "group_ids": group_ids,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        assert isinstance(payload, dict)
+        trajectory_id_groups = payload["trajectory_ids"]
+        assert isinstance(trajectory_id_groups, list)
+        client_groups: list[list[Client]] = []
+        for trajectory_ids, group_id in zip(
+            trajectory_id_groups,
+            group_ids,
+            strict=True,
+        ):
+            assert isinstance(trajectory_ids, list)
+            client_groups.append(
+                [
+                    Client(
+                        base_url=str(self.http.base_url),
+                        timeout=self.REQUEST_TIMEOUT_SECONDS,
+                        session_id=self.session_id,
+                        trajectory_id=str(trajectory_id),
+                        group_id=group_id,
+                    )
+                    for trajectory_id in trajectory_ids
+                ]
+            )
+        return client_groups
+
+    def end_clients(
+        self,
+        clients: list["Client"],
+        *,
+        rewards: list[float],
+    ) -> None:
+        if len(clients) != len(rewards):
+            raise ValueError("rewards must align with clients")
+        if not clients:
+            return
+        response = self.http.post(
+            "/end_trajectories",
+            json={
+                "session_id": self.session_id,
+                "trajectory_ids": [client.trajectory_id for client in clients],
+                "final_rewards": rewards,
+            },
+        )
+        response.raise_for_status()
+        for client in clients:
+            client.close()
+
+    def fail_clients(self, clients: list["Client"]) -> None:
+        if not clients:
+            return
+        response = self.http.post(
+            "/error_trajectories",
+            json={
+                "session_id": self.session_id,
+                "trajectory_ids": [client.trajectory_id for client in clients],
+            },
+        )
+        response.raise_for_status()
+        for client in clients:
+            client.close()
+
+    def export_checkpoint(self) -> dict[str, Any]:
+        response = self.http.post(
+            "/export_checkpoint",
+            json={"session_id": self.session_id},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        assert isinstance(payload, dict)
+        return payload
+
     def start(self) -> Session:
         return self
 
@@ -121,7 +233,10 @@ class Session:
         assert gateway is not None, "no active gateway"
         assert session is None, "a session is already active"
 
-        self._http = httpx.Client(base_url=gateway.base_url, timeout=300.0)
+        self._http = httpx.Client(
+            base_url=gateway.base_url,
+            timeout=self.REQUEST_TIMEOUT_SECONDS,
+        )
         try:
             response = self._http.post(
                 "/start_session",
@@ -157,15 +272,30 @@ class Session:
 class Client:
     """Own one trajectory underneath the active session."""
 
-    def __init__(self, *, http: httpx.Client, session_id: str) -> None:
-        self._http = http
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        timeout: float,
+        session_id: str,
+        trajectory_id: str,
+        group_id: str | None = None,
+    ) -> None:
+        self._base_url = base_url
+        self._timeout = timeout
+        self._http: httpx.Client | None = None
         self._session_id = session_id
-        response = self._http.post(
-            "/start_trajectory",
-            json={"session_id": self._session_id},
-        )
-        response.raise_for_status()
-        self._trajectory_id = str(response.json()["trajectory_id"])
+        self._trajectory_id = trajectory_id
+        self._group_id = group_id
+        self._used = False
+
+    @property
+    def trajectory_id(self) -> str:
+        return self._trajectory_id
+
+    @property
+    def group_id(self) -> str | None:
+        return self._group_id
 
     def generate(
         self,
@@ -173,11 +303,13 @@ class Client:
         *,
         sampling_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        response = self._http.post(
+        self._used = True
+        response = self._ensure_http().post(
             "/generate",
             json={
                 "session_id": self._session_id,
                 "trajectory_id": self._trajectory_id,
+                "group_id": self._group_id,
                 "messages": messages,
                 "sampling_params": {} if sampling_params is None else sampling_params,
             },
@@ -186,25 +318,77 @@ class Client:
         return response.json()
 
     def finish(self, reward: float) -> None:
-        response = self._http.post(
-            "/end_trajectory",
-            json={
-                "session_id": self._session_id,
-                "trajectory_id": self._trajectory_id,
-                "final_reward": reward,
-            },
-        )
-        response.raise_for_status()
+        try:
+            if not self._used:
+                self._start()
+            response = self._ensure_http().post(
+                "/end_trajectory",
+                json={
+                    "session_id": self._session_id,
+                    "trajectory_id": self._trajectory_id,
+                    "final_reward": reward,
+                },
+            )
+            response.raise_for_status()
+        finally:
+            self.close()
 
     def fail(self) -> None:
-        response = self._http.post(
-            "/error_trajectory",
+        try:
+            if not self._used:
+                self._start()
+            response = self._ensure_http().post(
+                "/error_trajectory",
+                json={
+                    "session_id": self._session_id,
+                    "trajectory_id": self._trajectory_id,
+                },
+            )
+            response.raise_for_status()
+        finally:
+            self.close()
+
+    def discard(self) -> None:
+        try:
+            if not self._used:
+                self._start()
+            response = self._ensure_http().post(
+                "/discard_trajectory",
+                json={
+                    "session_id": self._session_id,
+                    "trajectory_id": self._trajectory_id,
+                },
+            )
+            response.raise_for_status()
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._http is not None:
+            self._http.close()
+            self._http = None
+
+    def _start(self) -> None:
+        response = self._ensure_http().post(
+            "/start_trajectory",
             json={
                 "session_id": self._session_id,
-                "trajectory_id": self._trajectory_id,
+                "group_id": self._group_id,
             },
         )
         response.raise_for_status()
+        payload = response.json()
+        assert isinstance(payload, dict)
+        self._trajectory_id = str(payload["trajectory_id"])
+        self._used = True
+
+    def _ensure_http(self) -> httpx.Client:
+        if self._http is None:
+            self._http = httpx.Client(
+                base_url=self._base_url,
+                timeout=self._timeout,
+            )
+        return self._http
 
 
 def register(
@@ -222,7 +406,7 @@ def register(
             assert gateway is not None, "no active gateway"
             assert session is not None, "no active session"
 
-            client = Client(http=session.http, session_id=session.session_id)
+            client = session.client()
             try:
                 reward = float(func(client, *args, **kwargs))
             except Exception:
@@ -249,7 +433,8 @@ def _run_gateway_server(gateway_config: GatewayServerConfig) -> None:
         app,
         host=gateway_config.gateway.host,
         port=gateway_config.gateway.port,
-        log_level="info",
+        access_log=False,
+        log_level="warning",
     )
 
 

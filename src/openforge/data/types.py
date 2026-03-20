@@ -13,7 +13,7 @@ __all__ = [
 ]
 
 
-TrajectoryStatus = Literal["active", "completed", "trained", "failed"]
+TrajectoryStatus = Literal["active", "completed", "trained", "failed", "discarded"]
 
 
 @dataclass(slots=True)
@@ -30,15 +30,13 @@ class Trajectory:
 
     trajectory_id: str
     session_id: str
-    parent_trajectory_id: str | None
+    group_id: str | None
     status: TrajectoryStatus
     final_reward: float | None = None
 
     def __post_init__(self) -> None:
         if self.final_reward is not None and self.status == "active":
-            raise ValueError(
-                "final_reward may only be set on completed, trained, or failed trajectories"
-            )
+            raise ValueError("final_reward may only be set on terminal trajectories")
 
     @property
     def is_active(self) -> bool:
@@ -46,7 +44,7 @@ class Trajectory:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in {"completed", "trained", "failed"}
+        return self.status in {"completed", "trained", "failed", "discarded"}
 
 
 @dataclass(slots=True)

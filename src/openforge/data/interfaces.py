@@ -18,11 +18,17 @@ class OpenForgeStore(Protocol):
     async def get_session(self, session_id: str) -> Session | None:
         """Load one session by id."""
 
-    async def create_trajectory(self, trajectory: Trajectory) -> None:
-        """Insert one trajectory."""
+    async def create_trajectories(self, trajectories: list[Trajectory]) -> None:
+        """Insert multiple trajectories."""
 
     async def get_trajectory(self, trajectory_id: str) -> Trajectory | None:
         """Load one trajectory by id."""
+
+    async def get_trajectories(
+        self,
+        trajectory_ids: list[str],
+    ) -> list[Trajectory]:
+        """Load multiple trajectories by id."""
 
     async def list_trajectories(
         self,
@@ -43,8 +49,8 @@ class OpenForgeStore(Protocol):
     ) -> list[Trajectory]:
         """List completed trajectories ready for training consumption."""
 
-    async def append_turn(self, turn: Turn) -> None:
-        """Insert one turn."""
+    async def append_turns(self, turns: list[Turn]) -> None:
+        """Insert multiple turns."""
 
     async def list_turns(self, trajectory_id: str) -> list[Turn]:
         """List turns for one trajectory in turn order."""

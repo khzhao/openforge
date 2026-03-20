@@ -14,7 +14,13 @@ from openforge.configs.train import TrainConfig
 __all__ = [
     "ChatMessage",
     "ChatChoice",
+    "DiscardTrajectoryRequest",
+    "EndTrajectoriesRequest",
+    "EndTrajectoriesResponse",
     "CompletionUsage",
+    "ErrorTrajectoriesRequest",
+    "ExportCheckpointRequest",
+    "ExportCheckpointResponse",
     "EndSessionRequest",
     "EndSessionResponse",
     "EndTrajectoryRequest",
@@ -27,6 +33,8 @@ __all__ = [
     "RuntimeConfig",
     "StartSessionRequest",
     "StartSessionResponse",
+    "StartTrajectoryGroupsRequest",
+    "StartTrajectoryGroupsResponse",
     "StartTrajectoryRequest",
     "StartTrajectoryResponse",
 ]
@@ -69,10 +77,10 @@ class StartSessionResponse(BaseModel):
 
 
 class StartTrajectoryRequest(BaseModel):
-    """Request payload for starting a trajectory, optionally from a parent."""
+    """Request payload for starting a trajectory, optionally inside a group."""
 
     session_id: str
-    parent_trajectory_id: str | None = None
+    group_id: str | None = None
 
 
 class StartTrajectoryResponse(BaseModel):
@@ -80,7 +88,22 @@ class StartTrajectoryResponse(BaseModel):
 
     session_id: str
     trajectory_id: str
-    parent_trajectory_id: str | None
+    group_id: str | None
+
+
+class StartTrajectoryGroupsRequest(BaseModel):
+    """Request payload for starting trajectories across multiple groups."""
+
+    session_id: str
+    counts: list[int]
+    group_ids: list[str | None]
+
+
+class StartTrajectoryGroupsResponse(BaseModel):
+    """Response payload for starting trajectories across multiple groups."""
+
+    session_id: str
+    trajectory_ids: list[list[str]]
 
 
 class ChatMessage(BaseModel):
@@ -95,6 +118,7 @@ class GenerateRequest(BaseModel):
 
     session_id: str
     trajectory_id: str
+    group_id: str | None = None
     messages: list[ChatMessage]
     sampling_params: dict[str, Any] = Field(default_factory=dict)
 
@@ -136,8 +160,30 @@ class EndTrajectoryRequest(BaseModel):
     final_reward: float
 
 
+class EndTrajectoriesRequest(BaseModel):
+    """Request payload for ending multiple trajectories with rewards."""
+
+    session_id: str
+    trajectory_ids: list[str]
+    final_rewards: list[float]
+
+
 class ErrorTrajectoryRequest(BaseModel):
     """Request payload for marking a trajectory as errored."""
+
+    session_id: str
+    trajectory_id: str
+
+
+class ErrorTrajectoriesRequest(BaseModel):
+    """Request payload for marking multiple trajectories as errored."""
+
+    session_id: str
+    trajectory_ids: list[str]
+
+
+class DiscardTrajectoryRequest(BaseModel):
+    """Request payload for discarding a trajectory without counting it as failed."""
 
     session_id: str
     trajectory_id: str
@@ -149,6 +195,28 @@ class EndTrajectoryResponse(BaseModel):
     session_id: str
     trajectory_id: str
     status: str
+
+
+class EndTrajectoriesResponse(BaseModel):
+    """Response payload for multiple ended trajectories."""
+
+    session_id: str
+    trajectory_ids: list[str]
+    status: str
+
+
+class ExportCheckpointRequest(BaseModel):
+    """Request payload for exporting the current train checkpoint."""
+
+    session_id: str
+
+
+class ExportCheckpointResponse(BaseModel):
+    """Response payload for one exported checkpoint."""
+
+    session_id: str
+    policy_version: int
+    checkpoint_path: str
 
 
 class EndSessionRequest(BaseModel):

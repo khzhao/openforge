@@ -19,6 +19,7 @@ class SGLangRequestConfig(OpenForgeBaseModel):
     temperature: float
     top_p: float
     top_k: int
+    repetition_penalty: float = 1.0
     max_new_tokens: int
     stop: list[str]
     stop_token_ids: list[int]
