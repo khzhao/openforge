@@ -367,10 +367,17 @@ def main() -> int:
         )
         record_response("generate", generated)
         print("GENERATE", json.dumps(generated, sort_keys=True), flush=True)
-        assert generated["session_id"] == session_id
-        assert generated["trajectory_id"] == trajectory_id
-        assert isinstance(generated["token_ids"], list) and generated["token_ids"]
-        assert isinstance(generated["rollout_model_version"], str)
+        assert str(generated["id"]).startswith("chatcmpl_")
+        assert generated["object"] == "chat.completion"
+        assert isinstance(generated["created"], int)
+        assert isinstance(generated["model"], str) and generated["model"]
+        assert generated["choices"]
+        assert generated["choices"][0]["message"]["role"] == "assistant"
+        assert isinstance(generated["choices"][0]["message"]["content"], str)
+        assert generated["metadata"]["session_id"] == session_id
+        assert generated["metadata"]["trajectory_id"] == trajectory_id
+        assert isinstance(generated["metadata"]["token_ids"], list)
+        assert generated["metadata"]["rollout_model_version"]
 
         ended_trajectory = request_json(
             "POST",
@@ -383,7 +390,9 @@ def main() -> int:
             timeout=60.0,
         )
         record_response("end_trajectory", ended_trajectory)
-        print("END_TRAJECTORY", json.dumps(ended_trajectory, sort_keys=True), flush=True)
+        print(
+            "END_TRAJECTORY", json.dumps(ended_trajectory, sort_keys=True), flush=True
+        )
 
         ended_session = request_json(
             "POST",

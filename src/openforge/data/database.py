@@ -184,7 +184,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                         turn_index,
                         rollout_model_version,
                         prompt_length,
-                        input_ids_json,
+                        token_ids_json,
                         position_ids_json,
                         loss_mask_json
                     )
@@ -195,7 +195,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                         turn.turn_index,
                         turn.rollout_model_version,
                         turn.prompt_length,
-                        json.dumps(turn.input_ids),
+                        json.dumps(turn.token_ids),
                         json.dumps(turn.position_ids),
                         json.dumps(turn.loss_mask),
                     ),
@@ -210,7 +210,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     turn_index,
                     rollout_model_version,
                     prompt_length,
-                    input_ids_json,
+                    token_ids_json,
                     position_ids_json,
                     loss_mask_json
                 FROM turns
@@ -254,7 +254,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     turn_index INTEGER NOT NULL,
                     rollout_model_version TEXT NOT NULL,
                     prompt_length INTEGER NOT NULL,
-                    input_ids_json TEXT NOT NULL,
+                    token_ids_json TEXT NOT NULL,
                     position_ids_json TEXT NOT NULL,
                     loss_mask_json TEXT NOT NULL,
                     PRIMARY KEY (trajectory_id, turn_index),
@@ -292,7 +292,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
             turn_index=int(row["turn_index"]),
             rollout_model_version=str(row["rollout_model_version"]),
             prompt_length=int(row["prompt_length"]),
-            input_ids=list(json.loads(str(row["input_ids_json"]))),
+            token_ids=list(json.loads(str(row["token_ids_json"]))),
             position_ids=list(json.loads(str(row["position_ids_json"]))),
             loss_mask=list(json.loads(str(row["loss_mask_json"]))),
         )

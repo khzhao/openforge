@@ -201,11 +201,11 @@ class TrainLoop:
         assert trajectory.final_reward is not None
         samples: list[dict[str, torch.Tensor]] = []
         for turn in turns:
-            length = len(turn.input_ids)
+            length = len(turn.token_ids)
             samples.append(
                 {
                     "tokens": torch.tensor(
-                        turn.input_ids,
+                        turn.token_ids,
                         dtype=torch.long,
                     ),
                     "position_ids": torch.tensor(

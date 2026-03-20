@@ -1,12 +1,18 @@
 # Copyright 2026 openforge
+# ruff: noqa: D103, E402
 
 from __future__ import annotations
 
 import asyncio
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
+from unittest.mock import patch
 
-import pytest
+from _script_test_utils import expect_raises, install_test_stubs, run_tests
+
+install_test_stubs()
 
 import openforge.gateway.service as gateway_service
 from openforge.data import SQLiteOpenForgeStore
@@ -25,7 +31,7 @@ from openforge.gateway.service import (
     TrajectoryNotActiveError,
     TrajectoryNotFoundError,
 )
-from openforge.gateway.types import StartSessionRequest
+from openforge.gateway.types import ChatMessage, StartSessionRequest
 
 
 class _FakeTrainLoop:
@@ -51,10 +57,11 @@ class _FakeTrainLoop:
         return False
 
 
-@pytest.fixture(autouse=True)
-def _patch_train_loop(monkeypatch):
+@contextmanager
+def _patched_train_loop() -> Iterator[None]:
     _FakeTrainLoop.instances.clear()
-    monkeypatch.setattr(gateway_service, "TrainLoop", _FakeTrainLoop)
+    with patch.object(gateway_service, "TrainLoop", _FakeTrainLoop):
+        yield
 
 
 def _start_session_kwargs(model_name: str = "model-a") -> dict[str, object]:
@@ -178,20 +185,21 @@ class _FakeRuntime:
 
     def tokenize_messages(
         self,
-        messages: list[dict[str, str]],
+        messages: list[ChatMessage],
     ) -> list[int]:
-        token_count = sum(len(message["content"].split()) for message in messages)
+        token_count = sum(len(message.content.split()) for message in messages)
         return list(range(1, token_count + 2))
 
     def generate(
         self,
         *,
-        prompt_token_ids: list[int],
+        input_ids: list[int],
         sampling_params: dict[str, object] | None = None,
     ) -> Generation:
         self.last_sampling_params = sampling_params
-        prompt_tail = int(prompt_token_ids[-1]) if prompt_token_ids else 0
+        prompt_tail = int(input_ids[-1]) if input_ids else 0
         return Generation(
+            text=f"reply-{prompt_tail}",
             token_ids=[100 + prompt_tail, 200 + prompt_tail],
             rollout_model_version="v5",
         )
@@ -207,14 +215,12 @@ class _FakeRuntime:
 class _FailingTokenizeRuntime(_FakeRuntime):
     def tokenize_messages(
         self,
-        messages: list[dict[str, str]],
+        messages: list[ChatMessage],
     ) -> list[int]:
         raise RuntimeError("template boom")
 
 
 def test_gateway_service_start_generate_fork_and_end() -> None:
-    """Exercise the main service lifecycle across session, trajectory, and turn writes."""
-
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
@@ -230,13 +236,32 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
             generated = await service.generate(
                 session_id=session.session_id,
                 trajectory_id=root.trajectory_id,
-                messages=[{"role": "user", "content": "hello world"}],
+                messages=[ChatMessage(role="user", content="hello world")],
                 sampling_params={"temperature": 0.7, "max_new_tokens": 32},
             )
-            assert generated.session_id == session.session_id
-            assert generated.trajectory_id == root.trajectory_id
-            assert generated.token_ids == [103, 203]
-            assert generated.rollout_model_version == "v5"
+            payload = generated.model_dump(mode="json")
+            assert payload["id"] == f"chatcmpl_{root.trajectory_id}_0"
+            assert payload["object"] == "chat.completion"
+            assert payload["model"] == "model-a"
+            assert payload["choices"] == [
+                {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "reply-3"},
+                    "logprobs": None,
+                }
+            ]
+            assert payload["usage"] == {
+                "completion_tokens": 2,
+                "prompt_tokens": 3,
+                "total_tokens": 5,
+            }
+            assert payload["metadata"] == {
+                "session_id": session.session_id,
+                "trajectory_id": root.trajectory_id,
+                "token_ids": [103, 203],
+                "rollout_model_version": "v5",
+            }
             assert runtime.last_sampling_params == {
                 "temperature": 0.7,
                 "max_new_tokens": 32,
@@ -249,14 +274,16 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
             child_turns = await store.list_turns(child.trajectory_id)
             assert len(child_turns) == 1
             assert child_turns[0].turn_index == 0
-            assert child_turns[0].input_ids == [1, 2, 3, 103, 203]
+            assert child_turns[0].token_ids == [1, 2, 3, 103, 203]
 
             child_generated = await service.generate(
                 session_id=session.session_id,
                 trajectory_id=child.trajectory_id,
-                messages=[{"role": "user", "content": "continue child"}],
+                messages=[ChatMessage(role="user", content="continue child")],
             )
-            assert child_generated.trajectory_id == child.trajectory_id
+            child_payload = child_generated.model_dump(mode="json")
+            assert child_payload["id"] == f"chatcmpl_{child.trajectory_id}_1"
+            assert child_payload["choices"][0]["message"]["role"] == "assistant"
 
             await service.end_trajectory(
                 session_id=session.session_id,
@@ -286,12 +313,11 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
             )
             await store.close()
 
-    asyncio.run(run())
+    with _patched_train_loop():
+        asyncio.run(run())
 
 
 def test_gateway_service_list_models_and_start_session_tracks_active_model() -> None:
-    """Verify model listing and active-model tracking through session start."""
-
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         runtime = _FakeRuntime()
@@ -314,12 +340,11 @@ def test_gateway_service_list_models_and_start_session_tracks_active_model() -> 
 
         await store.close()
 
-    asyncio.run(run())
+    with _patched_train_loop():
+        asyncio.run(run())
 
 
 def test_gateway_service_start_session_rejects_second_active_session() -> None:
-    """Reject a second start_session call while another session is active."""
-
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(
@@ -327,27 +352,26 @@ def test_gateway_service_start_session_rejects_second_active_session() -> None:
             runtime=_FakeRuntime(("model-a", "model-b")),
         )
 
-        with pytest.raises(UnsupportedModelError):
+        with expect_raises(UnsupportedModelError):
             await service.start_session(**_start_session_kwargs("model-c"))
 
         await service.start_session(**_start_session_kwargs("model-a"))
 
-        with pytest.raises(ActiveSessionError):
+        with expect_raises(ActiveSessionError):
             await service.start_session(**_start_session_kwargs("model-a"))
 
-        with pytest.raises(ActiveSessionError):
+        with expect_raises(ActiveSessionError):
             await service.start_session(**_start_session_kwargs("model-b"))
 
         await store.close()
 
-    asyncio.run(run())
+    with _patched_train_loop():
+        asyncio.run(run())
 
 
 def test_gateway_service_releases_runtime_after_last_session_and_allows_switch() -> (
     None
 ):
-    """Release the runtime after the last session and allow a model switch."""
-
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         runtime = _FakeRuntime(("model-a", "model-b"))
@@ -358,7 +382,7 @@ def test_gateway_service_releases_runtime_after_last_session_and_allows_switch()
         await service.generate(
             session_id=session.session_id,
             trajectory_id=trajectory.trajectory_id,
-            messages=[{"role": "user", "content": "hello"}],
+            messages=[ChatMessage(role="user", content="hello")],
         )
         await service.end_trajectory(
             session_id=session.session_id,
@@ -378,72 +402,69 @@ def test_gateway_service_releases_runtime_after_last_session_and_allows_switch()
 
         await store.close()
 
-    asyncio.run(run())
+    with _patched_train_loop():
+        asyncio.run(run())
 
 
 def test_gateway_service_generate_unknown_session_raises() -> None:
-    """Raise a not-found error when generation targets an unknown session."""
-
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(store=store, runtime=_FakeRuntime())
 
-        with pytest.raises(SessionNotFoundError, match="unknown session_id"):
+        with expect_raises(SessionNotFoundError, "unknown session_id"):
             await service.generate(
                 session_id="missing",
                 trajectory_id="traj_missing",
-                messages=[{"role": "user", "content": "hello"}],
+                messages=[ChatMessage(role="user", content="hello")],
             )
 
         await store.close()
 
-    asyncio.run(run())
+    with _patched_train_loop():
+        asyncio.run(run())
 
 
 def test_gateway_service_generate_wraps_tokenization_failure() -> None:
-    """Translate tokenizer failures into the service-layer request error."""
-
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(store=store, runtime=_FailingTokenizeRuntime())
         session = await service.start_session(**_start_session_kwargs("model-a"))
         trajectory = await service.start_trajectory(session_id=session.session_id)
 
-        with pytest.raises(
+        with expect_raises(
             ValueError,
-            match="failed to tokenize messages with chat template: template boom",
+            "failed to tokenize messages with chat template: template boom",
         ):
             await service.generate(
                 session_id=session.session_id,
                 trajectory_id=trajectory.trajectory_id,
-                messages=[{"role": "user", "content": "hello"}],
+                messages=[ChatMessage(role="user", content="hello")],
             )
 
         await store.close()
 
-    asyncio.run(run())
+    with _patched_train_loop():
+        asyncio.run(run())
 
 
 def test_gateway_service_trajectory_lifecycle_errors() -> None:
-    """Raise the expected errors across invalid trajectory lifecycle operations."""
-
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(store=store, runtime=_FakeRuntime())
         session = await service.start_session(**_start_session_kwargs("model-a"))
         root = await service.start_trajectory(session_id=session.session_id)
 
-        with pytest.raises(TrajectoryNotFoundError, match="unknown trajectory_id"):
+        with expect_raises(TrajectoryNotFoundError, "unknown trajectory_id"):
             await service.generate(
                 session_id=session.session_id,
                 trajectory_id="traj_missing",
-                messages=[{"role": "user", "content": "hello"}],
+                messages=[ChatMessage(role="user", content="hello")],
             )
 
         await service.generate(
             session_id=session.session_id,
             trajectory_id=root.trajectory_id,
-            messages=[{"role": "user", "content": "hello"}],
+            messages=[ChatMessage(role="user", content="hello")],
         )
         await service.end_trajectory(
             session_id=session.session_id,
@@ -451,14 +472,14 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
             final_reward=1.0,
         )
 
-        with pytest.raises(TrajectoryNotActiveError, match="is not active"):
+        with expect_raises(TrajectoryNotActiveError, "is not active"):
             await service.generate(
                 session_id=session.session_id,
                 trajectory_id=root.trajectory_id,
-                messages=[{"role": "user", "content": "again"}],
+                messages=[ChatMessage(role="user", content="again")],
             )
 
-        with pytest.raises(TrajectoryNotActiveError, match="is not active"):
+        with expect_raises(TrajectoryNotActiveError, "is not active"):
             await service.start_trajectory(
                 session_id=session.session_id,
                 parent_trajectory_id=root.trajectory_id,
@@ -466,12 +487,11 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
 
         await store.close()
 
-    asyncio.run(run())
+    with _patched_train_loop():
+        asyncio.run(run())
 
 
 def test_gateway_service_end_session_requires_all_trajectories_completed() -> None:
-    """Require all trajectories to complete before ending the session."""
-
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(store=store, runtime=_FakeRuntime())
@@ -482,7 +502,7 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
         await service.generate(
             session_id=session.session_id,
             trajectory_id=root.trajectory_id,
-            messages=[{"role": "user", "content": "hello"}],
+            messages=[ChatMessage(role="user", content="hello")],
         )
         await service.end_trajectory(
             session_id=session.session_id,
@@ -490,9 +510,9 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
             final_reward=1.0,
         )
 
-        with pytest.raises(
+        with expect_raises(
             ActiveTrajectoriesRemainError,
-            match="all trajectories must be ended",
+            "all trajectories must be ended",
         ):
             await service.end_session(session_id=session.session_id)
 
@@ -504,18 +524,19 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
         ended = await service.end_session(session_id=session.session_id)
         assert ended.status == "completed"
 
-        with pytest.raises(SessionClosedError, match="is not active"):
+        with expect_raises(SessionClosedError, "is not active"):
             await service.start_trajectory(session_id=session.session_id)
 
         await store.close()
 
-    asyncio.run(run())
+    with _patched_train_loop():
+        asyncio.run(run())
 
 
 def test_parse_generation_payload_prefers_weight_version() -> None:
-    """Prefer the explicit weight version over token-step fallbacks."""
     generation = Runtime._parse_generation_payload(
         {
+            "text": "hello",
             "output_ids": [10, 11],
             "meta_info": {
                 "finish_reason": "stop",
@@ -523,14 +544,13 @@ def test_parse_generation_payload_prefers_weight_version() -> None:
             },
         },
     )
-
     assert generation.rollout_model_version == "default"
 
 
 def test_gateway_controller_parses_router_payload() -> None:
-    """Parse the standard router payload shape into a gateway generation."""
     generation = Runtime._parse_generation_payload(
         {
+            "text": "hello",
             "output_ids": [11, 12],
             "meta_info": {
                 "finish_reason": {"type": "stop"},
@@ -538,16 +558,16 @@ def test_gateway_controller_parses_router_payload() -> None:
             },
         },
     )
-
+    assert generation.text == "hello"
     assert generation.token_ids == [11, 12]
     assert generation.finish_reason == "stop"
     assert generation.rollout_model_version == "policy-7"
 
 
 def test_gateway_controller_parses_router_payload_with_meta_token_ids() -> None:
-    """Accept token ids from router metadata when the top-level field is absent."""
     generation = Runtime._parse_generation_payload(
         {
+            "text": "hello",
             "meta_info": {
                 "token_ids": [101, 102],
                 "finish_reason": "length",
@@ -555,17 +575,16 @@ def test_gateway_controller_parses_router_payload_with_meta_token_ids() -> None:
             },
         },
     )
-
     assert generation.token_ids == [101, 102]
     assert generation.finish_reason == "length"
     assert generation.rollout_model_version == "default"
 
 
 def test_gateway_controller_requires_output_token_ids() -> None:
-    """Reject payloads that omit both output token id field variants."""
-    with pytest.raises(ValueError, match="output_ids or token_ids"):
+    with expect_raises(ValueError, "output_ids or token_ids"):
         Runtime._parse_generation_payload(
             {
+                "text": "hello",
                 "meta_info": {
                     "finish_reason": "stop",
                     "weight_version": "default",
@@ -575,9 +594,9 @@ def test_gateway_controller_requires_output_token_ids() -> None:
 
 
 def test_gateway_controller_parses_router_payload_without_extra_fields() -> None:
-    """Parse the minimal router payload without depending on optional fields."""
     generation = Runtime._parse_generation_payload(
         {
+            "text": "hello",
             "output_ids": [11, 12],
             "meta_info": {
                 "finish_reason": "stop",
@@ -585,20 +604,44 @@ def test_gateway_controller_parses_router_payload_without_extra_fields() -> None
             },
         }
     )
-
     assert generation.token_ids == [11, 12]
     assert generation.finish_reason == "stop"
     assert generation.rollout_model_version == "default"
 
 
 def test_parse_generation_payload_requires_weight_version() -> None:
-    """Reject generate payloads that do not report a weight version."""
-    with pytest.raises(ValueError, match="weight_version"):
+    with expect_raises(ValueError, "weight_version"):
         Runtime._parse_generation_payload(
             {
+                "text": "hello",
                 "output_ids": [10],
                 "meta_info": {
                     "finish_reason": "stop",
                 },
             }
         )
+
+
+def main() -> int:
+    return run_tests(
+        [
+            test_gateway_service_start_generate_fork_and_end,
+            test_gateway_service_list_models_and_start_session_tracks_active_model,
+            test_gateway_service_start_session_rejects_second_active_session,
+            test_gateway_service_releases_runtime_after_last_session_and_allows_switch,
+            test_gateway_service_generate_unknown_session_raises,
+            test_gateway_service_generate_wraps_tokenization_failure,
+            test_gateway_service_trajectory_lifecycle_errors,
+            test_gateway_service_end_session_requires_all_trajectories_completed,
+            test_parse_generation_payload_prefers_weight_version,
+            test_gateway_controller_parses_router_payload,
+            test_gateway_controller_parses_router_payload_with_meta_token_ids,
+            test_gateway_controller_requires_output_token_ids,
+            test_gateway_controller_parses_router_payload_without_extra_fields,
+            test_parse_generation_payload_requires_weight_version,
+        ]
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

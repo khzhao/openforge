@@ -131,12 +131,12 @@ class Runtime:
     def generate(
         self,
         *,
-        prompt_token_ids: Sequence[int],
+        input_ids: Sequence[int],
         sampling_params: dict[str, Any] | None = None,
     ) -> Generation:
         payload = self._slot.rollout_manager.generate(
             self._build_sampling_params(sampling_params),
-            input_ids=[int(token_id) for token_id in prompt_token_ids],
+            input_ids=[int(token_id) for token_id in input_ids],
         )
         return self._parse_generation_payload(payload)
 

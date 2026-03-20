@@ -1,4 +1,5 @@
 # Copyright 2026 openforge
+# ruff: noqa: D103
 
 from __future__ import annotations
 
@@ -7,18 +8,20 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+from _script_test_utils import run_tests
+
 from openforge.data import Session, SQLiteOpenForgeStore, Trajectory, Turn
 
 
 def _turn(trajectory_id: str, turn_index: int) -> Turn:
-    input_ids = [10, 11, 12 + turn_index, 20 + turn_index]
+    token_ids = [10, 11, 12 + turn_index, 20 + turn_index]
     return Turn(
         trajectory_id=trajectory_id,
         turn_index=turn_index,
         rollout_model_version="version-7",
         prompt_length=3,
-        input_ids=input_ids,
-        position_ids=list(range(len(input_ids))),
+        token_ids=token_ids,
+        position_ids=list(range(len(token_ids))),
         loss_mask=[False, False, True],
     )
 
@@ -91,10 +94,14 @@ def test_sqlite_openforge_store_filters_by_status_and_model() -> None:
             session_trajectories = await store.list_trajectories("s0")
             active_trajectories = await store.list_trajectories("s0", status="active")
             completed_all = await store.list_completed_trajectories()
-            completed_model_a = await store.list_completed_trajectories(model_name="model-a")
+            completed_model_a = await store.list_completed_trajectories(
+                model_name="model-a"
+            )
             completed_limited = await store.list_completed_trajectories(limit=1)
 
-            assert [trajectory.trajectory_id for trajectory in session_trajectories] == [
+            assert [
+                trajectory.trajectory_id for trajectory in session_trajectories
+            ] == [
                 "t0",
                 "t1",
             ]
@@ -223,3 +230,20 @@ def test_sqlite_openforge_store_rejects_duplicate_turn_indices() -> None:
             await store.close()
 
     asyncio.run(run())
+
+
+def main() -> int:
+    return run_tests(
+        [
+            test_sqlite_openforge_store_session_trajectory_and_turn_lifecycle,
+            test_sqlite_openforge_store_filters_by_status_and_model,
+            test_sqlite_openforge_store_updates_trajectory,
+            test_sqlite_openforge_store_returns_none_for_missing_records,
+            test_sqlite_openforge_store_persists_reopened_data_and_orders_turns,
+            test_sqlite_openforge_store_rejects_duplicate_turn_indices,
+        ]
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

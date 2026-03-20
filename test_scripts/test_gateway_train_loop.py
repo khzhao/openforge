@@ -1,4 +1,5 @@
 # Copyright 2026 openforge
+# ruff: noqa: D103, E402
 
 from __future__ import annotations
 
@@ -6,6 +7,9 @@ import asyncio
 from types import SimpleNamespace
 
 import torch
+from _script_test_utils import install_test_stubs, run_tests
+
+install_test_stubs()
 
 from openforge.configs.algo import AlgorithmConfig
 from openforge.data import Session, SQLiteOpenForgeStore, Trajectory, Turn
@@ -77,17 +81,17 @@ def _turn(
     *,
     turn_index: int,
     prompt_length: int,
-    input_ids: list[int],
+    token_ids: list[int],
 ) -> Turn:
     return Turn(
         trajectory_id=trajectory_id,
         turn_index=turn_index,
         rollout_model_version="policy-0",
         prompt_length=prompt_length,
-        input_ids=input_ids,
-        position_ids=list(range(len(input_ids))),
+        token_ids=token_ids,
+        position_ids=list(range(len(token_ids))),
         loss_mask=[False] * max(prompt_length - 1, 0)
-        + [True] * (len(input_ids) - prompt_length),
+        + [True] * (len(token_ids) - prompt_length),
     )
 
 
@@ -97,7 +101,7 @@ async def _completed_trajectory(
     session_id: str,
     trajectory_id: str,
     reward: float,
-    input_ids: list[int],
+    token_ids: list[int],
     prompt_length: int = 2,
 ) -> None:
     await store.create_trajectory(
@@ -114,7 +118,7 @@ async def _completed_trajectory(
             trajectory_id,
             turn_index=0,
             prompt_length=prompt_length,
-            input_ids=input_ids,
+            token_ids=token_ids,
         )
     )
 
@@ -136,13 +140,13 @@ async def _completed_multiturn_trajectory(
             final_reward=reward,
         )
     )
-    for turn_index, (prompt_length, input_ids) in enumerate(turns):
+    for turn_index, (prompt_length, token_ids) in enumerate(turns):
         await store.append_turn(
             _turn(
                 trajectory_id,
                 turn_index=turn_index,
                 prompt_length=prompt_length,
-                input_ids=input_ids,
+                token_ids=token_ids,
             )
         )
 
@@ -159,7 +163,7 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
                 session_id="s0",
                 trajectory_id=f"t{index}",
                 reward=1.0 + index,
-                input_ids=[10 + index, 20 + index, 30 + index],
+                token_ids=[10 + index, 20 + index, 30 + index],
             )
 
         train_manager = _FakeTrainManager(
@@ -216,28 +220,28 @@ def test_train_loop_train_once_splits_rank_local_minibatches() -> None:
             session_id="s0",
             trajectory_id="t0",
             reward=1.0,
-            input_ids=[1, 2, 3],
+            token_ids=[1, 2, 3],
         )
         await _completed_trajectory(
             store,
             session_id="s0",
             trajectory_id="t1",
             reward=2.0,
-            input_ids=[4, 5, 6, 7],
+            token_ids=[4, 5, 6, 7],
         )
         await _completed_trajectory(
             store,
             session_id="s0",
             trajectory_id="t2",
             reward=3.0,
-            input_ids=[8, 9, 10, 11, 12],
+            token_ids=[8, 9, 10, 11, 12],
         )
         await _completed_trajectory(
             store,
             session_id="s0",
             trajectory_id="t3",
             reward=4.0,
-            input_ids=[13, 14, 15],
+            token_ids=[13, 14, 15],
         )
 
         train_manager = _FakeTrainManager(
@@ -286,7 +290,7 @@ def test_train_loop_builds_group_relative_advantages() -> None:
             session_id="s0",
             trajectory_id="child-a",
             reward=1.5,
-            input_ids=[1, 2, 3, 4],
+            token_ids=[1, 2, 3, 4],
             prompt_length=3,
         )
         await store.update_trajectory(
@@ -303,7 +307,7 @@ def test_train_loop_builds_group_relative_advantages() -> None:
             session_id="s0",
             trajectory_id="child-b",
             reward=-2.0,
-            input_ids=[5, 6, 7],
+            token_ids=[5, 6, 7],
             prompt_length=1,
         )
         await store.update_trajectory(
@@ -386,7 +390,7 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
             session_id="s0",
             trajectory_id="t1",
             reward=-2.0,
-            input_ids=[5, 6, 7],
+            token_ids=[5, 6, 7],
             prompt_length=1,
         )
         await store.update_trajectory(
@@ -465,7 +469,7 @@ def test_train_loop_counts_batch_size_in_turns() -> None:
             session_id="s0",
             trajectory_id="t1",
             reward=9.0,
-            input_ids=[7, 8, 9],
+            token_ids=[7, 8, 9],
         )
 
         train_manager = _FakeTrainManager(
@@ -518,7 +522,7 @@ def test_train_loop_waits_for_all_siblings_in_group() -> None:
             session_id="s0",
             trajectory_id="child-a",
             reward=1.0,
-            input_ids=[1, 2, 3],
+            token_ids=[1, 2, 3],
         )
         await store.update_trajectory(
             Trajectory(
@@ -542,7 +546,7 @@ def test_train_loop_waits_for_all_siblings_in_group() -> None:
                 "child-b",
                 turn_index=0,
                 prompt_length=2,
-                input_ids=[4, 5, 6],
+                token_ids=[4, 5, 6],
             )
         )
         await _completed_trajectory(
@@ -550,7 +554,7 @@ def test_train_loop_waits_for_all_siblings_in_group() -> None:
             session_id="s0",
             trajectory_id="solo",
             reward=9.0,
-            input_ids=[7, 8, 9],
+            token_ids=[7, 8, 9],
         )
 
         train_manager = _FakeTrainManager(
@@ -589,7 +593,7 @@ def test_train_loop_trains_completed_sibling_group_together() -> None:
             session_id="s0",
             trajectory_id="child-a",
             reward=1.0,
-            input_ids=[1, 2, 3],
+            token_ids=[1, 2, 3],
         )
         await store.update_trajectory(
             Trajectory(
@@ -605,7 +609,7 @@ def test_train_loop_trains_completed_sibling_group_together() -> None:
             session_id="s0",
             trajectory_id="child-b",
             reward=2.0,
-            input_ids=[4, 5, 6, 7],
+            token_ids=[4, 5, 6, 7],
         )
         await store.update_trajectory(
             Trajectory(
@@ -657,7 +661,7 @@ def test_train_loop_run_polls_until_batch_is_ready() -> None:
             session_id="s0",
             trajectory_id="t0",
             reward=1.0,
-            input_ids=[1, 2, 3],
+            token_ids=[1, 2, 3],
         )
         await store.create_trajectory(
             Trajectory(
@@ -672,7 +676,7 @@ def test_train_loop_run_polls_until_batch_is_ready() -> None:
                 "t1",
                 turn_index=0,
                 prompt_length=2,
-                input_ids=[4, 5, 6],
+                token_ids=[4, 5, 6],
             )
         )
 
@@ -717,3 +721,22 @@ def test_train_loop_run_polls_until_batch_is_ready() -> None:
         await store.close()
 
     asyncio.run(run())
+
+
+def main() -> int:
+    return run_tests(
+        [
+            test_train_loop_train_once_consumes_one_global_batch,
+            test_train_loop_train_once_splits_rank_local_minibatches,
+            test_train_loop_builds_group_relative_advantages,
+            test_train_loop_uses_all_turns_in_completed_trajectory,
+            test_train_loop_counts_batch_size_in_turns,
+            test_train_loop_waits_for_all_siblings_in_group,
+            test_train_loop_trains_completed_sibling_group_together,
+            test_train_loop_run_polls_until_batch_is_ready,
+        ]
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

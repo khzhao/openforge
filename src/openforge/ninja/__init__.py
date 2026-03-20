@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import time
 from functools import wraps
-from multiprocessing import Process
+from multiprocessing.process import BaseProcess
 from threading import Lock
 from typing import Any, Callable
 
@@ -40,7 +41,7 @@ class Gateway:
         host = gateway_config.gateway.host
         port = gateway_config.gateway.port
         self.base_url = f"http://{host}:{port}"
-        self._process: Process | None = None
+        self._process: BaseProcess | None = None
 
     def start(self) -> Gateway:
         return self
@@ -49,10 +50,12 @@ class Gateway:
         with STATE.lock:
             assert STATE.gateway is None, "a gateway is already active"
 
-        self._process = Process(
+        ctx = mp.get_context("spawn")
+        self._process = ctx.Process(
             target=_run_gateway_server,
             args=(self.config,),
-            daemon=True,
+            # The gateway may start Ray workers and SGLang subprocesses.
+            daemon=False,
         )
         self._process.start()
         self._wait_until_ready()

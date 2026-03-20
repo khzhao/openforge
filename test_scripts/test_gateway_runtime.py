@@ -1,8 +1,15 @@
 # Copyright 2026 openforge
+# ruff: noqa: D103, E402
 
 from __future__ import annotations
 
-import pytest
+from contextlib import ExitStack
+from unittest.mock import patch
+
+from _script_test_utils import expect_raises, install_test_stubs, run_tests
+
+install_test_stubs()
+
 import ray
 
 import openforge.runtime as runtime_api
@@ -11,7 +18,7 @@ import openforge.utils.ray as ray_utils
 from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
 from openforge.gateway.runtime import Runtime
-from openforge.gateway.types import RuntimeConfig, StartSessionRequest
+from openforge.gateway.types import ChatMessage, RuntimeConfig, StartSessionRequest
 
 
 def _server_config() -> GatewayServerConfig:
@@ -116,23 +123,22 @@ def _runtime_config(
     return request.runtime
 
 
-def test_runtime_start_rolls_back_state_when_slot_creation_fails(monkeypatch) -> None:
+def test_runtime_start_rolls_back_state_when_slot_creation_fails() -> None:
     runtime = Runtime(cfg=_server_config())
-    monkeypatch.setattr(
+    with patch.object(
         runtime,
         "_start_slot",
         lambda cfg: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
+    ):
+        with expect_raises(RuntimeError, match="boom"):
+            runtime.start(runtime_config=_runtime_config())
 
-    with pytest.raises(RuntimeError, match="boom"):
-        runtime.start(runtime_config=_runtime_config())
-
-    assert runtime.current_model() is None
-    assert runtime._slot is None
-    assert runtime._runtime_cfg is None
+        assert runtime.current_model() is None
+        assert runtime._slot is None
+        assert runtime._runtime_cfg is None
 
 
-def test_runtime_start_slot_shuts_down_ray_when_startup_fails(monkeypatch) -> None:
+def test_runtime_start_slot_shuts_down_ray_when_startup_fails() -> None:
     runtime = Runtime(cfg=_server_config())
     state = {"initialized": False, "shutdown_called": False, "removed_pg": False}
 
@@ -146,40 +152,61 @@ def test_runtime_start_slot_shuts_down_ray_when_startup_fails(monkeypatch) -> No
         state["shutdown_called"] = True
         state["initialized"] = False
 
-    monkeypatch.setattr(ray, "is_initialized", is_initialized)
-    monkeypatch.setattr(ray, "init", init)
-    monkeypatch.setattr(ray, "shutdown", shutdown)
-    monkeypatch.setattr(
-        ray.util,
-        "remove_placement_group",
-        lambda pg: state.__setitem__("removed_pg", True),
-    )
-
-    monkeypatch.setattr(
-        ray_utils,
-        "create_placement_groups",
-        lambda cfg: {"actor": ("pg", [0], [0]), "rollout": ("pg", [1], [1])},
-    )
-    monkeypatch.setattr(networking_utils, "get_host_ip", lambda: "127.0.0.1")
-    monkeypatch.setattr(networking_utils, "get_free_port", lambda start=20000: 20000)
-    monkeypatch.setattr(
-        runtime_api,
-        "create_train_manager",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("train boom")),
-    )
-    monkeypatch.setattr(
-        runtime_api, "create_rollout_manager", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(runtime_api, "register_rollout", lambda *args, **kwargs: None)
-
-    with pytest.raises(RuntimeError, match="train boom"):
-        runtime._start_slot(runtime._build_config(runtime_config=_runtime_config()))
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(ray, "is_initialized", is_initialized))
+        stack.enter_context(patch.object(ray, "init", init))
+        stack.enter_context(patch.object(ray, "shutdown", shutdown))
+        stack.enter_context(
+            patch.object(
+                ray.util,
+                "remove_placement_group",
+                lambda pg: state.__setitem__("removed_pg", True),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                ray_utils,
+                "create_placement_groups",
+                lambda cfg: {"actor": ("pg", [0], [0]), "rollout": ("pg", [1], [1])},
+            )
+        )
+        stack.enter_context(
+            patch.object(networking_utils, "get_host_ip", lambda: "127.0.0.1")
+        )
+        stack.enter_context(
+            patch.object(
+                networking_utils,
+                "get_free_port",
+                lambda start=20000: 20000,
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                runtime_api,
+                "create_train_manager",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    RuntimeError("train boom")
+                ),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                runtime_api,
+                "create_rollout_manager",
+                lambda *args, **kwargs: None,
+            )
+        )
+        stack.enter_context(
+            patch.object(runtime_api, "register_rollout", lambda *args, **kwargs: None)
+        )
+        with expect_raises(RuntimeError, match="train boom"):
+            runtime._start_slot(runtime._build_config(runtime_config=_runtime_config()))
 
     assert state["removed_pg"] is True
     assert state["shutdown_called"] is True
 
 
-def test_runtime_shutdown_also_shuts_down_ray(monkeypatch) -> None:
+def test_runtime_shutdown_also_shuts_down_ray() -> None:
     runtime = Runtime(cfg=_server_config())
     state = {"slot_shutdown_called": False, "ray_shutdown_called": False}
 
@@ -187,17 +214,19 @@ def test_runtime_shutdown_also_shuts_down_ray(monkeypatch) -> None:
         def shutdown(self) -> None:
             state["slot_shutdown_called"] = True
 
-    monkeypatch.setattr(ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(
-        ray,
-        "shutdown",
-        lambda: state.__setitem__("ray_shutdown_called", True),
-    )
-
     runtime._slot = FakeSlot()
     runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
 
-    runtime.shutdown()
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(ray, "is_initialized", lambda: True))
+        stack.enter_context(
+            patch.object(
+                ray,
+                "shutdown",
+                lambda: state.__setitem__("ray_shutdown_called", True),
+            )
+        )
+        runtime.shutdown()
 
     assert state["slot_shutdown_called"] is True
     assert state["ray_shutdown_called"] is True
@@ -223,13 +252,13 @@ def test_runtime_tokenize_messages_propagates_chat_template_failure() -> None:
     tokenizer = FakeTokenizer()
     runtime._tokenizer = tokenizer
 
-    with pytest.raises(RuntimeError, match="template boom"):
-        runtime.tokenize_messages([{"role": "user", "content": "hello"}])
+    with expect_raises(RuntimeError, match="template boom"):
+        runtime.tokenize_messages([ChatMessage(role="user", content="hello")])
 
     assert tokenizer.encode_called is False
 
 
-def test_runtime_generate_forwards_prompt_ids() -> None:
+def test_runtime_generate_forwards_input_ids() -> None:
     runtime = Runtime(cfg=_server_config())
     runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
 
@@ -240,6 +269,7 @@ def test_runtime_generate_forwards_prompt_ids() -> None:
             captured["sampling_params"] = sampling_params
             captured["kwargs"] = kwargs
             return {
+                "text": "reply-3",
                 "output_ids": [11, 12],
                 "meta_info": {
                     "finish_reason": "stop",
@@ -253,7 +283,23 @@ def test_runtime_generate_forwards_prompt_ids() -> None:
 
     runtime._slot = FakeSlot()
 
-    generation = runtime.generate(prompt_token_ids=[1, 2, 3])
+    generation = runtime.generate(input_ids=[1, 2, 3])
 
     assert generation.token_ids == [11, 12]
     assert captured["kwargs"] == {"input_ids": [1, 2, 3]}
+
+
+def main() -> int:
+    return run_tests(
+        [
+            test_runtime_start_rolls_back_state_when_slot_creation_fails,
+            test_runtime_start_slot_shuts_down_ray_when_startup_fails,
+            test_runtime_shutdown_also_shuts_down_ray,
+            test_runtime_tokenize_messages_propagates_chat_template_failure,
+            test_runtime_generate_forwards_input_ids,
+        ]
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

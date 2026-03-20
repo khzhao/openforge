@@ -152,7 +152,7 @@ class Service:
                     turn_index=turn.turn_index,
                     rollout_model_version=turn.rollout_model_version,
                     prompt_length=turn.prompt_length,
-                    input_ids=list(turn.input_ids),
+                    token_ids=list(turn.token_ids),
                     position_ids=list(turn.position_ids),
                     loss_mask=list(turn.loss_mask),
                 )
@@ -178,7 +178,7 @@ class Service:
             trajectory_id=trajectory_id,
         )
         try:
-            prompt_token_ids = await asyncio.to_thread(
+            input_ids = await asyncio.to_thread(
                 self.runtime.tokenize_messages,
                 messages,
             )
@@ -189,14 +189,14 @@ class Service:
         turn_index = len(await self.store.list_turns(trajectory_id))
         generation = await asyncio.to_thread(
             self.runtime.generate,
-            prompt_token_ids=prompt_token_ids,
+            input_ids=input_ids,
             sampling_params=sampling_params,
         )
         await self.store.append_turn(
             self._build_turn(
                 trajectory_id=trajectory_id,
                 turn_index=turn_index,
-                prompt_token_ids=prompt_token_ids,
+                input_ids=input_ids,
                 generation=generation,
             )
         )
@@ -216,8 +216,8 @@ class Service:
             model=session.model_name,
             usage=CompletionUsage(
                 completion_tokens=len(generation.token_ids),
-                prompt_tokens=len(prompt_token_ids),
-                total_tokens=len(prompt_token_ids) + len(generation.token_ids),
+                prompt_tokens=len(input_ids),
+                total_tokens=len(input_ids) + len(generation.token_ids),
             ),
             metadata={
                 "session_id": session_id,
@@ -339,10 +339,10 @@ class Service:
         *,
         trajectory_id: str,
         turn_index: int,
-        prompt_token_ids: list[int],
+        input_ids: list[int],
         generation: Generation,
     ) -> Turn:
-        prompt_length = len(prompt_token_ids)
+        prompt_length = len(input_ids)
         completion_length = len(generation.token_ids)
         prompt_prediction_count = max(prompt_length - 1, 0)
         return Turn(
@@ -350,7 +350,7 @@ class Service:
             turn_index=turn_index,
             rollout_model_version=generation.rollout_model_version,
             prompt_length=prompt_length,
-            input_ids=[*prompt_token_ids, *generation.token_ids],
+            token_ids=[*input_ids, *generation.token_ids],
             position_ids=list(range(prompt_length + completion_length)),
             loss_mask=[False] * prompt_prediction_count + [True] * completion_length,
         )

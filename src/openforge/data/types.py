@@ -57,7 +57,7 @@ class Turn:
     turn_index: int
     rollout_model_version: str
     prompt_length: int
-    input_ids: list[int]
+    token_ids: list[int]
     position_ids: list[int]
     loss_mask: list[bool]
 
@@ -66,12 +66,12 @@ class Turn:
             raise ValueError("turn_index must be >= 0")
         if not self.rollout_model_version:
             raise ValueError("rollout_model_version must be non-empty")
-        if self.prompt_length < 0 or self.prompt_length > len(self.input_ids):
-            raise ValueError("prompt_length must be between 0 and len(input_ids)")
-        if len(self.position_ids) != len(self.input_ids):
-            raise ValueError("position_ids must have the same length as input_ids")
+        if self.prompt_length < 0 or self.prompt_length > len(self.token_ids):
+            raise ValueError("prompt_length must be between 0 and len(token_ids)")
+        if len(self.position_ids) != len(self.token_ids):
+            raise ValueError("position_ids must have the same length as token_ids")
 
-        predicted_token_count = max(len(self.input_ids) - 1, 0)
+        predicted_token_count = max(len(self.token_ids) - 1, 0)
         if len(self.loss_mask) != predicted_token_count:
             raise ValueError(
                 "loss_mask must have one entry per predicted token: "
@@ -80,8 +80,8 @@ class Turn:
 
     @property
     def prompt_token_ids(self) -> list[int]:
-        return self.input_ids[: self.prompt_length]
+        return self.token_ids[: self.prompt_length]
 
     @property
     def completion_token_ids(self) -> list[int]:
-        return self.input_ids[self.prompt_length :]
+        return self.token_ids[self.prompt_length :]
