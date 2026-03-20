@@ -17,6 +17,7 @@ from torch.distributed.fsdp import (
 )
 from transformers import AutoModelForCausalLM
 
+from openforge.runtime import create_algorithm
 from openforge.train.backend import TrainBackend
 from openforge.train.types import TrainWorkerSpec
 from openforge.utils.torch import get_torch_dtype
@@ -40,6 +41,7 @@ class FSDP2Engine(TrainBackend):
         self.world_size = spec.world_size
         self.master_addr = spec.master_addr
         self.master_port = spec.master_port
+        self.algorithm = create_algorithm(spec.cfg.algo)
 
         # 1. Initialize the device and device mesh
         self.device = torch.device("cpu")
@@ -109,42 +111,43 @@ class FSDP2Engine(TrainBackend):
         advantages = batch["advantages"].to(self.device).float()
         position_ids = batch["position_ids"].to(self.device).long()
 
-        # 1. Compute log probabilities for the available models
+        # 1. Compute log probabilities for the sampled actions
+        targets = tokens[1:]
         curr_log_probs = self._compute_log_probs(
             model=self.main_model,
             tokens=tokens,
             position_ids=position_ids,
         )
+        entropy = -(curr_log_probs.exp() * curr_log_probs).sum(dim=-1)
+        curr_log_probs = curr_log_probs.gather(
+            dim=-1, index=targets.unsqueeze(-1)
+        ).squeeze(-1)
+
+        ref_log_probs = None
         if self.ref_model is not None:
             ref_log_probs = self._compute_log_probs(
                 model=self.ref_model,
                 tokens=tokens,
                 position_ids=position_ids,
             )
-
-        # 2. Compute the loss and log probs for model and ref model
-        targets = tokens[1:]
-        curr_log_probs = curr_log_probs.gather(
-            dim=-1, index=targets.unsqueeze(-1)
-        ).squeeze(-1)
-        loss = (
-            -(advantages[1:] * curr_log_probs) * loss_mask
-        ).sum() / loss_mask.sum().clamp_min(1.0)
-        outputs = {
-            "curr_log_probs": curr_log_probs.detach(),
-            "ref_log_probs": None,
-            "loss": loss,
-        }
-
-        if self.ref_model is not None:
             ref_log_probs = ref_log_probs.gather(
                 dim=-1, index=targets.unsqueeze(-1)
             ).squeeze(-1)
-            loss = loss + self.cfg.algo.kl_coef * (
-                (curr_log_probs - ref_log_probs) * loss_mask
-            ).sum() / loss_mask.sum().clamp_min(1.0)
-            outputs["ref_log_probs"] = ref_log_probs.detach()
-            outputs["loss"] = loss
+
+        # 2. Delegate the algorithm-specific loss math
+        outputs: dict[str, torch.Tensor | None] = {
+            "curr_log_probs": curr_log_probs.detach(),
+            "ref_log_probs": None if ref_log_probs is None else ref_log_probs.detach(),
+        }
+        outputs.update(
+            self.algorithm.compute_loss(
+                curr_log_probs=curr_log_probs,
+                advantages=advantages[1:],
+                loss_mask=loss_mask,
+                entropy=entropy,
+                ref_log_probs=ref_log_probs,
+            )
+        )
         return outputs
 
     def backward(self, forward_out: dict[str, torch.Tensor]) -> None:

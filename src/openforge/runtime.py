@@ -1,14 +1,27 @@
 # Copyright 2026 openforge
 
+from __future__ import annotations
+
+from openforge.configs.algo import AlgorithmConfig
 from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.manager import RolloutManager
 from openforge.train.group import TrainManager
 
 __all__ = [
+    "create_algorithm",
     "create_rollout_manager",
     "create_train_manager",
     "register_rollout",
 ]
+
+
+def create_algorithm(cfg: AlgorithmConfig):
+    """Create the configured training algorithm."""
+    from openforge.algo import GRPOAlgorithm
+
+    if cfg.name == "grpo":
+        return GRPOAlgorithm(cfg)
+    raise ValueError(f"unsupported algorithm: {cfg.name}")
 
 
 def create_rollout_manager(

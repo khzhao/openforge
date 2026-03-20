@@ -8,6 +8,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from openforge.data import OpenForgeStore, Trajectory, Turn
+from openforge.runtime import create_algorithm
 
 __all__ = ["TrainLoop"]
 
@@ -31,6 +32,7 @@ class TrainLoop:
         self.store = store
         self.train_manager = train_manager
         self.train = train_manager.cfg.train
+        self.algorithm = create_algorithm(train_manager.cfg.algo)
         self.world_size = train_manager.world_size
         assert (
             self.train.global_batch_size == self.world_size * self.train.mini_batch_size
@@ -80,12 +82,23 @@ class TrainLoop:
         trajectories: list[Trajectory] = []
         samples: list[dict[str, torch.Tensor]] = []
         for index in selected_group_indexes:
-            for trajectory in ready_groups[index]:
+            group = ready_groups[index]
+            rewards = torch.tensor(
+                [float(trajectory.final_reward) for trajectory in group],
+                dtype=torch.float32,
+            )
+            group_advantages = self.algorithm.compute_group_advantages(rewards).tolist()
+            for trajectory, advantage in zip(
+                group,
+                group_advantages,
+                strict=True,
+            ):
                 trajectories.append(trajectory)
                 samples.extend(
                     self._build_samples(
                         trajectory,
                         turns_by_trajectory_id[trajectory.trajectory_id],
+                        float(advantage),
                     )
                 )
 
@@ -124,10 +137,21 @@ class TrainLoop:
 
     async def _list_ready_groups(self) -> list[list[Trajectory]]:
         trajectories = await self.store.list_trajectories(self.session_id)
+        parent_ids = {
+            trajectory.parent_trajectory_id
+            for trajectory in trajectories
+            if trajectory.parent_trajectory_id is not None
+        }
         groups: dict[str, list[Trajectory]] = {}
         for trajectory in trajectories:
-            group_id = trajectory.parent_trajectory_id or trajectory.trajectory_id
-            groups.setdefault(group_id, []).append(trajectory)
+            if trajectory.parent_trajectory_id is not None:
+                groups.setdefault(trajectory.parent_trajectory_id, []).append(
+                    trajectory
+                )
+                continue
+            if trajectory.trajectory_id in parent_ids:
+                continue
+            groups[trajectory.trajectory_id] = [trajectory]
 
         ready_groups = [
             sorted(group, key=lambda trajectory: trajectory.trajectory_id)
@@ -170,9 +194,9 @@ class TrainLoop:
         self,
         trajectory: Trajectory,
         turns: list[Turn],
+        advantage: float,
     ) -> list[dict[str, torch.Tensor]]:
         assert trajectory.final_reward is not None
-        reward = float(trajectory.final_reward)
         samples: list[dict[str, torch.Tensor]] = []
         for turn in turns:
             length = len(turn.input_ids)
@@ -188,7 +212,7 @@ class TrainLoop:
                     ),
                     "advantages": torch.full(
                         (length,),
-                        reward,
+                        advantage,
                         dtype=torch.float32,
                     ),
                     "loss_mask": torch.tensor(

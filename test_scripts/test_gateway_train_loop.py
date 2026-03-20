@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import torch
+
+from openforge.configs.algo import AlgorithmConfig
 from openforge.data import Session, SQLiteOpenForgeStore, Trajectory, Turn
 from openforge.gateway.train_loop import TrainLoop
 from openforge.train.types import TrainStepResult
@@ -38,6 +41,7 @@ class _FakeTrainManager:
     ) -> None:
         self.world_size = world_size
         self.cfg = SimpleNamespace(
+            algo=AlgorithmConfig(),
             train=_FakeTrainConfig(
                 global_batch_size=global_batch_size,
                 mini_batch_size=mini_batch_size,
@@ -171,14 +175,14 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
         assert len(rank_minibatches) == 2
         assert rank_minibatches[0]["tokens"].tolist() == [[10, 20, 30], [11, 21, 31]]
         assert rank_minibatches[0]["advantages"].tolist() == [
-            [1.0, 1.0, 1.0],
-            [2.0, 2.0, 2.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
         ]
         assert rank_minibatches[0]["lengths"].tolist() == [3, 3]
         assert rank_minibatches[1]["tokens"].tolist() == [[12, 22, 32], [13, 23, 33]]
         assert rank_minibatches[1]["advantages"].tolist() == [
-            [3.0, 3.0, 3.0],
-            [4.0, 4.0, 4.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
         ]
         assert rank_minibatches[1]["lengths"].tolist() == [3, 3]
 
@@ -248,37 +252,58 @@ def test_train_loop_train_once_splits_rank_local_minibatches() -> None:
             [8, 9, 10, 11, 12],
             [13, 14, 15, 0, 0],
         ]
-        assert rank_minibatches[0]["advantages"].tolist() == [
-            [1.0, 1.0, 1.0, 0.0, 0.0],
-            [2.0, 2.0, 2.0, 2.0, 0.0],
-            [3.0, 3.0, 3.0, 3.0, 3.0],
-            [4.0, 4.0, 4.0, 0.0, 0.0],
-        ]
+        assert rank_minibatches[0]["advantages"].tolist() == [[0.0] * 5] * 4
         assert rank_minibatches[0]["lengths"].tolist() == [3, 4, 5, 3]
         await store.close()
 
     asyncio.run(run())
 
 
-def test_train_loop_builds_advantages_from_final_reward() -> None:
+def test_train_loop_builds_group_relative_advantages() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
-        await _completed_trajectory(
-            store,
-            session_id="s0",
-            trajectory_id="t0",
-            reward=1.5,
-            input_ids=[1, 2, 3, 4],
-            prompt_length=3,
+        await store.create_trajectory(
+            Trajectory(
+                trajectory_id="root",
+                session_id="s0",
+                parent_trajectory_id=None,
+                status="active",
+            )
         )
         await _completed_trajectory(
             store,
             session_id="s0",
-            trajectory_id="t1",
+            trajectory_id="child-a",
+            reward=1.5,
+            input_ids=[1, 2, 3, 4],
+            prompt_length=3,
+        )
+        await store.update_trajectory(
+            Trajectory(
+                trajectory_id="child-a",
+                session_id="s0",
+                parent_trajectory_id="root",
+                status="completed",
+                final_reward=1.5,
+            )
+        )
+        await _completed_trajectory(
+            store,
+            session_id="s0",
+            trajectory_id="child-b",
             reward=-2.0,
             input_ids=[5, 6, 7],
             prompt_length=1,
+        )
+        await store.update_trajectory(
+            Trajectory(
+                trajectory_id="child-b",
+                session_id="s0",
+                parent_trajectory_id="root",
+                status="completed",
+                final_reward=-2.0,
+            )
         )
 
         train_manager = _FakeTrainManager(
@@ -293,10 +318,17 @@ def test_train_loop_builds_advantages_from_final_reward() -> None:
 
         assert trained is True
         _global_step, rank_minibatches = train_manager.step_calls[0]
-        assert rank_minibatches[0]["advantages"].tolist() == [
-            [1.5, 1.5, 1.5, 1.5],
-            [-2.0, -2.0, -2.0, 0.0],
-        ]
+        torch.testing.assert_close(
+            rank_minibatches[0]["advantages"],
+            torch.tensor(
+                [
+                    [0.7071064, 0.7071064, 0.7071064, 0.7071064],
+                    [-0.7071064, -0.7071064, -0.7071064, 0.0],
+                ]
+            ),
+            atol=1e-5,
+            rtol=1e-5,
+        )
         assert rank_minibatches[0]["loss_mask"].tolist() == [
             [0.0, 0.0, 1.0],
             [1.0, 1.0, 0.0],
@@ -310,6 +342,14 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
+        await store.create_trajectory(
+            Trajectory(
+                trajectory_id="root",
+                session_id="s0",
+                parent_trajectory_id=None,
+                status="active",
+            )
+        )
         await _completed_multiturn_trajectory(
             store,
             session_id="s0",
@@ -320,6 +360,15 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
                 (3, [1, 2, 3, 4]),
             ],
         )
+        await store.update_trajectory(
+            Trajectory(
+                trajectory_id="t0",
+                session_id="s0",
+                parent_trajectory_id="root",
+                status="completed",
+                final_reward=1.5,
+            )
+        )
         await _completed_trajectory(
             store,
             session_id="s0",
@@ -327,6 +376,15 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
             reward=-2.0,
             input_ids=[5, 6, 7],
             prompt_length=1,
+        )
+        await store.update_trajectory(
+            Trajectory(
+                trajectory_id="t1",
+                session_id="s0",
+                parent_trajectory_id="root",
+                status="completed",
+                final_reward=-2.0,
+            )
         )
 
         train_manager = _FakeTrainManager(
@@ -346,11 +404,18 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
             [1, 2, 3, 4],
             [5, 6, 7, 0],
         ]
-        assert rank_minibatches[0]["advantages"].tolist() == [
-            [1.5, 1.5, 1.5, 0.0],
-            [1.5, 1.5, 1.5, 1.5],
-            [-2.0, -2.0, -2.0, 0.0],
-        ]
+        torch.testing.assert_close(
+            rank_minibatches[0]["advantages"],
+            torch.tensor(
+                [
+                    [0.7071064, 0.7071064, 0.7071064, 0.0],
+                    [0.7071064, 0.7071064, 0.7071064, 0.7071064],
+                    [-0.7071064, -0.7071064, -0.7071064, 0.0],
+                ]
+            ),
+            atol=1e-5,
+            rtol=1e-5,
+        )
         assert rank_minibatches[0]["loss_mask"].tolist() == [
             [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
@@ -404,6 +469,10 @@ def test_train_loop_counts_batch_size_in_turns() -> None:
         assert rank_minibatches[0]["tokens"].tolist() == [
             [1, 2, 3],
             [1, 2, 4],
+        ]
+        assert rank_minibatches[0]["advantages"].tolist() == [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
         ]
         t0 = await store.get_trajectory("t0")
         t1 = await store.get_trajectory("t1")
@@ -543,10 +612,17 @@ def test_train_loop_trains_completed_sibling_group_together() -> None:
         assert trained is True
         _global_step, rank_minibatches = train_manager.step_calls[0]
         assert rank_minibatches[0]["tokens"].tolist() == [[1, 2, 3, 0], [4, 5, 6, 7]]
-        assert rank_minibatches[0]["advantages"].tolist() == [
-            [1.0, 1.0, 1.0, 0.0],
-            [2.0, 2.0, 2.0, 2.0],
-        ]
+        torch.testing.assert_close(
+            rank_minibatches[0]["advantages"],
+            torch.tensor(
+                [
+                    [-0.7071064, -0.7071064, -0.7071064, 0.0],
+                    [0.7071064, 0.7071064, 0.7071064, 0.7071064],
+                ]
+            ),
+            atol=1e-5,
+            rtol=1e-5,
+        )
         await store.close()
 
     asyncio.run(run())
