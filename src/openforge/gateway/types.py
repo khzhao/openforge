@@ -17,6 +17,7 @@ __all__ = [
     "EndSessionResponse",
     "EndTrajectoryRequest",
     "EndTrajectoryResponse",
+    "ErrorTrajectoryRequest",
     "GenerateRequest",
     "GenerateResponse",
     "ModelRecord",
@@ -112,6 +113,13 @@ class EndTrajectoryRequest(BaseModel):
     session_id: str
     trajectory_id: str
     final_reward: float
+
+
+class ErrorTrajectoryRequest(BaseModel):
+    """Request payload for marking a trajectory as errored."""
+
+    session_id: str
+    trajectory_id: str
 
 
 class EndTrajectoryResponse(BaseModel):

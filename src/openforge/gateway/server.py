@@ -24,6 +24,7 @@ from openforge.gateway.types import (
     EndSessionResponse,
     EndTrajectoryRequest,
     EndTrajectoryResponse,
+    ErrorTrajectoryRequest,
     GenerateRequest,
     GenerateResponse,
     ModelsResponse,
@@ -144,6 +145,24 @@ def create_app(
                 session_id=payload.session_id,
                 trajectory_id=payload.trajectory_id,
                 final_reward=payload.final_reward,
+            )
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SessionClosedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except TrajectoryNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TrajectoryNotActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/error_trajectory", response_model=EndTrajectoryResponse)
+    async def error_trajectory(
+        payload: ErrorTrajectoryRequest,
+    ) -> EndTrajectoryResponse:
+        try:
+            return await service.error_trajectory(
+                session_id=payload.session_id,
+                trajectory_id=payload.trajectory_id,
             )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

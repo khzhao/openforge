@@ -224,6 +224,30 @@ class Service:
             status="completed",
         )
 
+    async def error_trajectory(
+        self,
+        *,
+        session_id: str,
+        trajectory_id: str,
+    ) -> EndTrajectoryResponse:
+        trajectory = await self._require_active_trajectory(
+            session_id=session_id,
+            trajectory_id=trajectory_id,
+        )
+        await self.store.update_trajectory(
+            Trajectory(
+                trajectory_id=trajectory.trajectory_id,
+                session_id=trajectory.session_id,
+                parent_trajectory_id=trajectory.parent_trajectory_id,
+                status="errored",
+            )
+        )
+        return EndTrajectoryResponse(
+            session_id=session_id,
+            trajectory_id=trajectory_id,
+            status="errored",
+        )
+
     async def end_session(
         self,
         *,
