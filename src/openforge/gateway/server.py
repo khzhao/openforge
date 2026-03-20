@@ -47,7 +47,6 @@ def create_app(
     config: GatewayServerConfig,
 ) -> FastAPI:
     """Create the OpenForge gateway app."""
-    gateway_config = config.gateway
     store = _build_store(config)
     runtime = Runtime(cfg=config)
 
@@ -61,10 +60,6 @@ def create_app(
 
     service = Service(store=store, runtime=runtime)
     app = FastAPI(title="OpenForge Gateway", lifespan=lifespan)
-    app.state.config = gateway_config
-    app.state.runtime = runtime
-    app.state.store = store
-    app.state.service = service
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
@@ -72,7 +67,7 @@ def create_app(
 
     @app.get("/models", response_model=ModelsResponse)
     async def list_models() -> ModelsResponse:
-        return ModelsResponse.model_validate(await service.list_models())
+        return await service.list_models()
 
     @app.get("/current_session", response_model=StartSessionResponse)
     async def current_session() -> StartSessionResponse:
@@ -118,7 +113,7 @@ def create_app(
             return await service.generate(
                 session_id=payload.session_id,
                 trajectory_id=payload.trajectory_id,
-                messages=[message.model_dump() for message in payload.messages],
+                messages=payload.messages,
                 sampling_params=payload.sampling_params,
             )
         except SessionNotFoundError as exc:
@@ -128,10 +123,6 @@ def create_app(
         except TrajectoryNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except TrajectoryNotActiveError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except UnsupportedModelError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ModelBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -10,7 +10,7 @@ from typing import Any, Sequence
 from transformers import AutoTokenizer
 
 from openforge.configs.models import GatewayServerConfig, OpenForgeConfig
-from openforge.gateway.types import RuntimeConfig
+from openforge.gateway.types import ChatMessage, RuntimeConfig
 
 __all__ = [
     "Generation",
@@ -42,6 +42,7 @@ class ModelBusyError(RuntimeError):
 class Generation:
     """One generated token sequence returned by the runtime."""
 
+    text: str
     token_ids: list[int]
     rollout_model_version: str
     finish_reason: str = "stop"
@@ -117,11 +118,11 @@ class Runtime:
 
     def tokenize_messages(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[ChatMessage],
     ) -> list[int]:
         tokenizer = self._get_tokenizer()
         token_ids = tokenizer.apply_chat_template(
-            list(messages),
+            [message.model_dump(mode="json") for message in messages],
             tokenize=True,
             add_generation_prompt=True,
         )
@@ -237,14 +238,25 @@ class Runtime:
         payload: dict[str, Any],
     ) -> Generation:
         meta_info = payload.get("meta_info", {})
+        text = Runtime._extract_text(payload)
         token_ids = Runtime._extract_token_ids(payload)
         finish_reason = Runtime._extract_finish_reason(meta_info)
         rollout_model_version = Runtime._extract_rollout_model_version(meta_info)
         return Generation(
+            text=text,
             token_ids=token_ids,
             rollout_model_version=rollout_model_version,
             finish_reason=finish_reason,
         )
+
+    @staticmethod
+    def _extract_text(
+        payload: dict[str, Any],
+    ) -> str:
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise ValueError("generate payload missing text")
+        return text
 
     @staticmethod
     def _extract_token_ids(

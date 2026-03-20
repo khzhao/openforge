@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +13,8 @@ from openforge.configs.train import TrainConfig
 
 __all__ = [
     "ChatMessage",
+    "ChatChoice",
+    "CompletionUsage",
     "EndSessionRequest",
     "EndSessionResponse",
     "EndTrajectoryRequest",
@@ -97,14 +99,33 @@ class GenerateRequest(BaseModel):
     sampling_params: dict[str, Any] = Field(default_factory=dict)
 
 
-class GenerateResponse(BaseModel):
-    """Response payload for one generated trajectory continuation."""
+class ChatChoice(BaseModel):
+    """One assistant choice in an OpenAI-style chat completion."""
 
-    session_id: str
-    trajectory_id: str
-    token_ids: list[int]
     finish_reason: str
-    rollout_model_version: str
+    index: int
+    message: ChatMessage
+    logprobs: None = None
+
+
+class CompletionUsage(BaseModel):
+    """Token usage for one completion."""
+
+    completion_tokens: int
+    prompt_tokens: int
+    total_tokens: int
+
+
+class GenerateResponse(BaseModel):
+    """OpenAI-style chat completion returned by the gateway."""
+
+    id: str
+    choices: list[ChatChoice]
+    created: int
+    model: str
+    object: Literal["chat.completion"] = "chat.completion"
+    usage: CompletionUsage
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class EndTrajectoryRequest(BaseModel):

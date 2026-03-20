@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from uuid import uuid4
 
 from openforge.data import Session, SQLiteOpenForgeStore, Trajectory, Turn
 from openforge.gateway.runtime import Generation, Runtime
 from openforge.gateway.train_loop import TrainLoop
 from openforge.gateway.types import (
+    ChatChoice,
+    ChatMessage,
+    CompletionUsage,
     EndSessionResponse,
     EndTrajectoryResponse,
     GenerateResponse,
@@ -62,7 +67,7 @@ class Service:
     ) -> None:
         self.store = store
         self.runtime = runtime
-        self._active_session_ids: set[str] = set()
+        self._active_session_id: str | None = None
         self._train_loop: TrainLoop | None = None
 
     async def list_models(self) -> dict[str, object]:
@@ -72,13 +77,13 @@ class Service:
         }
 
     async def current_session(self) -> StartSessionResponse | None:
-        if not self._active_session_ids:
+        session_id = self._active_session_id
+        if session_id is None:
             return None
 
-        active_session_id = next(iter(self._active_session_ids))
-        session = await self.store.get_session(active_session_id)
+        session = await self.store.get_session(session_id)
         if session is None:
-            raise SessionNotFoundError(f"unknown session_id: {active_session_id}")
+            raise SessionNotFoundError(f"unknown session_id: {session_id}")
         return StartSessionResponse(
             session_id=session.session_id,
             model=session.model_name,
@@ -89,13 +94,14 @@ class Service:
         *,
         runtime_config: RuntimeConfig,
     ) -> StartSessionResponse:
-        if self._active_session_ids:
+        if self._active_session_id is not None:
             raise ActiveSessionError("another session is already active")
 
         model_name = runtime_config.model.model_name_or_path
         if self.runtime.current_model() not in (None, model_name):
-            self.runtime.shutdown()
-        resolved_model_name = self.runtime.start(
+            await asyncio.to_thread(self.runtime.shutdown)
+        resolved_model_name = await asyncio.to_thread(
+            self.runtime.start,
             runtime_config=runtime_config,
         )
 
@@ -103,7 +109,7 @@ class Service:
         await self.store.create_session(
             Session(session_id=session_id, model_name=resolved_model_name)
         )
-        self._active_session_ids.add(session_id)
+        self._active_session_id = session_id
         assert self._train_loop is None
         self._train_loop = TrainLoop(
             session_id=session_id,
@@ -163,24 +169,28 @@ class Service:
         *,
         session_id: str,
         trajectory_id: str,
-        messages: list[dict[str, str]],
+        messages: list[ChatMessage],
         sampling_params: dict[str, object] | None = None,
     ) -> GenerateResponse:
-        await self._require_active_session(session_id)
+        session = await self._require_active_session(session_id)
         await self._require_active_trajectory(
             session_id=session_id,
             trajectory_id=trajectory_id,
         )
         try:
-            prompt_token_ids = self.runtime.tokenize_messages(messages)
+            prompt_token_ids = await asyncio.to_thread(
+                self.runtime.tokenize_messages,
+                messages,
+            )
         except Exception as exc:
             raise ValueError(
                 f"failed to tokenize messages with chat template: {exc}"
             ) from exc
         turn_index = len(await self.store.list_turns(trajectory_id))
-        generation = self.runtime.generate(
+        generation = await asyncio.to_thread(
+            self.runtime.generate,
             prompt_token_ids=prompt_token_ids,
-            sampling_params=None if sampling_params is None else dict(sampling_params),
+            sampling_params=sampling_params,
         )
         await self.store.append_turn(
             self._build_turn(
@@ -191,11 +201,30 @@ class Service:
             )
         )
         return GenerateResponse(
-            session_id=session_id,
-            trajectory_id=trajectory_id,
-            token_ids=list(generation.token_ids),
-            finish_reason=generation.finish_reason,
-            rollout_model_version=generation.rollout_model_version,
+            id=f"chatcmpl_{trajectory_id}_{turn_index}",
+            choices=[
+                ChatChoice(
+                    finish_reason=generation.finish_reason,
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=generation.text,
+                    ),
+                )
+            ],
+            created=int(time.time()),
+            model=session.model_name,
+            usage=CompletionUsage(
+                completion_tokens=len(generation.token_ids),
+                prompt_tokens=len(prompt_token_ids),
+                total_tokens=len(prompt_token_ids) + len(generation.token_ids),
+            ),
+            metadata={
+                "session_id": session_id,
+                "trajectory_id": trajectory_id,
+                "token_ids": generation.token_ids,
+                "rollout_model_version": generation.rollout_model_version,
+            },
         )
 
     async def end_trajectory(
@@ -215,7 +244,7 @@ class Service:
                 session_id=trajectory.session_id,
                 parent_trajectory_id=trajectory.parent_trajectory_id,
                 status="completed",
-                final_reward=float(final_reward),
+                final_reward=final_reward,
             )
         )
         return EndTrajectoryResponse(
@@ -263,14 +292,13 @@ class Service:
                 "all trajectories must be ended before ending the session"
             )
 
-        self._active_session_ids.discard(session_id)
+        self._active_session_id = None
         if self._train_loop is not None:
             await self._train_loop.stop()
             while await self._train_loop.train_once():
                 pass
             self._train_loop = None
-        if not self._active_session_ids:
-            self.runtime.shutdown()
+        await asyncio.to_thread(self.runtime.shutdown)
 
         return EndSessionResponse(session_id=session_id, status="completed")
 
@@ -278,14 +306,14 @@ class Service:
         if self._train_loop is not None:
             await self._train_loop.stop()
             self._train_loop = None
-        self._active_session_ids.clear()
-        self.runtime.shutdown()
+        self._active_session_id = None
+        await asyncio.to_thread(self.runtime.shutdown)
 
     async def _require_active_session(self, session_id: str) -> Session:
         session = await self.store.get_session(session_id)
         if session is None:
             raise SessionNotFoundError(f"unknown session_id: {session_id}")
-        if session_id not in self._active_session_ids:
+        if session_id != self._active_session_id:
             raise SessionClosedError(f"session {session_id} is not active")
         return session
 
