@@ -42,11 +42,12 @@ class RolloutManager:
         *,
         router_ip: str | None = None,
         router_port: int | None = None,
+        engine_addrs: dict[str, EngineAddr] | None = None,
         **router_kwargs: Any,
     ) -> None:
         """Initialize the rollout manager."""
         self.engine_group = EngineGroup(self.cfg, self.placement_groups)
-        self.engine_group.initialize()
+        self.engine_group.initialize(engine_addrs=engine_addrs)
 
         main_router_kwargs = {
             "router_name": "openforge-router",
@@ -117,9 +118,17 @@ class EngineGroup:
         self.cfg = cfg
         self.placement_groups = placement_groups
 
-    def initialize(self) -> None:
+    def initialize(
+        self,
+        *,
+        engine_addrs: dict[str, EngineAddr] | None = None,
+    ) -> None:
         """Initialize the SGLang engine group."""
-        self.engine_info = start_sglang_engines(self.cfg, self.placement_groups)
+        self.engine_info = start_sglang_engines(
+            self.cfg,
+            self.placement_groups,
+            engine_addrs=engine_addrs,
+        )
 
     def shutdown(self) -> None:
         """Terminate all child engine actors started by this group."""
@@ -214,7 +223,10 @@ def start_sglang_engines(
         engine_addrs = allocate_engine_addrs(engine_specs_and_workers)
     else:
         expected_names = {spec.engine_name for spec, _ in engine_specs_and_workers}
-        assert set(engine_addrs) == expected_names
+        assert set(engine_addrs) == expected_names, (
+            "engine_addrs must match the rollout engine names exactly: "
+            f"expected {sorted(expected_names)}, got {sorted(engine_addrs)}"
+        )
     ray.get(
         [
             worker.launch.remote(engine_addrs[spec.engine_name])
