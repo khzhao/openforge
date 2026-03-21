@@ -131,22 +131,6 @@ class Engine:
             timeout=max(self.REQUEST_TIMEOUT_SECONDS, 30.0),
         )
 
-    def update_weights_from_tensor(
-        self,
-        *,
-        serialized_named_tensors: list[str],
-        policy_version: int | None = None,
-        load_format: str | None = None,
-        flush_cache: bool = True,
-    ) -> dict[str, Any]:
-        return self.client.update_weights_from_tensor(
-            serialized_named_tensors=serialized_named_tensors,
-            load_format=load_format,
-            flush_cache=flush_cache,
-            weight_version=None if policy_version is None else str(policy_version),
-            timeout=max(self.REQUEST_TIMEOUT_SECONDS, 30.0),
-        )
-
     def begin_init_weights_update_group(
         self,
         *,

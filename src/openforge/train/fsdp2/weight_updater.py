@@ -14,12 +14,11 @@ from openforge.utils.networking import get_free_port
 from openforge.utils.packed import (
     build_tensor_bucket_meta,
     flatten_tensor_bucket,
-    serialize_tensor_bucket,
 )
 
 __all__ = ["WeightUpdater"]
 
-WeightUpdateMode = Literal["auto", "disk", "tensor", "distributed"]
+WeightUpdateMode = Literal["auto", "disk", "distributed"]
 
 
 class WeightUpdater:
@@ -52,13 +51,8 @@ class WeightUpdater:
                             rollout_workers,
                             policy_version=policy_version,
                         )
-                    elif candidate_mode == "disk":
-                        self._sync_disk(
-                            rollout_workers,
-                            policy_version=policy_version,
-                        )
                     else:
-                        self._sync_tensor(
+                        self._sync_disk(
                             rollout_workers,
                             policy_version=policy_version,
                         )
@@ -76,46 +70,6 @@ class WeightUpdater:
                 ray.get(
                     [worker.continue_generation.remote() for worker in rollout_workers]
                 )
-
-    def _sync_tensor(
-        self,
-        rollout_workers: Sequence[Any],
-        *,
-        policy_version: int,
-    ) -> None:
-        if self.train_group.push_weights_to_rollouts_from_tensor(
-            rollout_workers=rollout_workers,
-            policy_version=policy_version,
-            bucket_bytes=self.bucket_bytes,
-        ):
-            return
-
-        rollout_world_sizes = ray.get(
-            [worker.distributed_world_size.remote() for worker in rollout_workers]
-        )
-        tensor_buckets = self.train_group.build_tensor_buckets(
-            bucket_bytes=self.bucket_bytes
-        )
-        for bucket_index, tensor_bucket in enumerate(tensor_buckets):
-            flush_cache = bucket_index == len(tensor_buckets) - 1
-            serialized_bucket = serialize_tensor_bucket(tensor_bucket)
-            ray.get(
-                [
-                    worker.update_weights_from_tensor.remote(
-                        serialized_named_tensors=[
-                            serialized_bucket for _ in range(int(rollout_world_size))
-                        ],
-                        policy_version=policy_version,
-                        load_format="flattened_bucket",
-                        flush_cache=flush_cache,
-                    )
-                    for worker, rollout_world_size in zip(
-                        rollout_workers,
-                        rollout_world_sizes,
-                        strict=True,
-                    )
-                ]
-            )
 
     def _sync_disk(
         self,
@@ -267,10 +221,15 @@ class WeightUpdater:
                 )
 
     @staticmethod
-    def _modes(mode: WeightUpdateMode) -> tuple[str, ...]:
+    def _modes(mode: str) -> tuple[str, ...]:
         if mode == "auto":
-            return ("distributed", "tensor", "disk")
-        return (mode,)
+            return ("distributed", "disk")
+        if mode in ("disk", "distributed"):
+            return (mode,)
+        raise ValueError(
+            "unsupported weight sync mode: "
+            f"{mode!r}; supported modes are 'auto', 'disk', and 'distributed'"
+        )
 
     @staticmethod
     def _rollout_rank_offsets(

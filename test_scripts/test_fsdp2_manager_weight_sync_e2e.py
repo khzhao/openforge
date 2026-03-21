@@ -1,7 +1,10 @@
+# Copyright 2026 openforge
+
 from __future__ import annotations
 
 import argparse
 import os
+
 os.environ.setdefault("FLASHINFER_WORKSPACE_BASE", "/tmp")
 os.environ.setdefault("NCCL_CUMEM_ENABLE", "0")
 os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
@@ -10,6 +13,7 @@ from _manager_weight_sync_common import DEFAULT_MODEL, SYNC_MODES, run_weight_sy
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the manager weight-sync e2e script."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", default=DEFAULT_MODEL)
     parser.add_argument("--train-gpus", type=int, default=1)
@@ -20,12 +24,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sync-modes",
         default=",".join(SYNC_MODES),
-        help="Comma-separated subset of disk,tensor,distributed",
+        help="Comma-separated subset of disk,distributed",
     )
     return parser.parse_args()
 
 
 def main() -> int:
+    """Run the requested manager weight-sync modes against a real model."""
     args = parse_args()
     sync_modes = tuple(
         mode.strip() for mode in args.sync_modes.split(",") if mode.strip()

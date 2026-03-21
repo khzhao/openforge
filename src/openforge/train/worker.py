@@ -7,7 +7,6 @@ from typing import Any, Sequence
 
 import ray
 import torch
-import torch.distributed as dist
 from huggingface_hub import save_torch_state_dict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -18,7 +17,6 @@ from transformers import AutoTokenizer
 
 from openforge.train.fsdp2.base import FSDP2Engine
 from openforge.train.types import TrainStepResult, TrainWorkerSpec, TrainWorkerState
-from openforge.utils.distributed import init_gloo_group
 from openforge.utils.networking import get_free_port
 from openforge.utils.packed import pack_micro_batch, serialize_tensor_bucket
 from openforge.utils.ray import get_current_ray_node_ip_address
@@ -179,79 +177,6 @@ class TrainWorker:
         block_size: int = 1,
     ) -> int:
         return get_free_port(start=start, block_size=block_size)
-
-    def push_weights_to_rollouts_from_tensor(
-        self,
-        *,
-        rollout_workers: Sequence[Any],
-        rollout_world_sizes: Sequence[int],
-        policy_version: int,
-        bucket_bytes: int,
-    ) -> None:
-        serialized_buckets = self._build_rank_local_serialized_tensor_buckets(
-            bucket_bytes=bucket_bytes
-        )
-        gloo_group = init_gloo_group()
-        bucket_counts = [None] * self.spec.world_size
-        dist.all_gather_object(bucket_counts, len(serialized_buckets), group=gloo_group)
-        if any(count != bucket_counts[0] for count in bucket_counts):
-            raise RuntimeError(
-                f"tensor sync bucket count mismatch across train ranks: {bucket_counts}"
-            )
-
-        for bucket_index, serialized_bucket in enumerate(serialized_buckets):
-            gathered_buckets = (
-                [None] * self.spec.world_size if self.spec.rank == 0 else None
-            )
-            dist.gather_object(
-                obj=serialized_bucket,
-                object_gather_list=gathered_buckets,
-                dst=0,
-                group=gloo_group,
-            )
-
-            bucket_error = None
-            if self.spec.rank == 0:
-                try:
-                    assert gathered_buckets is not None
-                    flush_cache = bucket_index == len(serialized_buckets) - 1
-                    refs = []
-                    rank_offset = 0
-                    for rollout_worker, rollout_world_size in zip(
-                        rollout_workers,
-                        rollout_world_sizes,
-                        strict=True,
-                    ):
-                        next_rank_offset = rank_offset + int(rollout_world_size)
-                        refs.append(
-                            rollout_worker.update_weights_from_tensor.remote(
-                                serialized_named_tensors=gathered_buckets[
-                                    rank_offset:next_rank_offset
-                                ],
-                                policy_version=policy_version,
-                                load_format="flattened_bucket",
-                                flush_cache=flush_cache,
-                            )
-                        )
-                        rank_offset = next_rank_offset
-                    if rank_offset != len(gathered_buckets):
-                        raise RuntimeError(
-                            "tensor sync expected one gathered payload per train rank"
-                        )
-                    ray.get(refs)
-                except Exception as exc:  # noqa: BLE001
-                    bucket_error = repr(exc)
-
-            bucket_errors = [None] * self.spec.world_size
-            dist.all_gather_object(bucket_errors, bucket_error, group=gloo_group)
-            first_error = next(
-                (error for error in bucket_errors if error is not None),
-                None,
-            )
-            if first_error is not None:
-                raise RuntimeError(
-                    f"tensor sync rollout update failed on bucket {bucket_index}: {first_error}"
-                )
 
     def shutdown(self) -> None:
         self.engine.shutdown()

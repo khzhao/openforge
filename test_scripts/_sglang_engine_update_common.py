@@ -17,7 +17,6 @@ from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.manager import start_sglang_engines
 from openforge.utils.distributed import init_custom_process_group
 from openforge.utils.networking import get_free_port
-from openforge.utils.packed import serialize_tensor_bucket
 from openforge.utils.ray import create_placement_groups
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -220,10 +219,6 @@ def select_update_tensor(
     updated = tensor.detach().clone().contiguous()
     updated.view(-1)[0] = updated.view(-1)[0] + updated.new_tensor(1e-3)
     return name, updated
-
-
-def serialize_flattened_bucket(named_tensors: list[tuple[str, torch.Tensor]]) -> str:
-    return serialize_tensor_bucket(named_tensors)
 
 
 def torch_dtype_name(dtype: torch.dtype) -> str:

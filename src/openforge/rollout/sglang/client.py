@@ -104,29 +104,6 @@ class SGLangClient:
             timeout=timeout,
         )
 
-    def update_weights_from_tensor(
-        self,
-        *,
-        serialized_named_tensors: list[str],
-        load_format: str | None = None,
-        flush_cache: bool = True,
-        abort_all_requests: bool = False,
-        weight_version: str | None = None,
-        timeout: float = 30.0,
-    ) -> dict[str, Any]:
-        payload = {
-            "serialized_named_tensors": serialized_named_tensors,
-            "load_format": load_format,
-            "flush_cache": flush_cache,
-            "abort_all_requests": abort_all_requests,
-            "weight_version": weight_version,
-        }
-        return self._post_json(
-            "/update_weights_from_tensor",
-            payload=payload,
-            timeout=timeout,
-        )
-
     def init_weights_update_group(
         self,
         *,

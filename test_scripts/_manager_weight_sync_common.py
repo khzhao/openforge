@@ -18,12 +18,16 @@ from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from openforge.configs.models import OpenForgeConfig
-from openforge.runtime import create_rollout_manager, create_train_manager, register_rollout
+from openforge.runtime import (
+    create_rollout_manager,
+    create_train_manager,
+    register_rollout,
+)
 from openforge.utils.networking import get_free_port
 from openforge.utils.ray import create_placement_groups
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-SYNC_MODES = ("disk", "tensor", "distributed")
+SYNC_MODES = ("disk", "distributed")
 
 
 def require_visible_gpus(min_count: int) -> int:

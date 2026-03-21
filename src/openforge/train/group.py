@@ -147,48 +147,6 @@ class TrainManager:
         assert result is not None, "publisher rank returned no tensor buckets"
         return result
 
-    def push_weights_to_rollouts_from_tensor(
-        self,
-        *,
-        rollout_workers: Sequence[object],
-        policy_version: int,
-        bucket_bytes: int,
-    ) -> bool:
-        if self.world_size <= 1 or not torch.cuda.is_available():
-            return False
-
-        rollout_world_sizes = ray.get(
-            [worker.distributed_world_size.remote() for worker in rollout_workers]
-        )
-        if self.world_size != sum(int(size) for size in rollout_world_sizes):
-            return False
-
-        train_node_ips = ray.get(
-            [worker.node_ip_address.remote() for worker in self.workers]
-        )
-        rollout_node_ips = ray.get(
-            [worker.node_ip_address.remote() for worker in rollout_workers]
-        )
-        if (
-            len(set(train_node_ips)) != 1
-            or len(set(rollout_node_ips)) != 1
-            or train_node_ips[0] != rollout_node_ips[0]
-        ):
-            return False
-
-        ray.get(
-            [
-                worker.push_weights_to_rollouts_from_tensor.remote(
-                    rollout_workers=rollout_workers,
-                    rollout_world_sizes=rollout_world_sizes,
-                    policy_version=policy_version,
-                    bucket_bytes=bucket_bytes,
-                )
-                for worker in self.workers
-            ]
-        )
-        return True
-
     def export_checkpoint(self, *, policy_version: int) -> str:
         results = ray.get(
             [
