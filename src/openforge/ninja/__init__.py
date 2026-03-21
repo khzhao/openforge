@@ -190,7 +190,7 @@ class Session:
                 [
                     Client(
                         finish=self._finish_client,
-                        http=self.http,
+                        post=self._post,
                         session_id=self.session_id,
                         trajectory_id=str(trajectory_id),
                         group_id=group_id,
@@ -230,14 +230,19 @@ class Session:
     def fail_clients(self, clients: list["Client"]) -> None:
         if not clients:
             return
-        response = self._post(
-            "/error_trajectories",
-            {
-                "session_id": self.session_id,
-                "trajectory_ids": [client.trajectory_id for client in clients],
-            },
-        )
-        response.raise_for_status()
+        payload = {
+            "session_id": self.session_id,
+            "trajectory_ids": [client.trajectory_id for client in clients],
+        }
+        for attempt in range(self.END_BATCH_RETRIES):
+            try:
+                response = self._post("/error_trajectories", payload)
+                response.raise_for_status()
+                break
+            except httpx.ReadError:
+                if attempt + 1 == self.END_BATCH_RETRIES:
+                    raise
+                time.sleep(self.END_BATCH_MAX_WAIT_SECONDS)
         for client in clients:
             client.close()
 
@@ -537,9 +542,16 @@ def register(
             assert session is not None, "no active session"
             return session.current_policy_version()
 
+        def session() -> Session:
+            with STATE.lock:
+                active_session = STATE.session
+            assert active_session is not None, "no active session"
+            return active_session
+
         wrapped.run = run
         wrapped.export_checkpoint = export_checkpoint
         wrapped.current_policy_version = current_policy_version
+        wrapped.session = session
         return wrapped
 
     return decorator
