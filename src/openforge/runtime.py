@@ -5,7 +5,7 @@ from __future__ import annotations
 from openforge.algo import GRPOAlgorithm
 from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.manager import RolloutManager
-from openforge.train.group import TrainManager
+from openforge.train.manager import TrainManager
 
 __all__ = [
     "create_algorithm",
