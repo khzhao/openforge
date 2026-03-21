@@ -159,7 +159,7 @@ class Runtime:
             return_logprob=False,
             input_ids=[int(token_id) for token_id in input_ids],
         )
-        return self._parse_generation_payload(payload)
+        return Generation(**self._parse_generation_info(payload))
 
     def generate_batch(
         self,
@@ -186,7 +186,7 @@ class Runtime:
                 "batched generate payload size mismatch: "
                 f"{len(payloads)} != {len(requests)}"
             )
-        return [self._parse_generation_payload(item) for item in payloads]
+        return [Generation(**self._parse_generation_info(item)) for item in payloads]
 
     def train_manager(self):
         slot = self._slot
@@ -286,63 +286,50 @@ class Runtime:
         return payload
 
     @staticmethod
-    def _parse_generation_payload(
+    def _parse_generation_info(
         payload: dict[str, Any],
-    ) -> Generation:
+    ) -> dict[str, Any]:
         meta_info = payload.get("meta_info", {})
-        text = Runtime._extract_text(payload)
-        token_ids = Runtime._extract_token_ids(payload)
-        finish_reason = Runtime._extract_finish_reason(meta_info)
-        rollout_model_version = Runtime._extract_rollout_model_version(meta_info)
-        return Generation(
-            text=text,
-            token_ids=token_ids,
-            rollout_model_version=rollout_model_version,
-            finish_reason=finish_reason,
-        )
+        if not isinstance(meta_info, dict):
+            meta_info = {}
 
-    @staticmethod
-    def _extract_text(
-        payload: dict[str, Any],
-    ) -> str:
         text = payload.get("text")
         if not isinstance(text, str):
             raise ValueError("generate payload missing text")
-        return text
 
-    @staticmethod
-    def _extract_token_ids(
-        payload: dict[str, Any],
-    ) -> list[int]:
-        for source in (payload, payload.get("meta_info", {})):
-            if not isinstance(source, dict):
-                continue
+        token_ids: list[int] | None = None
+        for source in (payload, meta_info):
             for key in ("output_ids", "token_ids"):
-                token_ids = source.get(key)
-                if isinstance(token_ids, list):
-                    return [int(token_id) for token_id in token_ids]
-        raise ValueError("generate payload missing output_ids or token_ids")
+                value = source.get(key)
+                if isinstance(value, list):
+                    token_ids = [int(token_id) for token_id in value]
+                    break
+            if token_ids is not None:
+                break
+        if token_ids is None:
+            raise ValueError("generate payload missing output_ids or token_ids")
 
-    @staticmethod
-    def _extract_finish_reason(meta_info: dict[str, Any]) -> str:
         finish_reason = meta_info.get("finish_reason", "stop")
         if isinstance(finish_reason, str):
-            return finish_reason
-        if isinstance(finish_reason, dict):
-            return str(finish_reason.get("type", "stop"))
-        return "stop"
+            finish_reason_text = finish_reason
+        elif isinstance(finish_reason, dict):
+            finish_reason_text = str(finish_reason.get("type", "stop"))
+        else:
+            finish_reason_text = "stop"
 
-    @staticmethod
-    def _extract_rollout_model_version(
-        meta_info: dict[str, Any],
-    ) -> str:
         weight_version = meta_info.get("weight_version")
         if weight_version is None:
             raise ValueError("generate payload missing meta_info.weight_version")
-        version = str(weight_version)
-        if not version:
+        rollout_model_version = str(weight_version)
+        if not rollout_model_version:
             raise ValueError("generate payload has empty meta_info.weight_version")
-        return version
+
+        return {
+            "text": text,
+            "token_ids": token_ids,
+            "finish_reason": finish_reason_text,
+            "rollout_model_version": rollout_model_version,
+        }
 
     def _get_tokenizer(self):
         if self._tokenizer is None:
