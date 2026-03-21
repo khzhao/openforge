@@ -110,6 +110,7 @@ class FSDP2Engine(TrainBackend):
         tokens = batch["tokens"].to(self.device).long()
         loss_mask = batch["loss_mask"].to(self.device).float()
         advantages = batch["advantages"].to(self.device).float()
+        old_log_probs = batch["old_log_probs"].to(self.device).float()
         position_ids = batch["position_ids"].to(self.device).long()
 
         # 1. Compute log probabilities for the sampled actions
@@ -143,6 +144,7 @@ class FSDP2Engine(TrainBackend):
         outputs.update(
             self.algorithm.compute_loss(
                 curr_log_probs=curr_log_probs,
+                old_log_probs=old_log_probs,
                 advantages=advantages[1:],
                 loss_mask=loss_mask,
                 entropy=entropy,
@@ -150,6 +152,23 @@ class FSDP2Engine(TrainBackend):
             )
         )
         return outputs
+
+    @torch.no_grad()
+    def compute_old_log_probs(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        tokens = batch["tokens"].to(self.device).long()
+        position_ids = batch["position_ids"].to(self.device).long()
+        targets = tokens[1:]
+        log_probs = self._compute_log_probs(
+            model=self.main_model,
+            tokens=tokens,
+            position_ids=position_ids,
+        )
+        return (
+            log_probs.gather(dim=-1, index=targets.unsqueeze(-1))
+            .squeeze(-1)
+            .float()
+            .cpu()
+        )
 
     def backward(self, forward_out: dict[str, torch.Tensor]) -> None:
         loss = forward_out["loss"] / self.cfg.train.gradient_accumulation_steps

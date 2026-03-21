@@ -102,6 +102,30 @@ class TrainManager:
             ]
         )
 
+    def step_update(
+        self,
+        rank_minibatches_per_update: Sequence[Sequence[dict[str, torch.Tensor]]],
+        *,
+        global_step: int | None = None,
+    ) -> list[list[TrainStepResult]]:
+        rank_updates = [[] for _ in range(self.world_size)]
+        for rank_minibatches in rank_minibatches_per_update:
+            assert len(rank_minibatches) == self.world_size, (
+                "Expected one mini-batch per training rank: "
+                f"{self.world_size} != {len(rank_minibatches)}"
+            )
+            for rank, mini_batch in enumerate(rank_minibatches):
+                rank_updates[rank].append(mini_batch)
+        return ray.get(
+            [
+                worker.step_update.remote(
+                    rank_updates[rank],
+                    global_step=global_step,
+                )
+                for rank, worker in enumerate(self.workers)
+            ]
+        )
+
     def sleep(self) -> None:
         ray.get([worker.sleep.remote() for worker in self.workers])
 

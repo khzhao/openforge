@@ -74,6 +74,7 @@ class StartSessionResponse(BaseModel):
 
     session_id: str
     model: str
+    policy_version: int
 
 
 class StartTrajectoryRequest(BaseModel):

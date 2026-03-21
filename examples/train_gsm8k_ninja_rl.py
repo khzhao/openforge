@@ -77,6 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-group-retries", type=int, default=2)
     parser.add_argument("--ppo-mini-batch-size-prompts", type=int, default=64)
     parser.add_argument("--ppo-micro-batch-size-per-gpu", type=int, default=4)
+    parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=1.0e-6)
     parser.add_argument("--kl-coef", type=float, default=1.0e-3)
     return parser.parse_args()
@@ -146,6 +147,7 @@ def build_runtime_config(
     group_size: int,
     ppo_mini_batch_size_prompts: int,
     ppo_micro_batch_size_per_gpu: int,
+    ppo_epochs: int,
     max_new_tokens: int,
     learning_rate: float,
     kl_coef: float,
@@ -213,6 +215,7 @@ def build_runtime_config(
                 "global_batch_size": samples_per_update,
                 "mini_batch_size": mini_batch_size,
                 "micro_batch_size": ppo_micro_batch_size_per_gpu,
+                "ppo_epochs": ppo_epochs,
                 "checkpoints": str(checkpoint_root),
                 "cpus_per_worker": 1,
                 "parallel": {
@@ -794,6 +797,7 @@ def main() -> int:
         group_size=args.group_size,
         ppo_mini_batch_size_prompts=args.ppo_mini_batch_size_prompts,
         ppo_micro_batch_size_per_gpu=args.ppo_micro_batch_size_per_gpu,
+        ppo_epochs=args.ppo_epochs,
         max_new_tokens=args.max_new_tokens,
         learning_rate=args.learning_rate,
         kl_coef=args.kl_coef,

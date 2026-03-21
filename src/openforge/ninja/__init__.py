@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import time
+from concurrent.futures import Future
+from dataclasses import dataclass
 from functools import wraps
 from multiprocessing.process import BaseProcess
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -36,6 +38,19 @@ class GlobalState:
 
 
 STATE = GlobalState()
+
+
+@dataclass(slots=True)
+class _PendingFinish:
+    client: "Client"
+    future: Future[None]
+    reward: float
+
+
+@dataclass(slots=True)
+class _HttpLane:
+    client: httpx.Client
+    lock: Lock
 
 
 class Gateway:
@@ -102,21 +117,29 @@ class Session:
     """Own one active gateway session."""
 
     REQUEST_TIMEOUT_SECONDS = 300.0
+    HTTP_LANES = 64
+    MAX_HTTP_CONNECTIONS = 1
+    END_BATCH_RETRIES = 3
+    END_BATCH_MAX_SIZE = 320
+    END_BATCH_MAX_WAIT_SECONDS = 0.02
+    END_BATCH_IDLE_SECONDS = 0.001
 
     def __init__(self, runtime_config: RuntimeConfig) -> None:
         self.runtime_config = runtime_config
-        self._http: httpx.Client | None = None
+        self._base_url: str | None = None
+        self._http_lanes: list[_HttpLane] = []
+        self._http_lane_index = 0
+        self._http_lane_lock = Lock()
         self._session_id: str | None = None
+        self._finish_lock = Lock()
+        self._finish_thread: Thread | None = None
+        self._finish_stop = False
+        self._pending_finishes: list[_PendingFinish] = []
 
     @property
     def session_id(self) -> str:
         assert self._session_id is not None, "no active session"
         return self._session_id
-
-    @property
-    def http(self) -> httpx.Client:
-        assert self._http is not None, "no active session"
-        return self._http
 
     def client(
         self,
@@ -124,8 +147,8 @@ class Session:
         group_id: str | None = None,
     ) -> Client:
         return Client(
-            base_url=str(self.http.base_url),
-            timeout=self.REQUEST_TIMEOUT_SECONDS,
+            finish=self._finish_client,
+            post=self._post,
             session_id=self.session_id,
             trajectory_id=f"traj_{uuid4().hex}",
             group_id=group_id,
@@ -143,9 +166,9 @@ class Session:
             return []
         if any(count <= 0 for count in counts):
             raise ValueError("count must be >= 1")
-        response = self.http.post(
+        response = self._post(
             "/start_trajectory_groups",
-            json={
+            {
                 "session_id": self.session_id,
                 "counts": counts,
                 "group_ids": group_ids,
@@ -166,8 +189,8 @@ class Session:
             client_groups.append(
                 [
                     Client(
-                        base_url=str(self.http.base_url),
-                        timeout=self.REQUEST_TIMEOUT_SECONDS,
+                        finish=self._finish_client,
+                        http=self.http,
                         session_id=self.session_id,
                         trajectory_id=str(trajectory_id),
                         group_id=group_id,
@@ -187,24 +210,29 @@ class Session:
             raise ValueError("rewards must align with clients")
         if not clients:
             return
-        response = self.http.post(
-            "/end_trajectories",
-            json={
-                "session_id": self.session_id,
-                "trajectory_ids": [client.trajectory_id for client in clients],
-                "final_rewards": rewards,
-            },
-        )
-        response.raise_for_status()
+        payload = {
+            "session_id": self.session_id,
+            "trajectory_ids": [client.trajectory_id for client in clients],
+            "final_rewards": rewards,
+        }
+        for attempt in range(self.END_BATCH_RETRIES):
+            try:
+                response = self._post("/end_trajectories", payload)
+                response.raise_for_status()
+                break
+            except httpx.ReadError:
+                if attempt + 1 == self.END_BATCH_RETRIES:
+                    raise
+                time.sleep(self.END_BATCH_MAX_WAIT_SECONDS)
         for client in clients:
             client.close()
 
     def fail_clients(self, clients: list["Client"]) -> None:
         if not clients:
             return
-        response = self.http.post(
+        response = self._post(
             "/error_trajectories",
-            json={
+            {
                 "session_id": self.session_id,
                 "trajectory_ids": [client.trajectory_id for client in clients],
             },
@@ -214,14 +242,21 @@ class Session:
             client.close()
 
     def export_checkpoint(self) -> dict[str, Any]:
-        response = self.http.post(
+        response = self._post(
             "/export_checkpoint",
-            json={"session_id": self.session_id},
+            {"session_id": self.session_id},
         )
         response.raise_for_status()
         payload = response.json()
         assert isinstance(payload, dict)
         return payload
+
+    def current_policy_version(self) -> int:
+        response = self._get("/current_session")
+        response.raise_for_status()
+        payload = response.json()
+        assert isinstance(payload, dict)
+        return int(payload["policy_version"])
 
     def start(self) -> Session:
         return self
@@ -233,40 +268,121 @@ class Session:
         assert gateway is not None, "no active gateway"
         assert session is None, "a session is already active"
 
-        self._http = httpx.Client(
-            base_url=gateway.base_url,
-            timeout=self.REQUEST_TIMEOUT_SECONDS,
-        )
+        self._base_url = gateway.base_url
+        self._http_lanes = [
+            _HttpLane(client=self._build_http_client(), lock=Lock())
+            for _ in range(self.HTTP_LANES)
+        ]
         try:
-            response = self._http.post(
+            response = self._post(
                 "/start_session",
-                json={"runtime": self.runtime_config.model_dump(mode="json")},
+                {"runtime": self.runtime_config.model_dump(mode="json")},
             )
             response.raise_for_status()
             self._session_id = str(response.json()["session_id"])
         except Exception:
-            self._http.close()
-            self._http = None
+            self._close_http_clients()
+            self._base_url = None
             raise
+        self._finish_stop = False
+        self._pending_finishes = []
+        self._finish_thread = Thread(target=self._flush_finishes, daemon=True)
+        self._finish_thread.start()
 
         with STATE.lock:
             STATE.session = self
         return self
 
     def __exit__(self, *_: object) -> None:
-        http = self.http
         session_id = self.session_id
+        finish_thread = self._finish_thread
 
         with STATE.lock:
             STATE.session = None
+        self._finish_stop = True
+        if finish_thread is not None:
+            finish_thread.join()
+        self._finish_thread = None
         self._session_id = None
-        self._http = None
 
         try:
-            response = http.post("/end_session", json={"session_id": session_id})
+            response = self._post("/end_session", {"session_id": session_id})
             response.raise_for_status()
         finally:
-            http.close()
+            self._base_url = None
+            self._close_http_clients()
+
+    def _finish_client(self, client: "Client", reward: float) -> None:
+        future: Future[None] = Future()
+        with self._finish_lock:
+            self._pending_finishes.append(
+                _PendingFinish(
+                    client=client,
+                    future=future,
+                    reward=reward,
+                )
+            )
+        future.result()
+
+    def _flush_finishes(self) -> None:
+        while True:
+            if self._finish_stop and not self._pending_finishes:
+                return
+            if not self._pending_finishes:
+                time.sleep(self.END_BATCH_IDLE_SECONDS)
+                continue
+            time.sleep(self.END_BATCH_MAX_WAIT_SECONDS)
+            with self._finish_lock:
+                batch = self._pending_finishes[: self.END_BATCH_MAX_SIZE]
+                del self._pending_finishes[: len(batch)]
+            try:
+                self.end_clients(
+                    [item.client for item in batch],
+                    rewards=[item.reward for item in batch],
+                )
+            except Exception as exc:
+                for item in batch:
+                    item.future.set_exception(exc)
+            else:
+                for item in batch:
+                    item.future.set_result(None)
+
+    def _close_http_clients(self) -> None:
+        lanes = self._http_lanes
+        self._http_lanes = []
+        self._http_lane_index = 0
+        for lane in lanes:
+            lane.client.close()
+
+    def _build_http_client(self) -> httpx.Client:
+        assert self._base_url is not None, "no active session"
+        return httpx.Client(
+            base_url=self._base_url,
+            timeout=self.REQUEST_TIMEOUT_SECONDS,
+            limits=httpx.Limits(
+                max_connections=self.MAX_HTTP_CONNECTIONS,
+                max_keepalive_connections=self.MAX_HTTP_CONNECTIONS,
+            ),
+        )
+
+    def _next_http_lane(self) -> _HttpLane:
+        assert self._http_lanes, "no active session"
+        with self._http_lane_lock:
+            lane = self._http_lanes[self._http_lane_index]
+            self._http_lane_index = (self._http_lane_index + 1) % len(
+                self._http_lanes
+            )
+        return lane
+
+    def _post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
+        lane = self._next_http_lane()
+        with lane.lock:
+            return lane.client.post(path, json=payload)
+
+    def _get(self, path: str) -> httpx.Response:
+        lane = self._next_http_lane()
+        with lane.lock:
+            return lane.client.get(path)
 
 
 class Client:
@@ -275,15 +391,14 @@ class Client:
     def __init__(
         self,
         *,
-        base_url: str,
-        timeout: float,
+        finish: Callable[["Client", float], None],
+        post: Callable[[str, dict[str, Any]], httpx.Response],
         session_id: str,
         trajectory_id: str,
         group_id: str | None = None,
     ) -> None:
-        self._base_url = base_url
-        self._timeout = timeout
-        self._http: httpx.Client | None = None
+        self._finish = finish
+        self._post = post
         self._session_id = session_id
         self._trajectory_id = trajectory_id
         self._group_id = group_id
@@ -303,10 +418,9 @@ class Client:
         *,
         sampling_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self._used = True
-        response = self._ensure_http().post(
+        response = self._post(
             "/generate",
-            json={
+            {
                 "session_id": self._session_id,
                 "trajectory_id": self._trajectory_id,
                 "group_id": self._group_id,
@@ -315,31 +429,24 @@ class Client:
             },
         )
         response.raise_for_status()
+        self._used = True
         return response.json()
 
     def finish(self, reward: float) -> None:
         try:
             if not self._used:
                 self._start()
-            response = self._ensure_http().post(
-                "/end_trajectory",
-                json={
-                    "session_id": self._session_id,
-                    "trajectory_id": self._trajectory_id,
-                    "final_reward": reward,
-                },
-            )
-            response.raise_for_status()
+            self._finish(self, reward)
         finally:
             self.close()
 
     def fail(self) -> None:
         try:
             if not self._used:
-                self._start()
-            response = self._ensure_http().post(
+                return
+            response = self._post(
                 "/error_trajectory",
-                json={
+                {
                     "session_id": self._session_id,
                     "trajectory_id": self._trajectory_id,
                 },
@@ -351,10 +458,10 @@ class Client:
     def discard(self) -> None:
         try:
             if not self._used:
-                self._start()
-            response = self._ensure_http().post(
+                return
+            response = self._post(
                 "/discard_trajectory",
-                json={
+                {
                     "session_id": self._session_id,
                     "trajectory_id": self._trajectory_id,
                 },
@@ -364,14 +471,12 @@ class Client:
             self.close()
 
     def close(self) -> None:
-        if self._http is not None:
-            self._http.close()
-            self._http = None
+        return
 
     def _start(self) -> None:
-        response = self._ensure_http().post(
+        response = self._post(
             "/start_trajectory",
-            json={
+            {
                 "session_id": self._session_id,
                 "group_id": self._group_id,
             },
@@ -382,42 +487,59 @@ class Client:
         self._trajectory_id = str(payload["trajectory_id"])
         self._used = True
 
-    def _ensure_http(self) -> httpx.Client:
-        if self._http is None:
-            self._http = httpx.Client(
-                base_url=self._base_url,
-                timeout=self._timeout,
-            )
-        return self._http
-
 
 def register(
     gateway_config: GatewayServerConfig,
     runtime_config: RuntimeConfig,
-) -> Callable[[Callable[..., Any]], Callable[..., float]]:
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register a function as an OpenForge agent."""
 
-    def decorator(func: Callable[..., Any]) -> Callable[..., float]:
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(func)
-        def wrapped(*args: Any, **kwargs: Any) -> float:
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
             with STATE.lock:
                 gateway = STATE.gateway
                 session = STATE.session
             assert gateway is not None, "no active gateway"
             assert session is not None, "no active session"
+            group_id = kwargs.pop("__group_id", None)
+            discard = bool(kwargs.pop("__discard", False))
 
-            client = session.client()
+            client = session.client(group_id=group_id)
             try:
-                reward = float(func(client, *args, **kwargs))
+                result = func(client, *args, **kwargs)
             except Exception:
                 client.fail()
                 raise
 
+            if discard:
+                client.discard()
+                return result
+
+            reward = float(result)
             client.finish(reward)
             return reward
 
-        wrapped.gateway = lambda: Gateway(gateway_config)
-        wrapped.session = lambda: Session(runtime_config)
+        def run(fn: Callable[[], Any]) -> Any:
+            with Gateway(gateway_config).start():
+                with Session(runtime_config).start():
+                    return fn()
+
+        def export_checkpoint() -> dict[str, Any]:
+            with STATE.lock:
+                session = STATE.session
+            assert session is not None, "no active session"
+            return session.export_checkpoint()
+
+        def current_policy_version() -> int:
+            with STATE.lock:
+                session = STATE.session
+            assert session is not None, "no active session"
+            return session.current_policy_version()
+
+        wrapped.run = run
+        wrapped.export_checkpoint = export_checkpoint
+        wrapped.current_policy_version = current_policy_version
         return wrapped
 
     return decorator
@@ -443,14 +565,15 @@ class NinjaRunner:
 
     @staticmethod
     def run(
-        agent_func: Callable[..., float],
+        agent_func: Callable[..., Any],
         *,
         episodes: int = 1,
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
     ) -> None:
-        payload = {} if kwargs is None else kwargs
-        with agent_func.gateway():
-            with agent_func.session():
-                for _ in range(episodes):
-                    agent_func(*args, **payload)
+        def execute() -> None:
+            payload = {} if kwargs is None else kwargs
+            for _ in range(episodes):
+                agent_func(*args, **payload)
+
+        agent_func.run(execute)

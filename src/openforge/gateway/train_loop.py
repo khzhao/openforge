@@ -123,7 +123,8 @@ class TrainLoop:
 
         next_global_step = self.global_step + 1
         next_policy_version = self.policy_version + 1
-        self._step_and_sync(
+        await asyncio.to_thread(
+            self._step_and_sync,
             rank_minibatches_per_update,
             global_step=next_global_step,
             policy_version=next_policy_version,
@@ -186,11 +187,10 @@ class TrainLoop:
         global_step: int,
         policy_version: int,
     ) -> None:
-        for rank_minibatches in rank_minibatches_per_update:
-            self.train_manager.step(
-                rank_minibatches,
-                global_step=global_step,
-            )
+        self.train_manager.step_update(
+            rank_minibatches_per_update,
+            global_step=global_step,
+        )
         self.train_manager.sync_rollout_weights(
             policy_version=policy_version,
             mode="distributed",

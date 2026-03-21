@@ -15,14 +15,14 @@ from openforge.gateway.types import (
     ChatChoice,
     ChatMessage,
     CompletionUsage,
-    EndTrajectoriesResponse,
-    ExportCheckpointResponse,
     EndSessionResponse,
+    EndTrajectoriesResponse,
     EndTrajectoryResponse,
+    ExportCheckpointResponse,
     GenerateResponse,
     RuntimeConfig,
-    StartTrajectoryGroupsResponse,
     StartSessionResponse,
+    StartTrajectoryGroupsResponse,
     StartTrajectoryResponse,
 )
 
@@ -82,7 +82,7 @@ class Service:
     """Own the session, trajectory, and turn-recording workflow."""
 
     GENERATE_BATCH_MAX_SIZE = 320
-    GENERATE_BATCH_MAX_WAIT_SECONDS = 0.002
+    GENERATE_BATCH_MAX_WAIT_SECONDS = 0.02
 
     def __init__(
         self,
@@ -97,8 +97,9 @@ class Service:
         self._active_trajectories: dict[str, Trajectory] = {}
         self._active_turns: dict[str, list[Turn]] = {}
         self._train_loop: TrainLoop | None = None
+        self._generate_parallelism = 1
         self._generate_lock = asyncio.Lock()
-        self._generate_task: asyncio.Task[None] | None = None
+        self._generate_workers = 0
         self._pending_generates: list[_PendingGenerate] = []
         self._finish_lock = asyncio.Lock()
         self._finish_task: asyncio.Task[None] | None = None
@@ -115,9 +116,14 @@ class Service:
         if session_id is None:
             return None
 
+        policy_version = 0 if self._train_loop is None else self._train_loop.policy_version
         model_name = self._active_session_model_name
         if model_name is not None:
-            return StartSessionResponse(session_id=session_id, model=model_name)
+            return StartSessionResponse(
+                session_id=session_id,
+                model=model_name,
+                policy_version=policy_version,
+            )
 
         session = await self.store.get_session(session_id)
         if session is None:
@@ -125,6 +131,7 @@ class Service:
         return StartSessionResponse(
             session_id=session.session_id,
             model=session.model_name,
+            policy_version=policy_version,
         )
 
     async def start_session(
@@ -151,6 +158,8 @@ class Service:
         self._active_session_model_name = resolved_model_name
         self._active_trajectories = {}
         self._active_turns = {}
+        self._generate_parallelism = runtime_config.rollout.num_engine_replicas
+        self._generate_workers = 0
         assert self._train_loop is None
         self._train_loop = TrainLoop(
             session_id=session_id,
@@ -158,7 +167,11 @@ class Service:
             train_manager=self.runtime.train_manager(),
         )
         self._train_loop.start()
-        return StartSessionResponse(session_id=session_id, model=resolved_model_name)
+        return StartSessionResponse(
+            session_id=session_id,
+            model=resolved_model_name,
+            policy_version=0,
+        )
 
     async def start_trajectory(
         self,
@@ -243,7 +256,7 @@ class Service:
         )
         async with self._generate_lock:
             self._pending_generates.append(request)
-            self._ensure_generate_task_locked()
+            self._ensure_generate_workers_locked()
         return await future
 
     async def end_trajectory(
@@ -280,17 +293,26 @@ class Service:
                 status="completed",
             )
 
-        trajectories_by_id = await self._require_active_trajectories(
-            session_id=session_id,
-            trajectory_ids=trajectory_ids,
-        )
         trajectories_to_update: list[Trajectory] = []
         for trajectory_id, final_reward in zip(
             trajectory_ids,
             final_rewards,
             strict=True,
         ):
-            trajectory = trajectories_by_id[trajectory_id]
+            trajectory = self._active_trajectories.get(trajectory_id)
+            if trajectory is None:
+                stored_trajectory = await self.store.get_trajectory(trajectory_id)
+                if stored_trajectory is None or stored_trajectory.session_id != session_id:
+                    raise TrajectoryNotFoundError(f"unknown trajectory_id: {trajectory_id}")
+                if stored_trajectory.status == "completed":
+                    continue
+                raise TrajectoryNotActiveError(
+                    f"trajectory {trajectory_id} is not active"
+                )
+            if trajectory.session_id != session_id:
+                raise TrajectoryNotFoundError(f"unknown trajectory_id: {trajectory_id}")
+            if trajectory.status != "active":
+                raise TrajectoryNotActiveError(f"trajectory {trajectory_id} is not active")
             trajectories_to_update.append(
                 Trajectory(
                     trajectory_id=trajectory.trajectory_id,
@@ -428,7 +450,10 @@ class Service:
     ) -> EndSessionResponse:
         await self._require_active_session(session_id)
         await self._drain_finished_trajectories()
-        if self._active_trajectories:
+        if any(
+            trajectory.session_id == session_id
+            for trajectory in self._active_trajectories.values()
+        ):
             raise ActiveTrajectoriesRemainError(
                 "all trajectories must be ended before ending the session"
             )
@@ -457,11 +482,13 @@ class Service:
         self._active_turns = {}
         await asyncio.to_thread(self.runtime.shutdown)
 
-    def _ensure_generate_task_locked(self) -> None:
-        task = self._generate_task
-        if task is not None and not task.done():
-            return
-        self._generate_task = asyncio.create_task(self._flush_generate_queue())
+    def _ensure_generate_workers_locked(self) -> None:
+        while (
+            self._pending_generates
+            and self._generate_workers < self._generate_parallelism
+        ):
+            self._generate_workers += 1
+            asyncio.create_task(self._flush_generate_queue())
 
     def _ensure_finish_task_locked(self) -> None:
         task = self._finish_task
@@ -474,7 +501,7 @@ class Service:
         while True:
             async with self._generate_lock:
                 if not self._pending_generates:
-                    self._generate_task = None
+                    self._generate_workers -= 1
                     return
                 batch = self._take_generate_batch_locked()
             try:

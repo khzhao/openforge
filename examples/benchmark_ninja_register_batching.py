@@ -54,6 +54,7 @@ def main() -> None:
         group_size=5,
         ppo_mini_batch_size_prompts=64,
         ppo_micro_batch_size_per_gpu=4,
+        ppo_epochs=4,
         max_new_tokens=args.max_new_tokens,
         learning_rate=1.0e-6,
         kl_coef=1.0e-3,
@@ -80,12 +81,13 @@ def main() -> None:
         return 0.0
 
     prompts = [prompt for _ in range(args.episodes)]
-    with agent.gateway():
-        with agent.session():
-            started_at = time.perf_counter()
-            with ThreadPoolExecutor(max_workers=len(prompts)) as executor:
-                list(executor.map(agent, prompts))
-            elapsed_seconds = time.perf_counter() - started_at
+    def run() -> float:
+        started_at = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=len(prompts)) as executor:
+            list(executor.map(agent, prompts))
+        return time.perf_counter() - started_at
+
+    elapsed_seconds = float(agent.run(run))
 
     print(
         json.dumps(

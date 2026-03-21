@@ -54,19 +54,41 @@ class TrainWorker:
         *,
         global_step: int | None = None,
     ) -> TrainStepResult:
-        batch_size = int(mini_batch["lengths"].shape[0])
-        assert batch_size > 0, "step requires at least one sample"
+        microbatches = self._pack_mini_batch(mini_batch)
+        for batch in microbatches:
+            batch["old_log_probs"] = self.engine.compute_old_log_probs(batch)
+        return self._step_microbatches(
+            microbatches,
+            global_step=global_step,
+        )
 
-        micro_batch_size = self.spec.cfg.train.micro_batch_size
-        microbatches = [
-            {
-                key: value[index : index + micro_batch_size]
-                for key, value in mini_batch.items()
-            }
-            for index in range(0, batch_size, micro_batch_size)
-        ]
-        microbatches = [pack_micro_batch(micro_batch) for micro_batch in microbatches]
+    def step_update(
+        self,
+        mini_batches: Sequence[dict[str, torch.Tensor]],
+        *,
+        global_step: int | None = None,
+    ) -> list[TrainStepResult]:
+        packed_batches = [self._pack_mini_batch(mini_batch) for mini_batch in mini_batches]
+        for microbatches in packed_batches:
+            for batch in microbatches:
+                batch["old_log_probs"] = self.engine.compute_old_log_probs(batch)
+        results: list[TrainStepResult] = []
+        for _ in range(self.spec.cfg.train.ppo_epochs):
+            for microbatches in packed_batches:
+                results.append(
+                    self._step_microbatches(
+                        microbatches,
+                        global_step=global_step,
+                    )
+                )
+        return results
 
+    def _step_microbatches(
+        self,
+        microbatches: list[dict[str, torch.Tensor]],
+        *,
+        global_step: int | None,
+    ) -> TrainStepResult:
         self.engine.zero_grad()
         last_index = len(microbatches) - 1
         for index, batch in enumerate(microbatches):
@@ -84,6 +106,22 @@ class TrainWorker:
                 "global_step": -1.0 if global_step is None else float(global_step),
             },
         )
+
+    def _pack_mini_batch(
+        self,
+        mini_batch: dict[str, torch.Tensor],
+    ) -> list[dict[str, torch.Tensor]]:
+        batch_size = int(mini_batch["lengths"].shape[0])
+        assert batch_size > 0, "step requires at least one sample"
+        micro_batch_size = self.spec.cfg.train.micro_batch_size
+        microbatches = [
+            {
+                key: value[index : index + micro_batch_size]
+                for key, value in mini_batch.items()
+            }
+            for index in range(0, batch_size, micro_batch_size)
+        ]
+        return [pack_micro_batch(micro_batch) for micro_batch in microbatches]
 
     def sleep(self) -> None:
         self.engine.sleep()

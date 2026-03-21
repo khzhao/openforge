@@ -24,6 +24,7 @@ class Algorithm(Protocol):
         self,
         *,
         curr_log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
         entropy: torch.Tensor | None = None,
@@ -48,13 +49,13 @@ class GRPOAlgorithm:
         self,
         *,
         curr_log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
         entropy: torch.Tensor | None = None,
         ref_log_probs: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        base_log_probs = curr_log_probs.detach()
-        ratio = (curr_log_probs - base_log_probs).exp()
+        ratio = (curr_log_probs - old_log_probs).exp()
         clipped_ratio = ratio.clamp(
             min=1.0 - self.cfg.clip_range,
             max=1.0 + self.cfg.clip_range,

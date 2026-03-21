@@ -235,7 +235,11 @@ class Runtime:
                 master_port=get_free_port(start=20000),
                 placement_groups=placement_groups,
             )
-            rollout_manager = create_rollout_manager(cfg, placement_groups)
+            rollout_manager = create_rollout_manager(
+                cfg,
+                placement_groups,
+                log_level="warn",
+            )
             register_rollout(train_manager, rollout_manager)
         except Exception:
             try:
