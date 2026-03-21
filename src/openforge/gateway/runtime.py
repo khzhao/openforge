@@ -154,8 +154,9 @@ class Runtime:
         input_ids: Sequence[int],
         sampling_params: dict[str, Any] | None = None,
     ) -> Generation:
-        payload = self._slot.rollout_manager.generate(
+        payload = self._slot.rollout_manager.router.generate(
             self._build_sampling_params(sampling_params),
+            return_logprob=False,
             input_ids=[int(token_id) for token_id in input_ids],
         )
         return self._parse_generation_payload(payload)
@@ -171,8 +172,9 @@ class Runtime:
             return []
 
         sampling_payload = self._build_sampling_params(sampling_params)
-        payload = self._slot.rollout_manager.generate(
+        payload = self._slot.rollout_manager.router.generate(
             sampling_payload,
+            return_logprob=False,
             input_ids=requests,
         )
         if isinstance(payload, dict):
