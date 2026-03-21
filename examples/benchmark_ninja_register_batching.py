@@ -8,17 +8,21 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from train_gsm8k_ninja_rl import (
-    build_gateway_config,
-    build_runtime_config,
+from gsm8k_common import (
+    GATEWAY_CONFIG_PATH,
+    RUNTIME_CONFIG_PATH,
     get_free_port,
+    load_gateway_config,
+    load_runtime_config,
     require_visible_gpus,
 )
+
 from openforge.benchmarks.gsm8k import build_gsm8k_prompt
 from openforge.ninja import register
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI flags for the Ninja batching benchmark."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--artifact-dir",
@@ -32,33 +36,30 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run a simple batched generate benchmark through Ninja register."""
     args = parse_args()
     artifact_dir = Path(args.artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     visible_gpus = require_visible_gpus(4)
-    gateway_config = build_gateway_config(
+    gateway_config = load_gateway_config(
+        GATEWAY_CONFIG_PATH,
         artifact_dir=artifact_dir,
-        gateway_host="127.0.0.1",
-        gateway_port=get_free_port("127.0.0.1"),
-        visible_gpus=visible_gpus,
-        cpus_per_node=args.cpus_per_node,
     )
-    runtime_config = build_runtime_config(
-        model_path=args.model_path,
-        train_gpus=1,
-        rollout_replicas=3,
-        gpus_per_replica=1,
-        checkpoint_root=artifact_dir / "checkpoints",
-        train_batch_size=256,
-        group_size=5,
-        ppo_mini_batch_size_prompts=64,
-        ppo_micro_batch_size_per_gpu=4,
-        ppo_epochs=4,
-        max_new_tokens=args.max_new_tokens,
-        learning_rate=1.0e-6,
-        kl_coef=1.0e-3,
+    gateway_config.gateway.host = "127.0.0.1"
+    gateway_config.gateway.port = get_free_port("127.0.0.1")
+    gateway_config.cluster.gpus_per_node = visible_gpus
+    gateway_config.cluster.cpus_per_node = args.cpus_per_node
+
+    runtime_config = load_runtime_config(
+        RUNTIME_CONFIG_PATH,
+        artifact_dir=artifact_dir,
     )
+    runtime_config.model.model_name_or_path = args.model_path
+    runtime_config.model.reference_model_name_or_path = args.model_path
+    runtime_config.model.tokenizer_name_or_path = args.model_path
+    runtime_config.rollout.request.max_new_tokens = args.max_new_tokens
+
     sampling_params = {
         "temperature": 1.0,
         "top_p": 1.0,
@@ -81,6 +82,7 @@ def main() -> None:
         return 0.0
 
     prompts = [prompt for _ in range(args.episodes)]
+
     def run() -> float:
         started_at = time.perf_counter()
         with ThreadPoolExecutor(max_workers=len(prompts)) as executor:
@@ -88,7 +90,6 @@ def main() -> None:
         return time.perf_counter() - started_at
 
     elapsed_seconds = float(agent.run(run))
-
     print(
         json.dumps(
             {

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import random
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import wraps
 from multiprocessing.process import BaseProcess
@@ -27,6 +28,7 @@ __all__ = [
     "NinjaRunner",
     "Session",
     "register",
+    "run_train",
 ]
 
 
@@ -589,3 +591,235 @@ class NinjaRunner:
                 agent_func(*args, **payload)
 
         agent_func.run(execute)
+
+
+def _parse_policy_version(value: object) -> int:
+    text = str(value)
+    return int(text) if text.isdigit() else 0
+
+
+def _wait_for_rollout_policy_version(
+    session: Session,
+    *,
+    target_version: int,
+    timeout: float,
+) -> int:
+    deadline = time.monotonic() + timeout
+    probe_sampling = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "max_new_tokens": 8,
+    }
+    while time.monotonic() < deadline:
+        client = session.client()
+        try:
+            response = client.generate(
+                [{"role": "user", "content": "Reply with OK."}],
+                sampling_params=probe_sampling,
+            )
+        finally:
+            client.discard()
+        version = _parse_policy_version(
+            response.get("metadata", {}).get("rollout_model_version")
+        )
+        if version >= target_version:
+            return version
+        time.sleep(1.0)
+    raise TimeoutError(
+        f"rollout policy_version did not reach {target_version} within {timeout} seconds"
+    )
+
+
+def _collect_train_groups(
+    agent_func: Callable[..., Any],
+    session: Session,
+    *,
+    batch_specs: list[tuple[int, dict[str, Any]]],
+    group_size: int,
+    parallelism: int,
+    retries: int,
+) -> list[dict[str, Any]]:
+    agent_body = getattr(agent_func, "__wrapped__", None)
+    if agent_body is None:
+        raise ValueError("run_train requires an agent registered with openforge.ninja.register")
+
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        client_groups: list[list[Client]] = []
+        try:
+            group_ids = [f"train-group-{group_index}" for group_index, _ in batch_specs]
+            client_groups = session.trajectory_groups(
+                counts=[group_size for _ in batch_specs],
+                group_ids=group_ids,
+            )
+            jobs = [
+                (group_index, payload, client)
+                for (group_index, payload), clients in zip(
+                    batch_specs,
+                    client_groups,
+                    strict=True,
+                )
+                for client in clients
+            ]
+
+            def execute(job: tuple[int, dict[str, Any], Client]) -> tuple[int, Client, float]:
+                group_index, payload, client = job
+                reward = float(agent_body(client, **payload))
+                return group_index, client, reward
+
+            max_workers = max(1, min(parallelism, len(jobs)))
+            if max_workers == 1:
+                results = [execute(job) for job in jobs]
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    results = list(executor.map(execute, jobs))
+
+            session.end_clients(
+                [client for _group_index, client, _reward in results],
+                rewards=[reward for _group_index, _client, reward in results],
+            )
+
+            by_group: dict[int, list[float]] = {}
+            for group_index, _client, reward in results:
+                by_group.setdefault(group_index, []).append(reward)
+            return [
+                {
+                    "group_index": group_index,
+                    "group_size": len(rewards),
+                    "max_reward": max(rewards),
+                    "mean_reward": sum(rewards) / len(rewards),
+                    "rewards": rewards,
+                }
+                for group_index, rewards in sorted(by_group.items())
+            ]
+        except Exception as exc:
+            last_error = exc
+            pending_clients = [client for clients in client_groups for client in clients]
+            if pending_clients:
+                try:
+                    session.fail_clients(pending_clients)
+                except Exception:
+                    for client in pending_clients:
+                        try:
+                            client.fail()
+                        except Exception:
+                            pass
+            if attempt >= retries:
+                raise
+            time.sleep(min(2.0, 0.5 * (2**attempt)))
+
+    assert last_error is not None
+    raise last_error
+
+
+def run_train(
+    agent_func: Callable[..., Any],
+    *,
+    inputs: list[dict[str, Any]],
+    group_size: int,
+    epochs: int,
+    seed: int,
+    parallelism: int = 1,
+    retries: int = 0,
+    wait_timeout: float = 1800.0,
+    max_updates: int | None = None,
+) -> dict[str, Any]:
+    """Run grouped on-policy training for a registered Ninja agent."""
+    if group_size <= 0:
+        raise ValueError("group_size must be > 0")
+    if epochs <= 0:
+        raise ValueError("epochs must be > 0")
+    if parallelism <= 0:
+        raise ValueError("parallelism must be > 0")
+    if retries < 0:
+        raise ValueError("retries must be >= 0")
+    if not inputs:
+        raise ValueError("inputs must not be empty")
+
+    def execute() -> dict[str, Any]:
+        session = agent_func.session()
+        samples_per_update = int(session.runtime_config.train.global_batch_size)
+        if samples_per_update <= 0:
+            raise ValueError("runtime_config.train.global_batch_size must be > 0")
+        if samples_per_update % group_size != 0:
+            raise ValueError(
+                "runtime_config.train.global_batch_size must be divisible by group_size"
+            )
+        prompt_groups_per_update = samples_per_update // group_size
+
+        rng = random.Random(seed)
+        schedule: list[dict[str, Any]] = []
+        for _epoch in range(epochs):
+            epoch_inputs = list(inputs)
+            rng.shuffle(epoch_inputs)
+            schedule.extend(epoch_inputs)
+
+        available_updates = len(schedule) // prompt_groups_per_update
+        if max_updates is not None:
+            available_updates = min(available_updates, max_updates)
+        if available_updates <= 0:
+            raise ValueError(
+                "not enough prompt groups to perform one update: "
+                f"have {len(schedule)}, need {prompt_groups_per_update}"
+            )
+
+        initial_policy_version = session.current_policy_version()
+        last_update: dict[str, Any] | None = None
+        final_policy_version = initial_policy_version
+        consumed_groups = 0
+        for update_offset in range(available_updates):
+            batch_inputs = schedule[
+                consumed_groups : consumed_groups + prompt_groups_per_update
+            ]
+            batch_specs = [
+                (consumed_groups + index + 1, payload)
+                for index, payload in enumerate(batch_inputs)
+            ]
+            group_results = _collect_train_groups(
+                agent_func,
+                session,
+                batch_specs=batch_specs,
+                group_size=group_size,
+                parallelism=parallelism,
+                retries=retries,
+            )
+            consumed_groups += prompt_groups_per_update
+            target_version = initial_policy_version + update_offset + 1
+            final_policy_version = _wait_for_rollout_policy_version(
+                session,
+                target_version=target_version,
+                timeout=wait_timeout,
+            )
+            rewards = [
+                reward
+                for group in group_results
+                for reward in group["rewards"]
+            ]
+            last_update = {
+                "policy_version": final_policy_version,
+                "prompt_groups": len(group_results),
+                "samples": len(rewards),
+                "max_group_reward": max(group["max_reward"] for group in group_results),
+                "mean_group_reward": sum(
+                    group["mean_reward"] for group in group_results
+                )
+                / len(group_results),
+                "sample_mean_reward": sum(rewards) / len(rewards),
+                "update_index": update_offset + 1,
+            }
+
+        return {
+            "completed_updates": available_updates,
+            "expected_updates": available_updates,
+            "final_checkpoint": session.export_checkpoint(),
+            "final_policy_version": final_policy_version,
+            "last_train_update": last_update,
+            "prompt_groups_per_update": prompt_groups_per_update,
+            "samples_per_update": samples_per_update,
+            "train_groups": len(schedule),
+            "train_groups_consumed": consumed_groups,
+            "train_groups_dropped": len(schedule) - consumed_groups,
+        }
+
+    return agent_func.run(execute)
