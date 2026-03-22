@@ -285,14 +285,81 @@ def test_openforge_gateway_stop_terminates_recorded_process() -> None:
             "active_state_path",
             lambda: state_path,
         ):
+            process_alive = True
+
+            def fake_kill(pid: int, sig: int) -> None:
+                nonlocal process_alive
+                if sig == signal.SIGTERM:
+                    seen.update({"pid": pid, "signal": sig})
+                    process_alive = False
+                    return
+                if sig == 0 and process_alive:
+                    return
+                raise ProcessLookupError
+
             with patch.object(
                 openforge_cli.os,
                 "kill",
-                lambda pid, sig: seen.update({"pid": pid, "signal": sig}),
+                fake_kill,
             ):
-                assert openforge_cli.main(["gateway", "stop"]) == 0
+                with patch.object(openforge_cli.time, "sleep", lambda _: None):
+                    assert openforge_cli.main(["gateway", "stop"]) == 0
 
     assert seen == {"pid": 4321, "signal": signal.SIGTERM}
+    assert state_path.exists() is False
+
+
+def test_openforge_gateway_stop_escalates_to_sigkill() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_path = Path(tmpdir) / "active_gateway.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "gateway": {"host": "127.0.0.1", "pid": 4321, "port": 8000},
+                    "session": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        signals: list[int] = []
+
+        with patch.object(
+            openforge_cli.active_state,
+            "active_state_path",
+            lambda: state_path,
+        ):
+            alive_checks = {"count": 0}
+
+            def fake_kill(pid: int, sig: int) -> None:
+                if sig == signal.SIGTERM:
+                    signals.append(sig)
+                    return
+                if sig == 0:
+                    alive_checks["count"] += 1
+                    if alive_checks["count"] < 100:
+                        return
+                    raise ProcessLookupError
+                if sig == signal.SIGKILL:
+                    signals.append(sig)
+                    return
+                raise ProcessLookupError
+
+            with patch.object(
+                openforge_cli.os,
+                "kill",
+                fake_kill,
+            ):
+                with patch.object(openforge_cli.time, "sleep", lambda _: None):
+                    timeline = iter([0.0, 10.0])
+                    with patch.object(
+                        openforge_cli.time,
+                        "monotonic",
+                        lambda: next(timeline),
+                    ):
+                        assert openforge_cli.main(["gateway", "stop"]) == 0
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
     assert state_path.exists() is False
 
 
@@ -303,6 +370,7 @@ def main() -> int:
             test_openforge_session_start_rejects_existing_session,
             test_openforge_session_stop_ends_active_session,
             test_openforge_gateway_stop_terminates_recorded_process,
+            test_openforge_gateway_stop_escalates_to_sigkill,
         ]
     )
 

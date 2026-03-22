@@ -89,7 +89,6 @@ The active environment is recorded on the local machine at:
 - Linux
 - Python 3.10+
 - NVIDIA GPU(s) with a working CUDA stack
-- Ray available for your run
 - `uv`
 
 ### Install
@@ -141,19 +140,12 @@ The bundled GSM8K example is configured for:
 - 3 SGLang rollout replicas
 - GRPO on `Qwen/Qwen2.5-0.5B-Instruct`
 
-OpenForge runs on Ray. Before you start the gateway and session flow, make sure
-you have a Ray cluster available for the run. For manual runs, start or point
-to Ray before you launch the gateway and session flow. The GSM8K wrapper does
-not start Ray for you.
+OpenForge runs on Ray, but the default behavior is simple:
 
-For a local head node that matches the bundled GSM8K example:
+- if `RAY_ADDRESS` is unset, `session start` creates a local Ray runtime
+- if `RAY_ADDRESS` is set, `session start` attaches to that cluster
 
-```bash
-ray start --head --num-gpus=4 --num-cpus=32
-```
-
-If you are attaching to an existing Ray cluster instead, export its address
-before starting the gateway:
+To attach to an existing Ray cluster instead of using a local one:
 
 ```bash
 export RAY_ADDRESS="ray://<head-node>:10001"
@@ -164,21 +156,13 @@ export RAY_ADDRESS="ray://<head-node>:10001"
 ### Fastest Path
 
 ```bash
-ray start --head --num-gpus=4 --num-cpus=32
 bash examples/run_gsm8k_ninja_train.sh
 ```
 
 This wrapper starts the gateway, starts a session, runs the GSM8K Ninja
-training example, and cleans up on exit. It assumes a Ray cluster is already
-available.
+training example, and cleans up on exit.
 
 ### Manual Flow
-
-First, make sure Ray is available for the run. For a local single-node setup:
-
-```bash
-ray start --head --num-gpus=4 --num-cpus=32
-```
 
 Shell 1:
 
@@ -202,6 +186,12 @@ PYTHONUNBUFFERED=1 uv run python examples/train_gsm8k_ninja.py \
 
 The training script attaches to the active gateway and active session
 automatically.
+
+`session start` is the heavy step. It creates or attaches to Ray, allocates the
+runtime, and may take a few minutes on a cold start.
+
+If you want to use an existing Ray cluster instead of the local default, export
+`RAY_ADDRESS` before running `session start`.
 
 When you are done:
 

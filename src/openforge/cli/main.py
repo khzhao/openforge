@@ -37,6 +37,19 @@ def _run_gateway_stop(_: argparse.Namespace) -> int:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    else:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     active_state.clear_active_gateway()
     return 0
 

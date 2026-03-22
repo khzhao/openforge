@@ -227,7 +227,10 @@ class Runtime:
 
         started_ray = False
         if not ray.is_initialized():
-            ray.init(log_to_driver=False)
+            ray.init(
+                address=os.environ.get("RAY_ADDRESS", "local"),
+                log_to_driver=False,
+            )
             started_ray = True
 
         placement_groups = create_placement_groups(cfg)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import types
 from unittest.mock import patch
 
 from _script_test_utils import expect_raises, install_test_stubs, run_tests
@@ -140,12 +141,18 @@ def test_runtime_start_rolls_back_state_when_slot_creation_fails() -> None:
 
 def test_runtime_start_slot_shuts_down_ray_when_startup_fails() -> None:
     runtime = Runtime(cfg=_server_config())
-    state = {"initialized": False, "shutdown_called": False, "removed_pg": False}
+    state = {
+        "address": None,
+        "initialized": False,
+        "shutdown_called": False,
+        "removed_pg": False,
+    }
 
     def is_initialized() -> bool:
         return bool(state["initialized"])
 
-    def init(*, log_to_driver: bool) -> None:
+    def init(*, address: str, log_to_driver: bool) -> None:
+        state["address"] = address
         state["initialized"] = True
 
     def shutdown() -> None:
@@ -204,6 +211,63 @@ def test_runtime_start_slot_shuts_down_ray_when_startup_fails() -> None:
 
     assert state["removed_pg"] is True
     assert state["shutdown_called"] is True
+    assert state["address"] == "local"
+
+
+def test_runtime_start_slot_uses_explicit_ray_address() -> None:
+    runtime = Runtime(cfg=_server_config())
+    state = {"address": None}
+
+    def init(*, address: str, log_to_driver: bool) -> None:
+        state["address"] = address
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(ray, "is_initialized", lambda: False))
+        stack.enter_context(patch.object(ray, "init", init))
+        stack.enter_context(
+            patch.object(
+                ray_utils,
+                "create_placement_groups",
+                lambda cfg: {"actor": ("pg", [0], [0]), "rollout": ("pg", [1], [1])},
+            )
+        )
+        stack.enter_context(
+            patch.object(networking_utils, "get_host_ip", lambda: "127.0.0.1")
+        )
+        stack.enter_context(
+            patch.object(
+                networking_utils,
+                "get_free_port",
+                lambda start=20000: 20000,
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                runtime_api,
+                "create_train_manager",
+                lambda *args, **kwargs: types.SimpleNamespace(
+                    shutdown=lambda: None,
+                    register_rollout=lambda engine_workers: None,
+                ),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                runtime_api,
+                "create_rollout_manager",
+                lambda *args, **kwargs: types.SimpleNamespace(
+                    shutdown=lambda: None,
+                    engine_workers=[],
+                ),
+            )
+        )
+        stack.enter_context(
+            patch.object(runtime_api, "register_rollout", lambda *args, **kwargs: None)
+        )
+        stack.enter_context(patch.dict("os.environ", {"RAY_ADDRESS": "ray://cluster"}))
+        runtime._start_slot(runtime._build_config(runtime_config=_runtime_config()))
+
+    assert state["address"] == "ray://cluster"
 
 
 def test_runtime_shutdown_also_shuts_down_ray() -> None:
@@ -304,6 +368,7 @@ def main() -> int:
         [
             test_runtime_start_rolls_back_state_when_slot_creation_fails,
             test_runtime_start_slot_shuts_down_ray_when_startup_fails,
+            test_runtime_start_slot_uses_explicit_ray_address,
             test_runtime_shutdown_also_shuts_down_ray,
             test_runtime_tokenize_messages_propagates_chat_template_failure,
             test_runtime_generate_forwards_input_ids,
