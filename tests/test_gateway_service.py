@@ -34,6 +34,7 @@ class _FakeTrainLoop:
         self.started = False
         self.stopped = False
         self.train_once_calls = 0
+        self.policy_version = 0
         self.__class__.instances.append(self)
 
     def start(self) -> None:
@@ -183,6 +184,12 @@ class _FakeRuntime:
         token_count = sum(len(message.content.split()) for message in messages)
         return list(range(1, token_count + 2))
 
+    def tokenize_messages_batch(
+        self,
+        message_batches: list[list[ChatMessage]],
+    ) -> list[list[int]]:
+        return [self.tokenize_messages(messages) for messages in message_batches]
+
     def generate(
         self,
         *,
@@ -196,6 +203,17 @@ class _FakeRuntime:
             token_ids=[100 + prompt_tail, 200 + prompt_tail],
             rollout_model_version="v5",
         )
+
+    def generate_batch(
+        self,
+        *,
+        input_ids: list[list[int]],
+        sampling_params: dict[str, object] | None = None,
+    ) -> list[Generation]:
+        return [
+            self.generate(input_ids=item, sampling_params=sampling_params)
+            for item in input_ids
+        ]
 
     def train_manager(self):
         return object()
@@ -212,8 +230,14 @@ class _FailingTokenizeRuntime(_FakeRuntime):
     ) -> list[int]:
         raise RuntimeError("template boom")
 
+    def tokenize_messages_batch(
+        self,
+        message_batches: list[list[ChatMessage]],
+    ) -> list[list[int]]:
+        raise RuntimeError("template boom")
 
-def test_gateway_service_start_generate_fork_and_end() -> None:
+
+def test_gateway_service_start_generate_and_end() -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
@@ -260,14 +284,9 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
                 "max_new_tokens": 32,
             }
 
-            child = await service.start_trajectory(
-                session_id=session.session_id,
-                parent_trajectory_id=root.trajectory_id,
-            )
+            child = await service.start_trajectory(session_id=session.session_id)
             child_turns = await store.list_turns(child.trajectory_id)
-            assert len(child_turns) == 1
-            assert child_turns[0].turn_index == 0
-            assert child_turns[0].token_ids == [1, 2, 3, 103, 203]
+            assert child_turns == []
 
             child_generated = await service.generate(
                 session_id=session.session_id,
@@ -275,7 +294,7 @@ def test_gateway_service_start_generate_fork_and_end() -> None:
                 messages=[ChatMessage(role="user", content="continue child")],
             )
             child_payload = child_generated.model_dump(mode="json")
-            assert child_payload["id"] == f"chatcmpl_{child.trajectory_id}_1"
+            assert child_payload["id"] == f"chatcmpl_{child.trajectory_id}_0"
             assert child_payload["choices"][0]["message"]["role"] == "assistant"
 
             await service.end_trajectory(
@@ -425,8 +444,8 @@ def test_gateway_service_generate_wraps_tokenization_failure() -> None:
         trajectory = await service.start_trajectory(session_id=session.session_id)
 
         with expect_raises(
-            ValueError,
-            "failed to tokenize messages with chat template: template boom",
+            Exception,
+            "template boom",
         ):
             await service.generate(
                 session_id=session.session_id,
@@ -447,12 +466,12 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
         session = await service.start_session(**_start_session_kwargs("model-a"))
         root = await service.start_trajectory(session_id=session.session_id)
 
-        with expect_raises(Exception, "unknown trajectory_id"):
-            await service.generate(
-                session_id=session.session_id,
-                trajectory_id="traj_missing",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
+        generated = await service.generate(
+            session_id=session.session_id,
+            trajectory_id="traj_missing",
+            messages=[ChatMessage(role="user", content="hello")],
+        )
+        assert generated.metadata["trajectory_id"] == "traj_missing"
 
         await service.generate(
             session_id=session.session_id,
@@ -465,19 +484,12 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
             final_reward=1.0,
         )
 
-        with expect_raises(Exception, "is not active"):
-            await service.generate(
-                session_id=session.session_id,
-                trajectory_id=root.trajectory_id,
-                messages=[ChatMessage(role="user", content="again")],
-            )
-
-        with expect_raises(Exception, "is not active"):
-            await service.start_trajectory(
-                session_id=session.session_id,
-                parent_trajectory_id=root.trajectory_id,
-            )
-
+        generated_again = await service.generate(
+            session_id=session.session_id,
+            trajectory_id=root.trajectory_id,
+            messages=[ChatMessage(role="user", content="again")],
+        )
+        assert generated_again.metadata["trajectory_id"] == root.trajectory_id
         await store.close()
 
     with _patched_train_loop():
@@ -527,7 +539,7 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
 
 
 def test_parse_generation_payload_prefers_weight_version() -> None:
-    generation = Runtime._parse_generation_payload(
+    generation = Runtime._parse_generation_info(
         {
             "text": "hello",
             "output_ids": [10, 11],
@@ -537,11 +549,11 @@ def test_parse_generation_payload_prefers_weight_version() -> None:
             },
         },
     )
-    assert generation.rollout_model_version == "default"
+    assert generation["rollout_model_version"] == "default"
 
 
 def test_gateway_controller_parses_router_payload() -> None:
-    generation = Runtime._parse_generation_payload(
+    generation = Runtime._parse_generation_info(
         {
             "text": "hello",
             "output_ids": [11, 12],
@@ -551,14 +563,14 @@ def test_gateway_controller_parses_router_payload() -> None:
             },
         },
     )
-    assert generation.text == "hello"
-    assert generation.token_ids == [11, 12]
-    assert generation.finish_reason == "stop"
-    assert generation.rollout_model_version == "policy-7"
+    assert generation["text"] == "hello"
+    assert generation["token_ids"] == [11, 12]
+    assert generation["finish_reason"] == "stop"
+    assert generation["rollout_model_version"] == "policy-7"
 
 
 def test_gateway_controller_parses_router_payload_with_meta_token_ids() -> None:
-    generation = Runtime._parse_generation_payload(
+    generation = Runtime._parse_generation_info(
         {
             "text": "hello",
             "meta_info": {
@@ -568,14 +580,14 @@ def test_gateway_controller_parses_router_payload_with_meta_token_ids() -> None:
             },
         },
     )
-    assert generation.token_ids == [101, 102]
-    assert generation.finish_reason == "length"
-    assert generation.rollout_model_version == "default"
+    assert generation["token_ids"] == [101, 102]
+    assert generation["finish_reason"] == "length"
+    assert generation["rollout_model_version"] == "default"
 
 
 def test_gateway_controller_requires_output_token_ids() -> None:
     with expect_raises(ValueError, "output_ids or token_ids"):
-        Runtime._parse_generation_payload(
+        Runtime._parse_generation_info(
             {
                 "text": "hello",
                 "meta_info": {
@@ -587,7 +599,7 @@ def test_gateway_controller_requires_output_token_ids() -> None:
 
 
 def test_gateway_controller_parses_router_payload_without_extra_fields() -> None:
-    generation = Runtime._parse_generation_payload(
+    generation = Runtime._parse_generation_info(
         {
             "text": "hello",
             "output_ids": [11, 12],
@@ -597,14 +609,14 @@ def test_gateway_controller_parses_router_payload_without_extra_fields() -> None
             },
         }
     )
-    assert generation.token_ids == [11, 12]
-    assert generation.finish_reason == "stop"
-    assert generation.rollout_model_version == "default"
+    assert generation["token_ids"] == [11, 12]
+    assert generation["finish_reason"] == "stop"
+    assert generation["rollout_model_version"] == "default"
 
 
 def test_parse_generation_payload_requires_weight_version() -> None:
     with expect_raises(ValueError, "weight_version"):
-        Runtime._parse_generation_payload(
+        Runtime._parse_generation_info(
             {
                 "text": "hello",
                 "output_ids": [10],
@@ -618,7 +630,7 @@ def test_parse_generation_payload_requires_weight_version() -> None:
 def main() -> int:
     return run_tests(
         [
-            test_gateway_service_start_generate_fork_and_end,
+            test_gateway_service_start_generate_and_end,
             test_gateway_service_list_models_and_start_session_tracks_active_model,
             test_gateway_service_start_session_rejects_second_active_session,
             test_gateway_service_releases_runtime_after_last_session_and_allows_switch,

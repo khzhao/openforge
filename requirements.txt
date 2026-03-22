@@ -4,5 +4,5 @@ httpx
 requests
 safetensors
 setuptools
-sglang[all]
-sglang_router
+sglang[all]==0.5.9
+sglang_router==0.3.2

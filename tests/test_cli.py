@@ -186,7 +186,7 @@ def test_openforge_session_start_rejects_existing_session() -> None:
     urls: list[str] = []
 
     def fake_urlopen(request, timeout: float):
-        assert timeout in (2.0, 60.0)
+        assert timeout in (2.0, openforge_cli.DEFAULT_SESSION_START_TIMEOUT_SECONDS)
         urls.append(request.full_url)
         if request.full_url.endswith("/health"):
             return _FakeHTTPResponse(status=200, payload={"ok": True})
@@ -230,7 +230,7 @@ def test_openforge_session_stop_ends_active_session() -> None:
     requests: list[tuple[str, str]] = []
 
     def fake_urlopen(request, timeout: float):
-        assert timeout in (2.0, 60.0)
+        assert timeout in (2.0, openforge_cli.DEFAULT_GATEWAY_TIMEOUT_SECONDS)
         requests.append((request.method, request.full_url))
         if request.full_url.endswith("/health"):
             return _FakeHTTPResponse(status=200, payload={"ok": True})

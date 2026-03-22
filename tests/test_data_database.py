@@ -26,6 +26,20 @@ def _turn(trajectory_id: str, turn_index: int) -> Turn:
     )
 
 
+async def _create_trajectory(
+    store: SQLiteOpenForgeStore,
+    trajectory: Trajectory,
+) -> None:
+    await store.create_trajectories([trajectory])
+
+
+async def _append_turn(
+    store: SQLiteOpenForgeStore,
+    turn: Turn,
+) -> None:
+    await store.append_turns([turn])
+
+
 def test_sqlite_openforge_store_session_trajectory_and_turn_lifecycle() -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -35,14 +49,14 @@ def test_sqlite_openforge_store_session_trajectory_and_turn_lifecycle() -> None:
             root = Trajectory(
                 trajectory_id="traj-0",
                 session_id=session.session_id,
-                parent_trajectory_id=None,
+                group_id=None,
                 status="active",
             )
 
             await store.create_session(session)
-            await store.create_trajectory(root)
-            await store.append_turn(_turn("traj-0", 0))
-            await store.append_turn(_turn("traj-0", 1))
+            await _create_trajectory(store, root)
+            await _append_turn(store, _turn("traj-0", 0))
+            await _append_turn(store, _turn("traj-0", 1))
 
             loaded_session = await store.get_session("session-0")
             loaded_trajectory = await store.get_trajectory("traj-0")
@@ -64,28 +78,31 @@ def test_sqlite_openforge_store_filters_by_status_and_model() -> None:
             await store.create_session(Session(session_id="s0", model_name="model-a"))
             await store.create_session(Session(session_id="s1", model_name="model-b"))
 
-            await store.create_trajectory(
+            await _create_trajectory(
+                store,
                 Trajectory(
                     trajectory_id="t0",
                     session_id="s0",
-                    parent_trajectory_id=None,
+                    group_id=None,
                     status="completed",
                     final_reward=1.0,
                 )
             )
-            await store.create_trajectory(
+            await _create_trajectory(
+                store,
                 Trajectory(
                     trajectory_id="t1",
                     session_id="s0",
-                    parent_trajectory_id="t0",
+                    group_id="group-0",
                     status="active",
                 )
             )
-            await store.create_trajectory(
+            await _create_trajectory(
+                store,
                 Trajectory(
                     trajectory_id="t2",
                     session_id="s1",
-                    parent_trajectory_id=None,
+                    group_id=None,
                     status="completed",
                     final_reward=2.0,
                 )
@@ -130,16 +147,16 @@ def test_sqlite_openforge_store_updates_trajectory() -> None:
             trajectory = Trajectory(
                 trajectory_id="t0",
                 session_id="s0",
-                parent_trajectory_id=None,
+                group_id=None,
                 status="active",
             )
-            await store.create_trajectory(trajectory)
+            await _create_trajectory(store, trajectory)
 
             await store.update_trajectory(
                 Trajectory(
                     trajectory_id="t0",
                     session_id="s0",
-                    parent_trajectory_id=None,
+                    group_id=None,
                     status="completed",
                     final_reward=3.5,
                 )
@@ -172,17 +189,18 @@ def test_sqlite_openforge_store_persists_reopened_data_and_orders_turns() -> Non
     async def write(path: Path) -> None:
         store = SQLiteOpenForgeStore(path)
         await store.create_session(Session(session_id="s0", model_name="model-a"))
-        await store.create_trajectory(
+        await _create_trajectory(
+            store,
             Trajectory(
                 trajectory_id="t0",
                 session_id="s0",
-                parent_trajectory_id=None,
+                group_id=None,
                 status="completed",
                 final_reward=1.0,
             )
         )
-        await store.append_turn(_turn("t0", 1))
-        await store.append_turn(_turn("t0", 0))
+        await _append_turn(store, _turn("t0", 1))
+        await _append_turn(store, _turn("t0", 0))
         await store.close()
 
     async def read(path: Path) -> None:
@@ -210,18 +228,19 @@ def test_sqlite_openforge_store_rejects_duplicate_turn_indices() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
-        await store.create_trajectory(
+        await _create_trajectory(
+            store,
             Trajectory(
                 trajectory_id="t0",
                 session_id="s0",
-                parent_trajectory_id=None,
+                group_id=None,
                 status="active",
             )
         )
-        await store.append_turn(_turn("t0", 0))
+        await _append_turn(store, _turn("t0", 0))
 
         try:
-            await store.append_turn(_turn("t0", 0))
+            await _append_turn(store, _turn("t0", 0))
         except sqlite3.IntegrityError:
             pass
         else:

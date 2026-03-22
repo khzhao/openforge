@@ -77,7 +77,12 @@ class RolloutManager:
         self.router_spec = RouterSpec(**main_router_kwargs)
         self._router = Router()
         self._router.initialize(self.router_spec)
-        self._router.launch()
+        try:
+            self._router.launch()
+        except Exception:
+            self.engine_group.shutdown()
+            self._router.shutdown()
+            raise
 
     def shutdown(self) -> None:
         """Shutdown the rollout manager."""

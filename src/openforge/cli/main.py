@@ -17,6 +17,7 @@ from openforge.configs.models import GatewayServerConfig
 from openforge.gateway.types import RuntimeConfig
 
 DEFAULT_GATEWAY_TIMEOUT_SECONDS = 60.0
+DEFAULT_SESSION_START_TIMEOUT_SECONDS = 600.0
 
 
 def _run_gateway_start(args: argparse.Namespace) -> int:
@@ -51,7 +52,7 @@ def add_session_start_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=DEFAULT_GATEWAY_TIMEOUT_SECONDS,
+        default=DEFAULT_SESSION_START_TIMEOUT_SECONDS,
         help="Timeout in seconds for waiting on and talking to the gateway.",
     )
 
@@ -128,6 +129,19 @@ def _wait_for_gateway(*, base_url: str, timeout: float) -> None:
     raise SystemExit(f"timed out waiting for gateway at {base_url}")
 
 
+def _wait_for_active_gateway_target(*, timeout: float) -> tuple[str, int]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return active_state.load_active_gateway_target()
+        except AssertionError:
+            pass
+        time.sleep(1.0)
+    raise SystemExit(
+        "no active gateway recorded; run `uv run openforge gateway start --config ...` first"
+    )
+
+
 def _current_session(*, base_url: str, timeout: float) -> dict[str, object] | None:
     status, response = _request_json(
         method="GET",
@@ -147,7 +161,7 @@ def _current_session(*, base_url: str, timeout: float) -> dict[str, object] | No
 
 def _run_session_start(args: argparse.Namespace) -> int:
     runtime_config = RuntimeConfig.from_yaml(args.runtime_config)
-    host, port = active_state.load_active_gateway_target()
+    host, port = _wait_for_active_gateway_target(timeout=args.timeout)
     base_url = f"http://{host}:{port}"
     _wait_for_gateway(base_url=base_url, timeout=args.timeout)
     session = _current_session(base_url=base_url, timeout=args.timeout)
@@ -171,7 +185,7 @@ def _run_session_start(args: argparse.Namespace) -> int:
 
 
 def _run_session_stop(args: argparse.Namespace) -> int:
-    host, port = active_state.load_active_gateway_target()
+    host, port = _wait_for_active_gateway_target(timeout=args.timeout)
     base_url = f"http://{host}:{port}"
     _wait_for_gateway(base_url=base_url, timeout=args.timeout)
     session = _current_session(base_url=base_url, timeout=args.timeout)

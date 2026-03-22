@@ -12,16 +12,14 @@ from sglang_router.router_args import RouterArgs
 from openforge.rollout.types import EngineAddr, EngineSpec, RouterSpec
 
 
-def _stop_spawn_resource_tracker() -> None:
-    """Stop the local multiprocessing resource tracker when no children remain."""
-    try:
-        from multiprocessing import resource_tracker
+def stop_spawn_resource_tracker() -> None:
+    """Stop the parent's spawn resource tracker if it is running."""
+    from multiprocessing import resource_tracker
 
-        tracker = resource_tracker._resource_tracker
-        if getattr(tracker, "_pid", None):
-            tracker._stop()
-    except Exception:
-        pass
+    tracker = resource_tracker._resource_tracker
+    if tracker._fd is None:
+        return
+    tracker._stop()
 
 
 def stop_spawned_process(
@@ -29,22 +27,19 @@ def stop_spawned_process(
     *,
     timeout: float,
 ) -> None:
-    """Stop one multiprocessing child and clean up its resource tracker."""
+    """Stop one multiprocessing child."""
     if process is None:
         return
 
-    try:
+    if process.is_alive():
+        try:
+            kill_process_tree(process.pid, include_parent=True)
+        except Exception:
+            process.terminate()
+        process.join(timeout=timeout)
         if process.is_alive():
-            try:
-                kill_process_tree(process.pid, include_parent=True)
-            except Exception:
-                process.terminate()
+            process.kill()
             process.join(timeout=timeout)
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=timeout)
-    finally:
-        _stop_spawn_resource_tracker()
 
 
 def get_local_gpu_id(global_gpu_id: int) -> int:

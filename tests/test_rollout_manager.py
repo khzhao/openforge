@@ -8,10 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import ray
-import torch
 from huggingface_hub import snapshot_download
 from ray._private import worker as ray_worker
 
+from _script_test_utils import require_free_gpu_ids, start_test_ray_cluster
 from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.manager import RolloutManager, start_sglang_engines
 from openforge.rollout.sglang.utils import get_local_gpu_id
@@ -32,17 +32,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpus-per-replica", type=int, default=1)
     parser.add_argument("--cpus-per-rollout-replica", type=int, default=1)
     return parser.parse_args()
-
-
-def require_visible_gpus(min_count: int) -> int:
-    visible = torch.cuda.device_count()
-    if visible < min_count:
-        raise RuntimeError(
-            f"Expected at least {min_count} visible GPUs, found {visible}"
-        )
-    return visible
-
-
 def resolve_model_path(model_path_or_id: str) -> str:
     candidate = Path(model_path_or_id)
     if candidate.exists():
@@ -246,7 +235,7 @@ def validate_engine_sampling_params(engine_worker: object) -> None:
 def validate_manager_sampling_params(manager: RolloutManager) -> None:
     prompt = "Validate sampling params through the rollout manager."
     for max_new_tokens in (2, 5):
-        payload = manager.generate(
+        payload = manager.router.generate(
             {
                 "temperature": 0.0,
                 "top_p": 1.0,
@@ -274,20 +263,21 @@ def main() -> int:
 
     args = parse_args()
     total_requested = args.train_gpus + args.rollout_replicas * args.gpus_per_replica
-    visible_gpus = require_visible_gpus(total_requested)
+    gpu_ids = require_free_gpu_ids(total_requested)
     model_path = resolve_model_path(args.model_path)
     cfg = build_cfg(
         model_path=model_path,
-        visible_gpus=visible_gpus,
+        visible_gpus=len(gpu_ids),
         train_gpus=args.train_gpus,
         rollout_replicas=args.rollout_replicas,
         gpus_per_replica=args.gpus_per_replica,
         cpus_per_rollout_replica=args.cpus_per_rollout_replica,
     )
 
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(ignore_reinit_error=True, include_dashboard=False)
+    start_test_ray_cluster(
+        gpu_ids=gpu_ids,
+        num_cpus=max(len(gpu_ids), 1),
+    )
 
     session_dir = ray_worker._global_node.get_session_dir_path()
     placement_groups = create_placement_groups(cfg)
@@ -309,7 +299,7 @@ def main() -> int:
             ray.kill(worker)
 
     manager = RolloutManager(cfg, placement_groups)
-    manager.initialize()
+    manager.initialize(router_ip="127.0.0.1", policy="round_robin")
     validate_manager_sampling_params(manager)
     manager.shutdown()
 

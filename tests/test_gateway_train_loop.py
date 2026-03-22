@@ -55,12 +55,14 @@ class _FakeTrainManager:
         self.step_calls: list[tuple[int, list[object]]] = []
         self.sync_calls: list[tuple[int, str | None]] = []
 
-    def step(
+    def step_update(
         self,
-        rank_minibatches,
+        rank_minibatches_per_update,
         *,
         global_step: int,
     ) -> list[TrainStepResult]:
+        assert len(rank_minibatches_per_update) == 1
+        rank_minibatches = rank_minibatches_per_update[0]
         self.step_calls.append((global_step, rank_minibatches))
         return [
             TrainStepResult(rank=rank, global_step=global_step, metrics={"lr": 0.1})
@@ -95,6 +97,20 @@ def _turn(
     )
 
 
+async def _create_trajectory(
+    store: SQLiteOpenForgeStore,
+    trajectory: Trajectory,
+) -> None:
+    await store.create_trajectories([trajectory])
+
+
+async def _append_turn(
+    store: SQLiteOpenForgeStore,
+    turn: Turn,
+) -> None:
+    await store.append_turns([turn])
+
+
 async def _completed_trajectory(
     store: SQLiteOpenForgeStore,
     *,
@@ -103,17 +119,22 @@ async def _completed_trajectory(
     reward: float,
     token_ids: list[int],
     prompt_length: int = 2,
+    group_id: str | None = None,
+    expected_group_size: int = 1,
 ) -> None:
-    await store.create_trajectory(
+    await _create_trajectory(
+        store,
         Trajectory(
             trajectory_id=trajectory_id,
             session_id=session_id,
-            parent_trajectory_id=None,
+            group_id=group_id,
             status="completed",
+            expected_group_size=expected_group_size,
             final_reward=reward,
         )
     )
-    await store.append_turn(
+    await _append_turn(
+        store,
         _turn(
             trajectory_id,
             turn_index=0,
@@ -130,18 +151,23 @@ async def _completed_multiturn_trajectory(
     trajectory_id: str,
     reward: float,
     turns: list[tuple[int, list[int]]],
+    group_id: str | None = None,
+    expected_group_size: int = 1,
 ) -> None:
-    await store.create_trajectory(
+    await _create_trajectory(
+        store,
         Trajectory(
             trajectory_id=trajectory_id,
             session_id=session_id,
-            parent_trajectory_id=None,
+            group_id=group_id,
             status="completed",
+            expected_group_size=expected_group_size,
             final_reward=reward,
         )
     )
     for turn_index, (prompt_length, token_ids) in enumerate(turns):
-        await store.append_turn(
+        await _append_turn(
+            store,
             _turn(
                 trajectory_id,
                 turn_index=turn_index,
@@ -277,14 +303,6 @@ def test_train_loop_builds_group_relative_advantages() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
-        await store.create_trajectory(
-            Trajectory(
-                trajectory_id="root",
-                session_id="s0",
-                parent_trajectory_id=None,
-                status="active",
-            )
-        )
         await _completed_trajectory(
             store,
             session_id="s0",
@@ -292,15 +310,8 @@ def test_train_loop_builds_group_relative_advantages() -> None:
             reward=1.5,
             token_ids=[1, 2, 3, 4],
             prompt_length=3,
-        )
-        await store.update_trajectory(
-            Trajectory(
-                trajectory_id="child-a",
-                session_id="s0",
-                parent_trajectory_id="root",
-                status="completed",
-                final_reward=1.5,
-            )
+            group_id="g0",
+            expected_group_size=2,
         )
         await _completed_trajectory(
             store,
@@ -309,15 +320,8 @@ def test_train_loop_builds_group_relative_advantages() -> None:
             reward=-2.0,
             token_ids=[5, 6, 7],
             prompt_length=1,
-        )
-        await store.update_trajectory(
-            Trajectory(
-                trajectory_id="child-b",
-                session_id="s0",
-                parent_trajectory_id="root",
-                status="completed",
-                final_reward=-2.0,
-            )
+            group_id="g0",
+            expected_group_size=2,
         )
 
         train_manager = _FakeTrainManager(
@@ -358,14 +362,6 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
-        await store.create_trajectory(
-            Trajectory(
-                trajectory_id="root",
-                session_id="s0",
-                parent_trajectory_id=None,
-                status="active",
-            )
-        )
         await _completed_multiturn_trajectory(
             store,
             session_id="s0",
@@ -375,15 +371,8 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
                 (2, [1, 2, 3]),
                 (3, [1, 2, 3, 4]),
             ],
-        )
-        await store.update_trajectory(
-            Trajectory(
-                trajectory_id="t0",
-                session_id="s0",
-                parent_trajectory_id="root",
-                status="completed",
-                final_reward=1.5,
-            )
+            group_id="g0",
+            expected_group_size=2,
         )
         await _completed_trajectory(
             store,
@@ -392,15 +381,8 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
             reward=-2.0,
             token_ids=[5, 6, 7],
             prompt_length=1,
-        )
-        await store.update_trajectory(
-            Trajectory(
-                trajectory_id="t1",
-                session_id="s0",
-                parent_trajectory_id="root",
-                status="completed",
-                final_reward=-2.0,
-            )
+            group_id="g0",
+            expected_group_size=2,
         )
 
         train_manager = _FakeTrainManager(
@@ -509,39 +491,27 @@ def test_train_loop_waits_for_all_siblings_in_group() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
-        await store.create_trajectory(
-            Trajectory(
-                trajectory_id="root",
-                session_id="s0",
-                parent_trajectory_id=None,
-                status="active",
-            )
-        )
         await _completed_trajectory(
             store,
             session_id="s0",
             trajectory_id="child-a",
             reward=1.0,
             token_ids=[1, 2, 3],
+            group_id="g0",
+            expected_group_size=2,
         )
-        await store.update_trajectory(
-            Trajectory(
-                trajectory_id="child-a",
-                session_id="s0",
-                parent_trajectory_id="root",
-                status="completed",
-                final_reward=1.0,
-            )
-        )
-        await store.create_trajectory(
+        await _create_trajectory(
+            store,
             Trajectory(
                 trajectory_id="child-b",
                 session_id="s0",
-                parent_trajectory_id="root",
+                group_id="g0",
                 status="active",
+                expected_group_size=2,
             )
         )
-        await store.append_turn(
+        await _append_turn(
+            store,
             _turn(
                 "child-b",
                 turn_index=0,
@@ -575,34 +545,19 @@ def test_train_loop_waits_for_all_siblings_in_group() -> None:
 
 
 def test_train_loop_trains_completed_sibling_group_together() -> None:
-    """Train sibling trajectories from the same parent as one group."""
+    """Train completed trajectories from the same group together."""
 
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         await store.create_session(Session(session_id="s0", model_name="model-a"))
-        await store.create_trajectory(
-            Trajectory(
-                trajectory_id="root",
-                session_id="s0",
-                parent_trajectory_id=None,
-                status="active",
-            )
-        )
         await _completed_trajectory(
             store,
             session_id="s0",
             trajectory_id="child-a",
             reward=1.0,
             token_ids=[1, 2, 3],
-        )
-        await store.update_trajectory(
-            Trajectory(
-                trajectory_id="child-a",
-                session_id="s0",
-                parent_trajectory_id="root",
-                status="completed",
-                final_reward=1.0,
-            )
+            group_id="g0",
+            expected_group_size=2,
         )
         await _completed_trajectory(
             store,
@@ -610,15 +565,8 @@ def test_train_loop_trains_completed_sibling_group_together() -> None:
             trajectory_id="child-b",
             reward=2.0,
             token_ids=[4, 5, 6, 7],
-        )
-        await store.update_trajectory(
-            Trajectory(
-                trajectory_id="child-b",
-                session_id="s0",
-                parent_trajectory_id="root",
-                status="completed",
-                final_reward=2.0,
-            )
+            group_id="g0",
+            expected_group_size=2,
         )
 
         train_manager = _FakeTrainManager(
@@ -663,15 +611,17 @@ def test_train_loop_run_polls_until_batch_is_ready() -> None:
             reward=1.0,
             token_ids=[1, 2, 3],
         )
-        await store.create_trajectory(
+        await _create_trajectory(
+            store,
             Trajectory(
                 trajectory_id="t1",
                 session_id="s0",
-                parent_trajectory_id=None,
+                group_id=None,
                 status="active",
             )
         )
-        await store.append_turn(
+        await _append_turn(
+            store,
             _turn(
                 "t1",
                 turn_index=0,
@@ -697,7 +647,7 @@ def test_train_loop_run_polls_until_batch_is_ready() -> None:
             Trajectory(
                 trajectory_id="t1",
                 session_id="s0",
-                parent_trajectory_id=None,
+                group_id=None,
                 status="completed",
                 final_reward=2.0,
             )

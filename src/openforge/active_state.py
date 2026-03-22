@@ -38,7 +38,7 @@ def load_active_state() -> _ActiveState:
     """Load the current shared gateway/session state."""
     path = active_state_path()
     assert path.exists(), (
-        "no active gateway recorded; run `openforge gateway start --config ...` first"
+        "no active gateway recorded; run `uv run openforge gateway start --config ...` first"
     )
     return _ActiveState.model_validate_json(path.read_text(encoding="utf-8"))
 
@@ -97,8 +97,7 @@ def load_active_runtime_config() -> RuntimeConfig:
     """Return the runtime config for the active session."""
     session = load_active_state().session
     assert session is not None, (
-        "no active session recorded; "
-        "run `openforge session start --runtime-config ...` first"
+        "no active session recorded; run `uv run openforge session start --runtime-config ...` first"
     )
     return session.runtime
 

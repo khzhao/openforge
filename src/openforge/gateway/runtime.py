@@ -196,6 +196,8 @@ class Runtime:
     def shutdown(self) -> None:
         import ray
 
+        from openforge.rollout.sglang.utils import stop_spawn_resource_tracker
+
         slot = self._slot
         self._slot = None
         self._runtime_cfg = None
@@ -208,6 +210,7 @@ class Runtime:
         finally:
             if ray.is_initialized():
                 ray.shutdown()
+            stop_spawn_resource_tracker()
 
     def _start_slot(self, cfg: OpenForgeConfig) -> RuntimeSlot:
         import ray

@@ -31,8 +31,10 @@ from pathlib import Path
 from typing import Any
 
 import requests
-import torch
+import ray
 from huggingface_hub import snapshot_download
+
+from _script_test_utils import require_free_gpu_ids, start_test_ray_cluster
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,14 +61,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def require_visible_gpus(min_count: int) -> int:
-    """Validate that enough GPUs are visible for the requested topology."""
-    visible = torch.cuda.device_count()
-    if visible < min_count:
-        raise RuntimeError(
-            f"Expected at least {min_count} visible GPUs, found {visible}"
-        )
-    return visible
+def require_visible_gpus(min_count: int) -> list[int]:
+    """Return free GPU ids for the requested topology."""
+    return require_free_gpu_ids(min_count)
 
 
 def resolve_model_path(model_path_or_id: str) -> str:
@@ -263,7 +260,7 @@ def main() -> int:
     total_requested_gpus = args.train_gpus + (
         args.rollout_replicas * args.gpus_per_replica
     )
-    visible_gpus = require_visible_gpus(total_requested_gpus)
+    gpu_ids = require_visible_gpus(total_requested_gpus)
     model_path = resolve_model_path(args.model_path)
     gateway_port = args.gateway_port or get_free_port(args.gateway_host)
     artifact_dir = make_artifact_dir(args.artifact_dir)
@@ -279,7 +276,7 @@ def main() -> int:
         model_path=model_path,
         gateway_host=args.gateway_host,
         gateway_port=gateway_port,
-        visible_gpus=visible_gpus,
+        visible_gpus=len(gpu_ids),
         train_gpus=args.train_gpus,
         rollout_replicas=args.rollout_replicas,
         gpus_per_replica=args.gpus_per_replica,
@@ -288,6 +285,11 @@ def main() -> int:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in gpu_ids)
+    env["RAY_ADDRESS"] = start_test_ray_cluster(
+        gpu_ids=gpu_ids,
+        num_cpus=args.cpus_per_node,
+    )
     cmd = [
         sys.executable,
         "-m",
@@ -450,6 +452,8 @@ def main() -> int:
                 print("GATEWAY_LOG_START", flush=True)
                 print(output[-12000:], flush=True)
                 print("GATEWAY_LOG_END", flush=True)
+        if ray.is_initialized():
+            ray.shutdown()
 
 
 if __name__ == "__main__":

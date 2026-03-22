@@ -18,9 +18,11 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+import ray
 import requests
 from huggingface_hub import snapshot_download
-import torch
+
+from _script_test_utils import require_free_gpu_ids, start_test_ray_cluster
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG_ROOT = ROOT / "test_scripts" / "logs"
@@ -42,18 +44,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--artifact-dir", default=None)
     return parser.parse_args()
-
-
-def require_visible_gpus(min_count: int) -> int:
-    """Validate that enough GPUs are visible for the requested topology."""
-    visible = torch.cuda.device_count()
-    if visible < min_count:
-        raise RuntimeError(
-            f"Expected at least {min_count} visible GPUs, found {visible}"
-        )
-    return visible
-
-
 def resolve_model_path(model_path_or_id: str) -> str:
     """Resolve a local model path or download/cache a Hub model snapshot."""
     candidate = Path(model_path_or_id)
@@ -309,7 +299,7 @@ def main() -> int:
     total_requested_gpus = args.train_gpus + (
         args.rollout_replicas * args.gpus_per_replica
     )
-    visible_gpus = require_visible_gpus(total_requested_gpus)
+    gpu_ids = require_free_gpu_ids(total_requested_gpus)
     model_path = resolve_model_path(args.model_path)
     gateway_port = args.gateway_port or get_free_port(args.gateway_host)
     artifact_dir = make_artifact_dir(args.artifact_dir)
@@ -323,12 +313,17 @@ def main() -> int:
     config_path = write_temp_config(
         gateway_host=args.gateway_host,
         gateway_port=gateway_port,
-        visible_gpus=visible_gpus,
+        visible_gpus=len(gpu_ids),
         cpus_per_node=args.cpus_per_node,
     )
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in gpu_ids)
+    env["RAY_ADDRESS"] = start_test_ray_cluster(
+        gpu_ids=gpu_ids,
+        num_cpus=args.cpus_per_node,
+    )
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -479,6 +474,8 @@ def main() -> int:
                 flush=True,
             )
             raise RuntimeError("runtime processes survived gateway shutdown")
+        if ray.is_initialized():
+            ray.shutdown()
 
 
 if __name__ == "__main__":

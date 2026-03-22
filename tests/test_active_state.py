@@ -141,7 +141,7 @@ def test_load_active_runtime_config_requires_active_session() -> None:
         state_path = Path(tmpdir) / "active_gateway.json"
         with patch.object(active_state, "active_state_path", lambda: state_path):
             active_state.save_active_gateway(host="127.0.0.1", port=8000, pid=4321)
-            with expect_raises(AssertionError, "openforge session start"):
+            with expect_raises(AssertionError, "uv run openforge session start"):
                 active_state.load_active_runtime_config()
 
 

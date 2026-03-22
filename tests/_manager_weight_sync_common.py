@@ -17,6 +17,7 @@ import torch
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
+from _script_test_utils import require_free_gpu_ids, start_test_ray_cluster
 from openforge.configs.models import OpenForgeConfig
 from openforge.runtime import (
     create_rollout_manager,
@@ -28,17 +29,6 @@ from openforge.utils.ray import create_placement_groups
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 SYNC_MODES = ("disk", "distributed")
-
-
-def require_visible_gpus(min_count: int) -> int:
-    visible = torch.cuda.device_count()
-    if visible < min_count:
-        raise RuntimeError(
-            f"Expected at least {min_count} visible GPUs, found {visible}"
-        )
-    return visible
-
-
 def resolve_local_model_path(model_path_or_id: str) -> str:
     candidate = Path(model_path_or_id)
     if candidate.exists():
@@ -250,20 +240,21 @@ def run_weight_sync_e2e(
         raise ValueError(f"unsupported sync modes: {invalid_modes}")
 
     total_requested = train_gpus + rollout_replicas * gpus_per_replica
-    visible_gpus = require_visible_gpus(total_requested)
+    gpu_ids = require_free_gpu_ids(total_requested)
     resolved_model_path = resolve_local_model_path(model_path)
     cfg = build_cfg(
         model_path=resolved_model_path,
-        visible_gpus=visible_gpus,
+        visible_gpus=len(gpu_ids),
         train_gpus=train_gpus,
         rollout_replicas=rollout_replicas,
         gpus_per_replica=gpus_per_replica,
         cpus_per_rollout_replica=cpus_per_rollout_replica,
     )
 
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(ignore_reinit_error=True, include_dashboard=False)
+    start_test_ray_cluster(
+        gpu_ids=gpu_ids,
+        num_cpus=max(len(gpu_ids), 1),
+    )
 
     placement_groups = create_placement_groups(cfg)
     train_manager = None

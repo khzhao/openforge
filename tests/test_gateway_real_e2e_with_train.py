@@ -13,10 +13,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import ray
 import requests
 import torch
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM
+from _script_test_utils import start_test_ray_cluster
 
 from test_gateway_real_e2e import (
     DEFAULT_MODEL,
@@ -99,8 +101,8 @@ def build_start_session_payload(
                         "num_cycles": 0.5,
                     },
                 },
-                "global_batch_size": 4,
-                "mini_batch_size": 4,
+                "global_batch_size": 2,
+                "mini_batch_size": 2,
                 "micro_batch_size": 1,
                 "checkpoints": checkpoint_root,
                 "cpus_per_worker": 1,
@@ -191,7 +193,7 @@ def trajectory_rows(sqlite_path: Path) -> list[tuple[str, str | None, str, float
     try:
         rows = list(
             conn.execute(
-                "select trajectory_id, parent_trajectory_id, status, final_reward from trajectories order by rowid"
+                "select trajectory_id, group_id, status, final_reward from trajectories order by rowid"
             )
         )
     finally:
@@ -199,23 +201,23 @@ def trajectory_rows(sqlite_path: Path) -> list[tuple[str, str | None, str, float
     return rows
 
 
-def wait_for_child_rows(
+def wait_for_group_rows(
     *,
     sqlite_path: Path,
-    parent_id: str,
+    group_id: str,
     expected_count: int,
     timeout: float,
 ) -> list[tuple[str, str | None, str, float | None]]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         rows = trajectory_rows(sqlite_path)
-        child_rows = [row for row in rows if row[1] == parent_id]
-        if len(child_rows) == expected_count and all(
-            row[2] == "trained" for row in child_rows
+        group_rows = [row for row in rows if row[1] == group_id]
+        if len(group_rows) == expected_count and all(
+            row[2] == "trained" for row in group_rows
         ):
             return rows
         time.sleep(1.0)
-    raise TimeoutError("timed out waiting for child trajectories to become trained")
+    raise TimeoutError("timed out waiting for group trajectories to become trained")
 
 
 def main() -> int:
@@ -223,7 +225,7 @@ def main() -> int:
     total_requested_gpus = args.train_gpus + (
         args.rollout_replicas * args.gpus_per_replica
     )
-    visible_gpus = require_visible_gpus(total_requested_gpus)
+    gpu_ids = require_visible_gpus(total_requested_gpus)
     model_path = resolve_model_path(args.model_path)
     gateway_port = args.gateway_port or get_free_port(args.gateway_host)
     artifact_dir = make_artifact_dir(args.artifact_dir)
@@ -236,7 +238,7 @@ def main() -> int:
         model_path=model_path,
         gateway_host=args.gateway_host,
         gateway_port=gateway_port,
-        visible_gpus=visible_gpus,
+        visible_gpus=len(gpu_ids),
         train_gpus=args.train_gpus,
         rollout_replicas=args.rollout_replicas,
         gpus_per_replica=args.gpus_per_replica,
@@ -245,6 +247,11 @@ def main() -> int:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in gpu_ids)
+    env["RAY_ADDRESS"] = start_test_ray_cluster(
+        gpu_ids=gpu_ids,
+        num_cpus=args.cpus_per_node,
+    )
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -305,23 +312,21 @@ def main() -> int:
         )
         record_event(response_log_path, events, "generate_parent", parent_turn)
 
-        child_a = request_json(
+        child_group_id = "group-0"
+        child_group = request_json(
             "POST",
-            f"{base_url}/start_trajectory",
-            {"session_id": session_id, "parent_trajectory_id": parent_id},
+            f"{base_url}/start_trajectory_groups",
+            {
+                "session_id": session_id,
+                "counts": [2],
+                "group_ids": [child_group_id],
+            },
             timeout=60.0,
         )
-        record_event(response_log_path, events, "start_child_a", child_a)
-        child_a_id = str(child_a["trajectory_id"])
-
-        child_b = request_json(
-            "POST",
-            f"{base_url}/start_trajectory",
-            {"session_id": session_id, "parent_trajectory_id": parent_id},
-            timeout=60.0,
-        )
-        record_event(response_log_path, events, "start_child_b", child_b)
-        child_b_id = str(child_b["trajectory_id"])
+        record_event(response_log_path, events, "start_child_group", child_group)
+        child_ids = child_group["trajectory_ids"][0]
+        child_a_id = str(child_ids[0])
+        child_b_id = str(child_ids[1])
 
         child_a_turn = request_json(
             "POST",
@@ -367,9 +372,9 @@ def main() -> int:
             record_event(response_log_path, events, step, ended)
 
         sqlite_path = config_path.parent / "gateway.sqlite3"
-        rows = wait_for_child_rows(
+        rows = wait_for_group_rows(
             sqlite_path=sqlite_path,
-            parent_id=parent_id,
+            group_id=child_group_id,
             expected_count=2,
             timeout=args.request_timeout,
         )
@@ -394,7 +399,8 @@ def main() -> int:
             timeout=args.request_timeout,
         )
         record_event(response_log_path, events, "generate_post_train", post_train_turn)
-        assert post_train_turn["rollout_model_version"] != "default"
+        rollout_model_version = post_train_turn["metadata"]["rollout_model_version"]
+        assert rollout_model_version != "default"
 
         ended_post_train = request_json(
             "POST",
@@ -417,7 +423,7 @@ def main() -> int:
         record_event(response_log_path, events, "end_session", ended_session)
 
         rows = trajectory_rows(sqlite_path)
-        child_rows = [row for row in rows if row[1] == parent_id]
+        child_rows = [row for row in rows if row[1] == child_group_id]
         assert len(child_rows) == 2
         assert all(row[2] == "trained" for row in child_rows)
 
@@ -443,7 +449,7 @@ def main() -> int:
             "response_log_path": str(response_log_path),
             "checkpoint_dir": None if checkpoint_dir is None else str(checkpoint_dir),
             "sqlite_path": str(sqlite_path),
-            "post_train_rollout_model_version": post_train_turn["rollout_model_version"],
+            "post_train_rollout_model_version": rollout_model_version,
             "changed_parameter": changed_name,
             "max_abs_diff": max_abs_diff,
             "trajectory_rows": rows,
@@ -456,7 +462,7 @@ def main() -> int:
         print("SUMMARY_PATH", summary_path, flush=True)
         print(
             "POST_TRAIN_ROLLOUT_MODEL_VERSION",
-            post_train_turn["rollout_model_version"],
+            rollout_model_version,
             flush=True,
         )
         if changed_name is not None:
@@ -478,6 +484,8 @@ def main() -> int:
                 print("GATEWAY_LOG_START", flush=True)
                 print(output[-12000:], flush=True)
                 print("GATEWAY_LOG_END", flush=True)
+        if ray.is_initialized():
+            ray.shutdown()
 
 
 if __name__ == "__main__":

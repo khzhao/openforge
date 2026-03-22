@@ -27,6 +27,7 @@ from typing import Any
 
 import requests
 from huggingface_hub import snapshot_download
+from _script_test_utils import free_gpu_ids, require_free_gpu_ids, start_test_ray_cluster
 
 import openforge.configs.rollout as rollout_config_module
 
@@ -159,7 +160,6 @@ if __name__ == "__main__":
     maybe_filter_visible_devices(parse_args())
 
 import ray
-import torch
 
 from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.types import RouterSpec
@@ -168,13 +168,8 @@ from openforge.utils.networking import get_free_port
 OpenForgeConfig.model_rebuild(force=True)
 
 
-def require_visible_gpus(min_count: int) -> int:
-    visible = torch.cuda.device_count()
-    if visible < min_count:
-        raise RuntimeError(
-            f"Expected at least {min_count} visible GPUs, found {visible}"
-        )
-    return visible
+def require_visible_gpus(min_count: int) -> list[int]:
+    return require_free_gpu_ids(min_count)
 
 
 def resolve_model_path(model_path_or_id: str) -> str:
@@ -453,30 +448,33 @@ def main() -> int:
             f"(min_free_gpu_memory_gb={os.environ.get(FILTER_THRESHOLD_ENV, '0')})"
         )
 
-    visible_gpus = require_visible_gpus(1)
+    gpu_ids = free_gpu_ids()
+    if not gpu_ids:
+        raise RuntimeError("Expected at least 1 free GPU, found 0")
     rollout_replicas = args.rollout_replicas
     if rollout_replicas is None:
         rollout_replicas = max(
-            (visible_gpus - args.train_gpus) // args.gpus_per_replica,
+            (len(gpu_ids) - args.train_gpus) // args.gpus_per_replica,
             1,
         )
 
     total_requested = args.train_gpus + rollout_replicas * args.gpus_per_replica
-    visible_gpus = require_visible_gpus(total_requested)
+    gpu_ids = require_visible_gpus(total_requested)
     model_path = resolve_model_path(args.model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     cfg = build_cfg(
         model_path=model_path,
-        visible_gpus=visible_gpus,
+        visible_gpus=len(gpu_ids),
         train_gpus=args.train_gpus,
         rollout_replicas=rollout_replicas,
         gpus_per_replica=args.gpus_per_replica,
         cpus_per_rollout_replica=args.cpus_per_rollout_replica,
     )
 
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(ignore_reinit_error=True, include_dashboard=False)
+    start_test_ray_cluster(
+        gpu_ids=gpu_ids,
+        num_cpus=max(len(gpu_ids), 1),
+    )
 
     placement_groups = None
     router = None

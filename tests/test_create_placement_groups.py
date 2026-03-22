@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import argparse
-
 import ray
-import torch
 
+from _script_test_utils import require_free_gpu_ids, start_test_ray_cluster
 from openforge.configs.models import OpenForgeConfig
 from openforge.utils.ray import CanaryWorker, create_placement_groups
 
@@ -16,18 +15,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-gpus", type=int, default=1)
     parser.add_argument("--rollout-gpus", type=int, default=1)
     return parser.parse_args()
-
-
-def require_visible_gpus(min_count: int) -> int:
-    visible = torch.cuda.device_count()
-    if visible < min_count:
-        raise RuntimeError(
-            f"Expected at least {min_count} visible GPUs, found {visible}. "
-            "Adjust CUDA_VISIBLE_DEVICES before running this script."
-        )
-    return visible
-
-
 def build_cfg(*, visible_gpus: int, train_gpus: int, rollout_gpus: int) -> OpenForgeConfig:
     return OpenForgeConfig.model_validate(
         {
@@ -153,16 +140,17 @@ def main() -> int:
         raise ValueError("--train-gpus and --rollout-gpus must both be > 0")
 
     total_requested = args.train_gpus + args.rollout_gpus
-    visible_gpus = require_visible_gpus(total_requested)
+    gpu_ids = require_free_gpu_ids(total_requested)
     cfg = build_cfg(
-        visible_gpus=visible_gpus,
+        visible_gpus=len(gpu_ids),
         train_gpus=args.train_gpus,
         rollout_gpus=args.rollout_gpus,
     )
 
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(ignore_reinit_error=True, include_dashboard=False)
+    start_test_ray_cluster(
+        gpu_ids=gpu_ids,
+        num_cpus=max(len(gpu_ids), 1),
+    )
 
     actor_pg = None
     try:

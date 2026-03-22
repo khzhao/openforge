@@ -252,7 +252,10 @@ def test_runtime_tokenize_messages_propagates_chat_template_failure() -> None:
     tokenizer = FakeTokenizer()
     runtime._tokenizer = tokenizer
 
-    with expect_raises(RuntimeError, match="template boom"):
+    with expect_raises(
+        Exception,
+        match="failed to tokenize messages with chat template: template boom",
+    ):
         runtime.tokenize_messages([ChatMessage(role="user", content="hello")])
 
     assert tokenizer.encode_called is False
@@ -264,7 +267,7 @@ def test_runtime_generate_forwards_input_ids() -> None:
 
     captured: dict[str, object] = {}
 
-    class FakeRolloutManager:
+    class FakeRouter:
         def generate(self, sampling_params, **kwargs):
             captured["sampling_params"] = sampling_params
             captured["kwargs"] = kwargs
@@ -277,6 +280,10 @@ def test_runtime_generate_forwards_input_ids() -> None:
                 },
             }
 
+    class FakeRolloutManager:
+        def __init__(self) -> None:
+            self.router = FakeRouter()
+
     class FakeSlot:
         def __init__(self) -> None:
             self.rollout_manager = FakeRolloutManager()
@@ -286,7 +293,10 @@ def test_runtime_generate_forwards_input_ids() -> None:
     generation = runtime.generate(input_ids=[1, 2, 3])
 
     assert generation.token_ids == [11, 12]
-    assert captured["kwargs"] == {"input_ids": [1, 2, 3]}
+    assert captured["kwargs"] == {
+        "return_logprob": False,
+        "input_ids": [1, 2, 3],
+    }
 
 
 def main() -> int:

@@ -107,7 +107,7 @@ uv pip install -r requirements.txt
 OpenForge installs one CLI:
 
 ```bash
-openforge --help
+uv run openforge --help
 ```
 
 ## Configuration
@@ -143,8 +143,8 @@ The bundled GSM8K example is configured for:
 
 OpenForge runs on Ray. Before you start the gateway and session flow, make sure
 you have a Ray cluster available for the run. For manual runs, start or point
-to Ray before you launch the gateway and session flow. For the local single-node
-wrapper path, `examples/run_gsm8k_ninja_train.sh` uses `RAY_ADDRESS=local`.
+to Ray before you launch the gateway and session flow. The GSM8K wrapper does
+not start Ray for you.
 
 For a local head node that matches the bundled GSM8K example:
 
@@ -164,11 +164,13 @@ export RAY_ADDRESS="ray://<head-node>:10001"
 ### Fastest Path
 
 ```bash
+ray start --head --num-gpus=4 --num-cpus=32
 bash examples/run_gsm8k_ninja_train.sh
 ```
 
 This wrapper starts the gateway, starts a session, runs the GSM8K Ninja
-training example, and cleans up on exit.
+training example, and cleans up on exit. It assumes a Ray cluster is already
+available.
 
 ### Manual Flow
 

@@ -10,6 +10,7 @@ from typing import Any
 import ray
 import torch
 import torch.distributed as dist
+from _script_test_utils import require_free_gpu_ids, start_test_ray_cluster
 from huggingface_hub import snapshot_download
 from transformers import AutoModelForCausalLM
 
@@ -30,12 +31,7 @@ def configure_nccl_env() -> None:
 
 
 def require_visible_gpus(min_count: int) -> int:
-    visible = torch.cuda.device_count()
-    if visible < min_count:
-        raise RuntimeError(
-            f"Expected at least {min_count} visible GPUs, found {visible}"
-        )
-    return visible
+    return len(require_free_gpu_ids(min_count))
 
 
 def resolve_local_model_path(model_path_or_id: str) -> str:
@@ -151,15 +147,16 @@ def start_single_engine(
     model_path: str,
     train_gpus: int = 1,
 ) -> tuple[object, OpenForgeConfig, dict[str, tuple[object, list[int], list[int]]]]:
-    visible_gpus = require_visible_gpus(train_gpus + 1)
+    gpu_ids = require_free_gpu_ids(train_gpus + 1)
     cfg = build_cfg(
         model_path=model_path,
-        visible_gpus=visible_gpus,
+        visible_gpus=len(gpu_ids),
         train_gpus=train_gpus,
     )
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(ignore_reinit_error=True, include_dashboard=False)
+    start_test_ray_cluster(
+        gpu_ids=gpu_ids,
+        num_cpus=max(len(gpu_ids), 1),
+    )
     placement_groups = create_placement_groups(cfg)
     engine_info = start_sglang_engines(cfg, placement_groups)
     return engine_info["engine_workers"][0], cfg, placement_groups

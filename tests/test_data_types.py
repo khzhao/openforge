@@ -14,7 +14,7 @@ def test_session_and_trajectory_construct() -> None:
     trajectory = Trajectory(
         trajectory_id="traj-0",
         session_id=session.session_id,
-        parent_trajectory_id=None,
+        group_id=None,
         status="active",
     )
 
@@ -28,7 +28,7 @@ def test_completed_trajectory_can_store_final_reward() -> None:
     trajectory = Trajectory(
         trajectory_id="traj-0",
         session_id="session-0",
-        parent_trajectory_id="traj-parent",
+        group_id="group-0",
         status="completed",
         final_reward=1.5,
     )
@@ -43,7 +43,7 @@ def test_active_trajectory_cannot_store_final_reward() -> None:
         Trajectory(
             trajectory_id="traj-0",
             session_id="session-0",
-            parent_trajectory_id=None,
+            group_id=None,
             status="active",
             final_reward=1.0,
         )
@@ -55,7 +55,7 @@ def test_terminal_trajectory_statuses_are_terminal() -> None:
         trajectory = Trajectory(
             trajectory_id="traj-0",
             session_id="session-0",
-            parent_trajectory_id="traj-parent",
+            group_id="group-0",
             status=status,
             final_reward=1.0,
         )

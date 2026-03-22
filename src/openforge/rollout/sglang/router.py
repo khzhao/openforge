@@ -130,7 +130,7 @@ class Router:
         return list(self.spec.worker_urls)
 
     def wait_until_ready(self) -> None:
-        """Block until the router is healthy and can proxy generate traffic."""
+        """Block until the router can proxy generate traffic."""
         if self.process is None:
             raise RuntimeError(f"router {self.spec.router_name} has not been launched")
 
@@ -144,7 +144,7 @@ class Router:
                 raise RuntimeError(
                     f"rollout router {self.spec.router_name} exited before becoming ready"
                 )
-            if self.is_healthy() and self._can_route_generate():
+            if self._can_route_generate():
                 return
             time.sleep(self.HEALTHCHECK_POLL_INTERVAL_SECONDS)
 
