@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass
 from uuid import uuid4
@@ -27,6 +28,8 @@ from openforge.gateway.types import (
 )
 
 __all__ = ["Service"]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -479,6 +482,10 @@ class Service:
                     sampling_params=batch[0].sampling_params,
                 )
             except Exception as exc:
+                logger.exception(
+                    "gateway batched generate failed for %s trajectory(s)",
+                    len(batch),
+                )
                 for request in batch:
                     if not request.future.done():
                         request.future.set_exception(exc)

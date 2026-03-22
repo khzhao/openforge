@@ -44,7 +44,7 @@ train:
   global_batch_size: 1280
   mini_batch_size: 320
   micro_batch_size: 4
-  ppo_epochs: 4
+  ppo_epochs: 1
   checkpoints: ./checkpoints
   cpus_per_worker: 1
   parallel:

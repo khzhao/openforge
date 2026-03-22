@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import update_wrapper
@@ -21,9 +22,28 @@ __all__ = [
     "register",
 ]
 
+_AUTO_MAX_PARALLELISM_CAP = 128
+_AUTO_MAX_PARALLELISM_FLOOR = 32
+
 
 def _sleep_before_retry(attempt: int) -> None:
     time.sleep(min(2.0, 0.5 * (2**attempt)))
+
+
+def _fail_clients_best_effort(
+    session: "_ActiveSession",
+    clients: list["Client"],
+) -> None:
+    if not clients:
+        return
+    try:
+        session.fail_clients(clients)
+    except Exception:
+        for client in clients:
+            try:
+                client.fail()
+            except Exception:
+                pass
 
 
 def _map_parallel(
@@ -47,7 +67,12 @@ def _resolve_max_parallelism(
     job_count: int,
 ) -> int:
     if max_parallelism is None:
-        return max(1, job_count)
+        cpu_count = os.cpu_count() or 1
+        auto_limit = min(
+            _AUTO_MAX_PARALLELISM_CAP,
+            max(_AUTO_MAX_PARALLELISM_FLOOR, cpu_count * 4),
+        )
+        return max(1, min(job_count, auto_limit))
     if max_parallelism <= 0:
         raise ValueError("max_parallelism must be > 0")
     return max_parallelism
@@ -456,69 +481,65 @@ def _execute_grouped(
     max_parallelism: int,
     retries: int,
 ) -> list[list[float]]:
-    last_error: Exception | None = None
+    rollout_parallelism = max(1, min(group_size, max_parallelism))
+    group_parallelism = max(1, max_parallelism // rollout_parallelism)
 
-    for attempt in range(retries + 1):
-        client_groups: list[list[Client]] = []
-        try:
-            client_groups = session.trajectory_groups(
-                counts=[group_size for _ in call_specs],
-                group_ids=[f"group_{uuid4().hex}" for _ in call_specs],
-            )
-            jobs = [
-                (request_index, rollout_index, call_args, call_kwargs, client)
-                for request_index, ((call_args, call_kwargs), clients) in enumerate(
-                    zip(call_specs, client_groups, strict=True)
+    def run_group(
+        group_job: tuple[int, tuple[tuple[Any, ...], dict[str, Any]]]
+    ) -> tuple[int, list[float]]:
+        request_index, (call_args, call_kwargs) = group_job
+        last_error: Exception | None = None
+
+        for attempt in range(retries + 1):
+            clients: list[Client] = []
+            try:
+                clients = session.trajectory_groups(
+                    counts=[group_size],
+                    group_ids=[f"group_{uuid4().hex}"],
+                )[0]
+
+                def run_rollout(
+                    rollout_job: tuple[int, Client]
+                ) -> tuple[int, Client, float]:
+                    rollout_index, client = rollout_job
+                    reward = agent._call_body(client, call_args, call_kwargs)
+                    return rollout_index, client, reward
+
+                results = _map_parallel(
+                    list(enumerate(clients)),
+                    max_parallelism=rollout_parallelism,
+                    fn=run_rollout,
                 )
-                for rollout_index, client in enumerate(clients)
-            ]
+                session.end_clients(
+                    [client for _rollout_index, client, _reward in results],
+                    rewards=[reward for _rollout_index, _client, reward in results],
+                )
 
-            def run_job(
-                job: tuple[int, int, tuple[Any, ...], dict[str, Any], Client]
-            ) -> tuple[int, int, Client, float]:
-                request_index, rollout_index, call_args, call_kwargs, client = job
-                reward = agent._call_body(client, call_args, call_kwargs)
-                return request_index, rollout_index, client, reward
+                rewards = [0.0 for _ in range(group_size)]
+                for rollout_index, _client, reward in results:
+                    rewards[rollout_index] = reward
+                return request_index, rewards
+            except Exception as exc:
+                last_error = exc
+                _fail_clients_best_effort(session, clients)
+                if attempt >= retries:
+                    raise RuntimeError(
+                        f"grouped execute failed for request index {request_index}"
+                    ) from exc
+                _sleep_before_retry(attempt)
 
-            results = _map_parallel(
-                jobs,
-                max_parallelism=max_parallelism,
-                fn=run_job,
-            )
-            session.end_clients(
-                [client for _request_index, _rollout_index, client, _reward in results],
-                rewards=[
-                    reward
-                    for _request_index, _rollout_index, _client, reward in results
-                ],
-            )
+        assert last_error is not None
+        raise last_error
 
-            rewards_by_request = [
-                [0.0 for _ in range(group_size)] for _ in call_specs
-            ]
-            for request_index, rollout_index, _client, reward in results:
-                rewards_by_request[request_index][rollout_index] = reward
-            return rewards_by_request
-        except Exception as exc:
-            last_error = exc
-            pending_clients = [
-                client for clients in client_groups for client in clients
-            ]
-            if pending_clients:
-                try:
-                    session.fail_clients(pending_clients)
-                except Exception:
-                    for client in pending_clients:
-                        try:
-                            client.fail()
-                        except Exception:
-                            pass
-            if attempt >= retries:
-                raise
-            _sleep_before_retry(attempt)
-
-    assert last_error is not None
-    raise last_error
+    grouped_results = _map_parallel(
+        list(enumerate(call_specs)),
+        max_parallelism=group_parallelism,
+        fn=run_group,
+    )
+    rewards_by_request = [[0.0 for _ in range(group_size)] for _ in call_specs]
+    for request_index, rewards in grouped_results:
+        rewards_by_request[request_index] = rewards
+    return rewards_by_request
 
 
 def register(

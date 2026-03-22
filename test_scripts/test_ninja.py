@@ -407,6 +407,41 @@ def test_execute_uses_group_size_for_grouped_rollouts() -> None:
     assert fake_gateway.max_active_generates > 1
 
 
+def test_execute_grouped_retries_only_failed_group() -> None:
+    prompt_counts: dict[str, int] = {}
+    lock = Lock()
+
+    @register(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        response = client.generate([{"role": "user", "content": prompt}])
+        assert response["choices"][0]["message"]["content"]
+        with lock:
+            prompt_counts[prompt] = prompt_counts.get(prompt, 0) + 1
+            prompt_call_index = prompt_counts[prompt]
+        if prompt == "hello" and prompt_call_index == 2:
+            raise RuntimeError("boom")
+        return 1.0
+
+    with _patched_ninja() as fake_gateway:
+        rewards = agent.execute(
+            requests=[{"prompt": "hello"}, {"prompt": "goodbye"}],
+            group_size=3,
+            max_parallelism=6,
+            retries=1,
+        )
+
+    assert rewards == [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
+    assert len(fake_gateway.finished) == 6
+    assert len(fake_gateway.failed) == 3
+    assert len(fake_gateway.generate_calls) == 9
+    failed_prompts = {
+        call["messages"][0]["content"]
+        for call in fake_gateway.generate_calls
+        if call["trajectory_id"] in set(fake_gateway.failed)
+    }
+    assert failed_prompts == {"hello"}
+
+
 def test_agent_checkpoint_and_policy_accessors() -> None:
     @register(_gateway_config())
     def agent(client, prompt: str) -> float:
@@ -430,6 +465,7 @@ def main() -> int:
             test_register_marks_failed_trajectory_on_error,
             test_execute_runs_many_requests_by_default,
             test_execute_uses_group_size_for_grouped_rollouts,
+            test_execute_grouped_retries_only_failed_group,
             test_agent_checkpoint_and_policy_accessors,
         ]
     )
