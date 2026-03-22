@@ -8,7 +8,8 @@ This script:
    rollout replica.
 3. Starts ``openforge.cli.main gateway start`` as a real subprocess.
 4. Issues HTTP requests to the live gateway:
-   ``/models``, ``/start_session``, ``/start_trajectory``, ``/generate``,
+   ``/v1/models``, ``/start_session``, ``/start_trajectory``,
+   ``/v1/chat/completions``,
    ``/end_trajectory``, and ``/end_session``.
 
 It is intentionally a standalone script, not a pytest test, so it can be used as
@@ -110,6 +111,31 @@ def request_json(
     response = requests.request(method, url, json=payload, timeout=timeout)
     response.raise_for_status()
     return response.json()
+
+
+def chat_payload(
+    *,
+    session_id: str,
+    trajectory_id: str,
+    model: str,
+    content: str,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    max_completion_tokens: int = 6,
+) -> dict[str, Any]:
+    """Build one OpenAI-shaped chat-completions payload."""
+    return {
+        "_openforge": {
+            "session_id": session_id,
+            "trajectory_id": trajectory_id,
+            "group_id": None,
+        },
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_completion_tokens": max_completion_tokens,
+    }
 
 
 def write_temp_config(
@@ -325,7 +351,7 @@ def main() -> int:
 
         models = request_json(
             "GET",
-            f"{base_url}/models",
+            f"{base_url}/v1/models",
             timeout=30.0,
         )
         record_response("models", models)
@@ -346,6 +372,7 @@ def main() -> int:
         record_response("start_session", started)
         print("START_SESSION", json.dumps(started, sort_keys=True), flush=True)
         session_id = str(started["session_id"])
+        model_name = str(started["model"])
 
         trajectory = request_json(
             "POST",
@@ -359,20 +386,13 @@ def main() -> int:
 
         generated = request_json(
             "POST",
-            f"{base_url}/generate",
-            {
-                "session_id": session_id,
-                "trajectory_id": trajectory_id,
-                "messages": [
-                    {"role": "user", "content": "Write a very short greeting."}
-                ],
-                "sampling_params": {
-                    "temperature": 0.0,
-                    "top_p": 1.0,
-                    "top_k": 1,
-                    "max_new_tokens": 6,
-                },
-            },
+            f"{base_url}/v1/chat/completions",
+            chat_payload(
+                session_id=session_id,
+                trajectory_id=trajectory_id,
+                model=model_name,
+                content="Write a very short greeting.",
+            ),
             timeout=float(args.request_timeout),
         )
         record_response("generate", generated)
@@ -415,7 +435,7 @@ def main() -> int:
 
         final_models = request_json(
             "GET",
-            f"{base_url}/models",
+            f"{base_url}/v1/models",
             timeout=30.0,
         )
         record_response("models_after", final_models)

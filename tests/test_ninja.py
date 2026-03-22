@@ -12,6 +12,8 @@ from threading import Lock
 from typing import Iterator
 from unittest.mock import patch
 
+from openai.types.chat import ChatCompletion
+
 from _script_test_utils import expect_raises, install_test_stubs, run_tests
 
 install_test_stubs()
@@ -110,10 +112,18 @@ class _FakeGateway:
                 },
             )
 
-        if method == "POST" and path == "/generate":
+        if method == "POST" and path == "/v1/chat/completions":
             assert payload is not None
             messages = [dict(message) for message in payload["messages"]]
-            trajectory_id = str(payload["trajectory_id"])
+            openforge = dict(payload["_openforge"])
+            trajectory_id = str(openforge["trajectory_id"])
+            sampling_params: dict[str, object] = {}
+            if "temperature" in payload:
+                sampling_params["temperature"] = payload["temperature"]
+            if "top_p" in payload:
+                sampling_params["top_p"] = payload["top_p"]
+            if "max_completion_tokens" in payload:
+                sampling_params["max_new_tokens"] = payload["max_completion_tokens"]
             with self._lock:
                 self.active_trajectory_ids.add(trajectory_id)
                 turn_index = sum(
@@ -125,7 +135,7 @@ class _FakeGateway:
                     {
                         "trajectory_id": trajectory_id,
                         "messages": messages,
-                        "sampling_params": dict(payload["sampling_params"]),
+                        "sampling_params": sampling_params,
                     }
                 )
                 self.active_generates += 1
@@ -277,8 +287,34 @@ def _patched_ninja(
         def close(self) -> None:
             return None
 
+    class _FakeOpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            self.chat = self._Chat()
+            self.models = object()
+
+        class _Chat:
+            def __init__(self) -> None:
+                self.completions = _FakeOpenAI._Completions()
+
+        class _Completions:
+            def create(self, **kwargs):
+                extra_body = dict(kwargs.pop("extra_body", {}))
+                payload = dict(kwargs)
+                payload.update(extra_body)
+                response = gateway.handle(
+                    "POST",
+                    "/v1/chat/completions",
+                    payload,
+                )
+                response.raise_for_status()
+                return ChatCompletion.model_validate(response.json())
+
+        def close(self) -> None:
+            return None
+
     with ExitStack() as stack:
         stack.enter_context(patch.object(ninja.httpx, "Client", _FakeHttpClient))
+        stack.enter_context(patch.object(ninja, "OpenAI", _FakeOpenAI))
         yield gateway
 
 
@@ -312,9 +348,12 @@ def test_register_requires_active_gateway_for_implicit_discovery() -> None:
 
 def test_register_discovers_active_gateway_from_shared_state() -> None:
     @ninja.agent()
-    def agent(prompt: str) -> float:
-        response = ninja.generate(prompt)
-        return 1.0 if response["choices"][0]["message"]["content"] else -1.0
+    def agent(client, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return 1.0 if response.choices[0].message.content else -1.0
 
     with tempfile.TemporaryDirectory() as tmpdir:
         state_path = Path(tmpdir) / "active_gateway.json"
@@ -338,44 +377,49 @@ def test_register_discovers_active_gateway_from_shared_state() -> None:
 
 def test_register_routes_explicit_messages() -> None:
     @ninja.agent(_gateway_config())
-    def agent(prompt: str) -> float:
+    def agent(client, prompt: str) -> float:
         messages = [{"role": "user", "content": prompt}]
-        first = ninja.generate(messages, temperature=0.7)
-        messages.append(first["choices"][0]["message"])
+        first = client.chat.completions.create(
+            model="model-a",
+            messages=messages,
+            temperature=0.7,
+        )
+        messages.append({"role": "assistant", "content": first.choices[0].message.content})
         messages.append({"role": "user", "content": "follow up"})
-        second = ninja.generate(messages)
-        trajectory_id = str(first["metadata"]["trajectory_id"])
-        assert first["id"] == f"chatcmpl_{trajectory_id}_0"
-        assert first["object"] == "chat.completion"
-        assert first["model"] == "model-a"
-        assert first["usage"] == {
+        second = client.chat.completions.create(
+            model="model-a",
+            messages=messages,
+        )
+        trajectory_id = str(first.metadata["trajectory_id"])
+        assert first.id == f"chatcmpl_{trajectory_id}_0"
+        assert first.object == "chat.completion"
+        assert first.model == "model-a"
+        assert first.usage.model_dump(exclude_none=True) == {
             "completion_tokens": 2,
             "prompt_tokens": 1,
             "total_tokens": 3,
         }
-        assert first["metadata"] == {
+        assert first.metadata == {
             "session_id": "sess_1",
             "trajectory_id": trajectory_id,
             "token_ids": [1, 2],
             "rollout_model_version": "v1",
         }
-        assert first["choices"] == [
+        assert first.model_dump(exclude_none=True)["choices"] == [
             {
+                "finish_reason": "stop",
                 "index": 0,
                 "message": {"role": "assistant", "content": "reply to hello"},
-                "finish_reason": "stop",
-                "logprobs": None,
             }
         ]
-        assert second["choices"] == [
+        assert second.model_dump(exclude_none=True)["choices"] == [
             {
+                "finish_reason": "stop",
                 "index": 0,
                 "message": {"role": "assistant", "content": "reply to follow up"},
-                "finish_reason": "stop",
-                "logprobs": None,
             }
         ]
-        assert second["id"] == f"chatcmpl_{trajectory_id}_1"
+        assert second.id == f"chatcmpl_{trajectory_id}_1"
         return 1.0
 
     with _patched_ninja() as fake_gateway:
@@ -404,8 +448,11 @@ def test_register_routes_explicit_messages() -> None:
 
 def test_register_marks_failed_trajectory_on_error() -> None:
     @ninja.agent(_gateway_config())
-    def agent(prompt: str) -> float:
-        ninja.generate(prompt)
+    def agent(client, prompt: str) -> float:
+        client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
         raise RuntimeError("boom")
 
     with _patched_ninja() as fake_gateway:
@@ -418,10 +465,12 @@ def test_register_marks_failed_trajectory_on_error() -> None:
 
 def test_execute_runs_many_requests_by_default() -> None:
     @ninja.agent(_gateway_config())
-    def agent(prompt: str) -> float:
-        response = ninja.generate(prompt)
-        message = response["choices"][0]["message"]
-        return 1.0 if message["content"] else -1.0
+    def agent(client, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return 1.0 if response.choices[0].message.content else -1.0
 
     with _patched_ninja() as fake_gateway:
         rewards = agent.sample(
@@ -436,10 +485,12 @@ def test_execute_runs_many_requests_by_default() -> None:
 
 def test_execute_uses_group_size_for_grouped_rollouts() -> None:
     @ninja.agent(_gateway_config())
-    def agent(prompt: str) -> float:
-        response = ninja.generate(prompt)
-        message = response["choices"][0]["message"]
-        return 1.0 if message["content"] else -1.0
+    def agent(client, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return 1.0 if response.choices[0].message.content else -1.0
 
     with _patched_ninja() as fake_gateway:
         rewards = agent.sample(
@@ -460,9 +511,12 @@ def test_execute_grouped_retries_only_failed_group() -> None:
     lock = Lock()
 
     @ninja.agent(_gateway_config())
-    def agent(prompt: str) -> float:
-        response = ninja.generate(prompt)
-        assert response["choices"][0]["message"]["content"]
+    def agent(client, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        assert response.choices[0].message.content
         with lock:
             prompt_counts[prompt] = prompt_counts.get(prompt, 0) + 1
             prompt_call_index = prompt_counts[prompt]

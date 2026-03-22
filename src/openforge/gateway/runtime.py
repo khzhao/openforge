@@ -10,7 +10,13 @@ from typing import Any, Sequence
 from transformers import AutoTokenizer
 
 from openforge.configs.models import GatewayServerConfig, OpenForgeConfig
-from openforge.gateway.types import ChatMessage, RuntimeConfig
+from openforge.gateway.types import (
+    ChatCompletionMessage,
+    ChatCompletionTool,
+    RuntimeConfig,
+    chat_message_payload,
+    tool_payloads,
+)
 
 __all__ = [
     "Generation",
@@ -108,14 +114,17 @@ class Runtime:
 
     def tokenize_messages(
         self,
-        messages: Sequence[ChatMessage],
+        messages: Sequence[ChatCompletionMessage],
+        *,
+        tools: Sequence[ChatCompletionTool] | None = None,
     ) -> list[int]:
         tokenizer = self._get_tokenizer()
         try:
             token_ids = tokenizer.apply_chat_template(
-                [message.model_dump(mode="json") for message in messages],
+                [chat_message_payload(message) for message in messages],
                 tokenize=True,
                 add_generation_prompt=True,
+                tools=tool_payloads(list(tools) if tools is not None else None),
             )
         except Exception as exc:
             raise Exception(
@@ -125,13 +134,15 @@ class Runtime:
 
     def tokenize_messages_batch(
         self,
-        message_batches: Sequence[Sequence[ChatMessage]],
+        message_batches: Sequence[Sequence[ChatCompletionMessage]],
+        *,
+        tools: Sequence[ChatCompletionTool] | None = None,
     ) -> list[list[int]]:
         if not message_batches:
             return []
         tokenizer = self._get_tokenizer()
         conversations = [
-            [message.model_dump(mode="json") for message in messages]
+            [chat_message_payload(message) for message in messages]
             for messages in message_batches
         ]
         try:
@@ -139,6 +150,7 @@ class Runtime:
                 conversations,
                 tokenize=True,
                 add_generation_prompt=True,
+                tools=tool_payloads(list(tools) if tools is not None else None),
             )
         except Exception as exc:
             raise Exception(

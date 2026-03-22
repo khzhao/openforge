@@ -23,6 +23,7 @@ from _script_test_utils import start_test_ray_cluster
 from test_gateway_real_e2e import (
     DEFAULT_MODEL,
     ROOT,
+    chat_payload,
     get_free_port,
     make_artifact_dir,
     require_visible_gpus,
@@ -289,6 +290,7 @@ def main() -> int:
         )
         record_event(response_log_path, events, "start_session", started)
         session_id = str(started["session_id"])
+        model_name = str(started["model"])
 
         parent = request_json(
             "POST",
@@ -301,13 +303,13 @@ def main() -> int:
 
         parent_turn = request_json(
             "POST",
-            f"{base_url}/generate",
-            {
-                "session_id": session_id,
-                "trajectory_id": parent_id,
-                "messages": [{"role": "user", "content": "Say hello in four words."}],
-                "sampling_params": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "max_new_tokens": 6},
-            },
+            f"{base_url}/v1/chat/completions",
+            chat_payload(
+                session_id=session_id,
+                trajectory_id=parent_id,
+                model=model_name,
+                content="Say hello in four words.",
+            ),
             timeout=args.request_timeout,
         )
         record_event(response_log_path, events, "generate_parent", parent_turn)
@@ -330,26 +332,26 @@ def main() -> int:
 
         child_a_turn = request_json(
             "POST",
-            f"{base_url}/generate",
-            {
-                "session_id": session_id,
-                "trajectory_id": child_a_id,
-                "messages": [{"role": "user", "content": "Now answer: yes."}],
-                "sampling_params": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "max_new_tokens": 6},
-            },
+            f"{base_url}/v1/chat/completions",
+            chat_payload(
+                session_id=session_id,
+                trajectory_id=child_a_id,
+                model=model_name,
+                content="Now answer: yes.",
+            ),
             timeout=args.request_timeout,
         )
         record_event(response_log_path, events, "generate_child_a", child_a_turn)
 
         child_b_turn = request_json(
             "POST",
-            f"{base_url}/generate",
-            {
-                "session_id": session_id,
-                "trajectory_id": child_b_id,
-                "messages": [{"role": "user", "content": "Now answer: no."}],
-                "sampling_params": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "max_new_tokens": 6},
-            },
+            f"{base_url}/v1/chat/completions",
+            chat_payload(
+                session_id=session_id,
+                trajectory_id=child_b_id,
+                model=model_name,
+                content="Now answer: no.",
+            ),
             timeout=args.request_timeout,
         )
         record_event(response_log_path, events, "generate_child_b", child_b_turn)
@@ -389,13 +391,13 @@ def main() -> int:
 
         post_train_turn = request_json(
             "POST",
-            f"{base_url}/generate",
-            {
-                "session_id": session_id,
-                "trajectory_id": post_train_id,
-                "messages": [{"role": "user", "content": "Say hello in four words."}],
-                "sampling_params": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "max_new_tokens": 6},
-            },
+            f"{base_url}/v1/chat/completions",
+            chat_payload(
+                session_id=session_id,
+                trajectory_id=post_train_id,
+                model=model_name,
+                content="Say hello in four words.",
+            ),
             timeout=args.request_timeout,
         )
         record_event(response_log_path, events, "generate_post_train", post_train_turn)

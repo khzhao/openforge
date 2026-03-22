@@ -94,9 +94,9 @@ def save_split(path: Path, examples: list[GSM8kExample]) -> None:
     write_jsonl(path, [asdict(example) for example in examples])
 
 
-def response_text(response: dict[str, object]) -> str:
-    """Extract the assistant text from a Ninja generate response."""
-    return str(response["choices"][0]["message"]["content"])
+def response_text(response: Any) -> str:
+    """Extract the assistant text from a chat-completions response."""
+    return str(response.choices[0].message.content)
 
 
 def save_summary(path: Path, payload: dict[str, object]) -> None:
@@ -214,7 +214,7 @@ def _active_session(
         response.raise_for_status()
         payload = response.json()
         assert isinstance(payload, dict)
-        yield client, str(payload["session_id"])
+        yield client, str(payload["session_id"]), str(payload["model"])
     finally:
         client.close()
 
@@ -238,16 +238,21 @@ def _wait_for_rollout_policy_version(
         "max_new_tokens": 8,
     }
     while time.monotonic() < deadline:
-        with _active_session(gateway_target) as (client, session_id):
+        with _active_session(gateway_target) as (client, session_id, model_name):
             trajectory_id = f"traj_{uuid4().hex}"
             response = client.post(
-                "/generate",
+                "/v1/chat/completions",
                 json={
-                    "session_id": session_id,
-                    "trajectory_id": trajectory_id,
-                    "group_id": None,
+                    "_openforge": {
+                        "session_id": session_id,
+                        "trajectory_id": trajectory_id,
+                        "group_id": None,
+                    },
+                    "model": model_name,
                     "messages": [{"role": "user", "content": "Reply with OK."}],
-                    "sampling_params": probe_sampling,
+                    "temperature": probe_sampling["temperature"],
+                    "top_p": probe_sampling["top_p"],
+                    "max_completion_tokens": probe_sampling["max_new_tokens"],
                 },
             )
             response.raise_for_status()

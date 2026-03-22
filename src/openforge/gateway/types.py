@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -14,24 +15,30 @@ from openforge.configs.rollout import RolloutConfig
 from openforge.configs.train import TrainConfig
 
 __all__ = [
+    "AssistantMessage",
+    "AssistantToolCall",
+    "AssistantToolCallFunction",
     "ChatMessage",
-    "ChatChoice",
+    "ChatCompletionChoice",
+    "ChatCompletionCreateRequest",
+    "ChatCompletionResponse",
+    "ChatCompletionTool",
+    "ChatCompletionToolChoice",
+    "ChatCompletionToolFunction",
+    "CompletionUsage",
     "DiscardTrajectoryRequest",
     "EndTrajectoriesRequest",
     "EndTrajectoriesResponse",
-    "CompletionUsage",
-    "ErrorTrajectoriesRequest",
-    "ExportCheckpointRequest",
-    "ExportCheckpointResponse",
     "EndSessionRequest",
     "EndSessionResponse",
     "EndTrajectoryRequest",
     "EndTrajectoryResponse",
+    "ErrorTrajectoriesRequest",
     "ErrorTrajectoryRequest",
-    "GenerateRequest",
-    "GenerateResponse",
-    "ModelRecord",
-    "ModelsResponse",
+    "ExportCheckpointRequest",
+    "ExportCheckpointResponse",
+    "ModelCard",
+    "ModelListResponse",
     "RuntimeConfig",
     "StartSessionRequest",
     "StartSessionResponse",
@@ -39,21 +46,10 @@ __all__ = [
     "StartTrajectoryGroupsResponse",
     "StartTrajectoryRequest",
     "StartTrajectoryResponse",
+    "ToolMessage",
+    "chat_message_payload",
+    "tool_payloads",
 ]
-
-
-class ModelRecord(BaseModel):
-    """One model exposed by the gateway."""
-
-    id: str
-    tokenizer: str
-
-
-class ModelsResponse(BaseModel):
-    """Response payload for listing available models."""
-
-    models: list[ModelRecord]
-    active_model: str | None
 
 
 class RuntimeConfig(BaseModel):
@@ -119,28 +115,116 @@ class StartTrajectoryGroupsResponse(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    """One chat-style message supplied by the user."""
+    """One plain chat message with no tool-specific fields."""
 
-    role: str
+    role: Literal["developer", "system", "user"]
     content: str
 
 
-class GenerateRequest(BaseModel):
-    """Request payload for generating on one trajectory."""
+class AssistantToolCallFunction(BaseModel):
+    """One function call payload in OpenAI chat-completions format."""
 
+    name: str
+    arguments: str
+
+
+class AssistantToolCall(BaseModel):
+    """One assistant tool call in OpenAI chat-completions format."""
+
+    id: str
+    type: Literal["function"] = "function"
+    function: AssistantToolCallFunction
+
+
+class AssistantMessage(BaseModel):
+    """One assistant message in OpenAI chat-completions format."""
+
+    role: Literal["assistant"] = "assistant"
+    content: str | None = None
+    tool_calls: list[AssistantToolCall] | None = None
+
+
+class ToolMessage(BaseModel):
+    """One tool message in OpenAI chat-completions format."""
+
+    role: Literal["tool"]
+    content: str
+    tool_call_id: str
+
+
+ChatCompletionMessage = Annotated[
+    ChatMessage | AssistantMessage | ToolMessage,
+    Field(discriminator="role"),
+]
+
+
+class ChatCompletionToolFunction(BaseModel):
+    """One tool function definition in OpenAI chat-completions format."""
+
+    name: str
+    description: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatCompletionTool(BaseModel):
+    """One tool definition in OpenAI chat-completions format."""
+
+    type: Literal["function"]
+    function: ChatCompletionToolFunction
+
+
+class ChatCompletionNamedToolChoiceFunction(BaseModel):
+    """One named tool target in OpenAI chat-completions format."""
+
+    name: str
+
+
+class ChatCompletionNamedToolChoice(BaseModel):
+    """One explicit tool choice in OpenAI chat-completions format."""
+
+    type: Literal["function"]
+    function: ChatCompletionNamedToolChoiceFunction
+
+
+ChatCompletionToolChoice = (
+    Literal["none", "auto", "required"] | ChatCompletionNamedToolChoice
+)
+
+
+class _OpenForgeRequestState(BaseModel):
     session_id: str
     trajectory_id: str
     group_id: str | None = None
-    messages: list[ChatMessage]
-    sampling_params: dict[str, Any] = Field(default_factory=dict)
 
 
-class ChatChoice(BaseModel):
+class ChatCompletionCreateRequest(BaseModel):
+    """OpenAI-style request payload for one chat completion."""
+
+    # Framework-injected state for the active session and trajectory.
+    openforge: _OpenForgeRequestState = Field(alias="_openforge")
+    model: str
+    messages: list[ChatCompletionMessage]
+    frequency_penalty: float | None = None
+    max_completion_tokens: int | None = None
+    max_tokens: int | None = None
+    n: int | None = None
+    presence_penalty: float | None = None
+    seed: int | None = None
+    stop: str | list[str] | None = None
+    stream: bool | None = None
+    temperature: float | None = None
+    tool_choice: ChatCompletionToolChoice | None = None
+    tools: list[ChatCompletionTool] | None = None
+    top_p: float | None = None
+    user: str | None = None
+
+
+class ChatCompletionChoice(BaseModel):
     """One assistant choice in an OpenAI-style chat completion."""
 
     finish_reason: str
     index: int
-    message: ChatMessage
+    message: AssistantMessage
     logprobs: None = None
 
 
@@ -152,16 +236,32 @@ class CompletionUsage(BaseModel):
     total_tokens: int
 
 
-class GenerateResponse(BaseModel):
+class ChatCompletionResponse(BaseModel):
     """OpenAI-style chat completion returned by the gateway."""
 
     id: str
-    choices: list[ChatChoice]
+    choices: list[ChatCompletionChoice]
     created: int
     model: str
     object: Literal["chat.completion"] = "chat.completion"
     usage: CompletionUsage
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelCard(BaseModel):
+    """One model exposed by the OpenAI-style models endpoint."""
+
+    id: str
+    object: Literal["model"] = "model"
+    created: int = 0
+    owned_by: str = "openforge"
+
+
+class ModelListResponse(BaseModel):
+    """OpenAI-style list-models response."""
+
+    object: Literal["list"] = "list"
+    data: list[ModelCard]
 
 
 class EndTrajectoryRequest(BaseModel):
@@ -242,3 +342,34 @@ class EndSessionResponse(BaseModel):
 
     session_id: str
     status: str
+
+
+def chat_message_payload(message: ChatCompletionMessage) -> dict[str, Any]:
+    """Convert one OpenAI-style message into the tokenizer payload shape."""
+    payload = message.model_dump(mode="json", exclude_none=True)
+    if payload["role"] != "assistant" or "tool_calls" not in payload:
+        return payload
+
+    tool_calls = []
+    for tool_call in payload["tool_calls"]:
+        function = dict(tool_call["function"])
+        function["arguments"] = json.loads(function["arguments"])
+        tool_calls.append(
+            {
+                "id": tool_call["id"],
+                "type": tool_call["type"],
+                "function": function,
+            }
+        )
+
+    payload["tool_calls"] = tool_calls
+    return payload
+
+
+def tool_payloads(
+    tools: list[ChatCompletionTool] | None,
+) -> list[dict[str, Any]] | None:
+    """Convert tool definitions into the tokenizer payload shape."""
+    if tools is None:
+        return None
+    return [tool.model_dump(mode="json", exclude_none=True) for tool in tools]

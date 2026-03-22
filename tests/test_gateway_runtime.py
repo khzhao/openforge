@@ -19,7 +19,11 @@ import openforge.utils.ray as ray_utils
 from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
 from openforge.gateway.runtime import Runtime
-from openforge.gateway.types import ChatMessage, RuntimeConfig, StartSessionRequest
+from openforge.gateway.types import (
+    ChatMessage,
+    RuntimeConfig,
+    StartSessionRequest,
+)
 
 
 def _server_config() -> GatewayServerConfig:

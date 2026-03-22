@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from uuid import uuid4
@@ -13,14 +14,20 @@ from openforge.data import OpenForgeStore, Session, Trajectory, Turn
 from openforge.gateway.runtime import Generation, Runtime
 from openforge.gateway.train_loop import TrainLoop
 from openforge.gateway.types import (
-    ChatChoice,
-    ChatMessage,
+    AssistantMessage,
+    AssistantToolCall,
+    AssistantToolCallFunction,
+    ChatCompletionCreateRequest,
+    ChatCompletionMessage,
+    ChatCompletionResponse,
+    ChatCompletionTool,
+    ChatCompletionToolChoice,
+    ChatCompletionChoice,
     CompletionUsage,
     EndSessionResponse,
     EndTrajectoriesResponse,
     EndTrajectoryResponse,
     ExportCheckpointResponse,
-    GenerateResponse,
     RuntimeConfig,
     StartSessionResponse,
     StartTrajectoryGroupsResponse,
@@ -37,10 +44,11 @@ class _PendingGenerate:
     session_id: str
     trajectory_id: str
     group_id: str | None
-    messages: list[ChatMessage]
+    messages: list[ChatCompletionMessage]
+    tools: list[ChatCompletionTool] | None
     sampling_params: dict[str, object]
-    future: asyncio.Future[GenerateResponse]
-    batch_key: tuple[str, str]
+    future: asyncio.Future[ChatCompletionResponse]
+    batch_key: tuple[str, str, str]
 
 
 @dataclass(slots=True)
@@ -54,6 +62,10 @@ class Service:
 
     GENERATE_BATCH_MAX_SIZE = 320
     GENERATE_BATCH_MAX_WAIT_SECONDS = 0.02
+    _TOOL_CALL_PATTERN = re.compile(
+        r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+        flags=re.DOTALL,
+    )
 
     def __init__(
         self,
@@ -207,32 +219,47 @@ class Service:
     async def generate(
         self,
         *,
-        session_id: str,
-        trajectory_id: str,
-        group_id: str | None = None,
-        messages: list[ChatMessage],
-        sampling_params: dict[str, object] | None = None,
-    ) -> GenerateResponse:
-        if session_id != self._active_session_id:
-            await self._require_active_session(session_id)
+        request: ChatCompletionCreateRequest,
+    ) -> ChatCompletionResponse:
+        session_id = request.openforge.session_id
+        trajectory_id = request.openforge.trajectory_id
+        group_id = request.openforge.group_id
+        session = await self._require_active_session(session_id)
+        if request.model != session.model_name:
+            raise Exception(
+                f"request model {request.model!r} does not match active session model "
+                f"{session.model_name!r}"
+            )
+
+        if request.stream:
+            raise Exception("stream is not supported")
+        if request.n not in (None, 1):
+            raise Exception("n must be 1")
+        if request.frequency_penalty not in (None, 0.0):
+            raise Exception("frequency_penalty is not supported")
+        if request.presence_penalty not in (None, 0.0):
+            raise Exception("presence_penalty is not supported")
+
+        tools = self._resolve_tools(request.tools, request.tool_choice)
+        sampling_params = self._sampling_params_from_request(request)
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[GenerateResponse] = loop.create_future()
-        request = _PendingGenerate(
+        future: asyncio.Future[ChatCompletionResponse] = loop.create_future()
+        pending = _PendingGenerate(
             session_id=session_id,
             trajectory_id=trajectory_id,
             group_id=group_id,
-            messages=messages,
-            sampling_params={} if sampling_params is None else dict(sampling_params),
+            messages=list(request.messages),
+            tools=tools,
+            sampling_params=sampling_params,
             future=future,
             batch_key=(
                 session_id,
-                self._sampling_params_key(
-                    {} if sampling_params is None else sampling_params
-                ),
+                self._sampling_params_key(sampling_params),
+                self._tools_key(tools),
             ),
         )
         async with self._generate_lock:
-            self._pending_generates.append(request)
+            self._pending_generates.append(pending)
             self._ensure_generate_workers_locked()
         return await future
 
@@ -490,6 +517,7 @@ class Service:
                     trajectory_ids=[request.trajectory_id for request in batch],
                     group_ids=[request.group_id for request in batch],
                     messages_per_item=[request.messages for request in batch],
+                    tools=batch[0].tools,
                     sampling_params=batch[0].sampling_params,
                 )
             except Exception as exc:
@@ -541,9 +569,10 @@ class Service:
         session_id: str,
         trajectory_ids: list[str],
         group_ids: list[str | None],
-        messages_per_item: list[list[ChatMessage]],
+        messages_per_item: list[list[ChatCompletionMessage]],
+        tools: list[ChatCompletionTool] | None,
         sampling_params: dict[str, object],
-    ) -> list[GenerateResponse]:
+    ) -> list[ChatCompletionResponse]:
         session = await self._require_active_session(session_id)
         for trajectory_id, group_id in zip(trajectory_ids, group_ids, strict=True):
             trajectory = self._active_trajectories.get(trajectory_id)
@@ -567,6 +596,7 @@ class Service:
         input_ids_per_item = await asyncio.to_thread(
             self._tokenize_messages_batch_deduped,
             messages_per_item,
+            tools,
         )
 
         generations = await asyncio.to_thread(
@@ -576,7 +606,7 @@ class Service:
         )
 
         turns_to_append: list[Turn] = []
-        outputs: list[GenerateResponse] = []
+        outputs: list[ChatCompletionResponse] = []
         for trajectory_id, input_ids, turn_index, generation in zip(
             trajectory_ids,
             input_ids_per_item,
@@ -608,11 +638,12 @@ class Service:
 
     def _tokenize_messages_batch_deduped(
         self,
-        message_batches: list[list[ChatMessage]],
+        message_batches: list[list[ChatCompletionMessage]],
+        tools: list[ChatCompletionTool] | None,
     ) -> list[list[int]]:
         if not message_batches:
             return []
-        unique_batches: list[list[ChatMessage]] = []
+        unique_batches: list[list[ChatCompletionMessage]] = []
         unique_keys: dict[str, int] = {}
         key_indexes: list[int] = []
         for messages in message_batches:
@@ -623,13 +654,16 @@ class Service:
                 unique_keys[key] = index
                 unique_batches.append(messages)
             key_indexes.append(index)
-        unique_input_ids = self.runtime.tokenize_messages_batch(unique_batches)
+        unique_input_ids = self.runtime.tokenize_messages_batch(
+            unique_batches,
+            tools=tools,
+        )
         return [list(unique_input_ids[index]) for index in key_indexes]
 
     @staticmethod
-    def _messages_key(messages: list[ChatMessage]) -> str:
+    def _messages_key(messages: list[ChatCompletionMessage]) -> str:
         return json.dumps(
-            [message.model_dump(mode="json") for message in messages],
+            [message.model_dump(mode="json", exclude_none=True) for message in messages],
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -641,6 +675,16 @@ class Service:
             sort_keys=True,
             separators=(",", ":"),
             default=str,
+        )
+
+    @staticmethod
+    def _tools_key(tools: list[ChatCompletionTool] | None) -> str:
+        if tools is None:
+            return ""
+        return json.dumps(
+            [tool.model_dump(mode="json", exclude_none=True) for tool in tools],
+            sort_keys=True,
+            separators=(",", ":"),
         )
 
     async def _require_active_session(self, session_id: str) -> Session:
@@ -743,16 +787,25 @@ class Service:
         turn_index: int,
         input_ids: list[int],
         generation: Generation,
-    ) -> GenerateResponse:
-        return GenerateResponse(
+    ) -> ChatCompletionResponse:
+        content, tool_calls = Service._parse_tool_calls(
+            generation.text,
+            trajectory_id=trajectory_id,
+            turn_index=turn_index,
+        )
+        finish_reason = generation.finish_reason
+        if tool_calls is not None:
+            finish_reason = "tool_calls"
+
+        return ChatCompletionResponse(
             id=f"chatcmpl_{trajectory_id}_{turn_index}",
             choices=[
-                ChatChoice(
-                    finish_reason=generation.finish_reason,
+                ChatCompletionChoice(
+                    finish_reason=finish_reason,
                     index=0,
-                    message=ChatMessage(
-                        role="assistant",
-                        content=generation.text,
+                    message=AssistantMessage(
+                        content=content,
+                        tool_calls=tool_calls,
                     ),
                 )
             ],
@@ -770,6 +823,88 @@ class Service:
                 "rollout_model_version": generation.rollout_model_version,
             },
         )
+
+    @staticmethod
+    def _parse_tool_calls(
+        text: str,
+        *,
+        trajectory_id: str,
+        turn_index: int,
+    ) -> tuple[str | None, list[AssistantToolCall] | None]:
+        matches = list(Service._TOOL_CALL_PATTERN.finditer(text))
+        if not matches:
+            return text, None
+
+        tool_calls: list[AssistantToolCall] = []
+        for index, match in enumerate(matches):
+            try:
+                payload = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                return text, None
+            tool_calls.append(
+                AssistantToolCall(
+                    id=f"call_{trajectory_id}_{turn_index}_{index}",
+                    function=AssistantToolCallFunction(
+                        name=str(payload["name"]),
+                        arguments=json.dumps(payload["arguments"]),
+                    ),
+                )
+            )
+
+        content = Service._TOOL_CALL_PATTERN.sub("", text).strip()
+        if not content:
+            content = None
+        return content, tool_calls
+
+    @staticmethod
+    def _resolve_tools(
+        tools: list[ChatCompletionTool] | None,
+        tool_choice: ChatCompletionToolChoice | None,
+    ) -> list[ChatCompletionTool] | None:
+        if tools is None:
+            return None
+        if tool_choice is None:
+            return tools
+        if isinstance(tool_choice, str):
+            if tool_choice in {"auto", "required"}:
+                return tools
+            if tool_choice == "none":
+                return None
+
+        selected_name = tool_choice.function.name
+        selected_tools = [
+            tool for tool in tools if tool.function.name == selected_name
+        ]
+        if not selected_tools:
+            raise Exception(f"unknown tool_choice function: {selected_name}")
+        return selected_tools
+
+    @staticmethod
+    def _sampling_params_from_request(
+        request: ChatCompletionCreateRequest,
+    ) -> dict[str, object]:
+        sampling_params: dict[str, object] = {}
+        if request.temperature is not None:
+            sampling_params["temperature"] = request.temperature
+        if request.top_p is not None:
+            sampling_params["top_p"] = request.top_p
+
+        max_tokens = request.max_completion_tokens
+        if max_tokens is None:
+            max_tokens = request.max_tokens
+        elif request.max_tokens not in (None, max_tokens):
+            raise Exception("max_tokens must match max_completion_tokens")
+        if max_tokens is not None:
+            sampling_params["max_new_tokens"] = max_tokens
+
+        if request.stop is not None:
+            if isinstance(request.stop, str):
+                sampling_params["stop"] = [request.stop]
+            else:
+                sampling_params["stop"] = list(request.stop)
+        if request.seed is not None:
+            sampling_params["seed"] = request.seed
+        return sampling_params
 
     @staticmethod
     def _new_id(prefix: str) -> str:

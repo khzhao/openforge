@@ -7,7 +7,7 @@ import asyncio
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 from unittest.mock import patch
 
 from _script_test_utils import expect_raises, install_test_stubs, run_tests
@@ -21,7 +21,7 @@ from openforge.gateway.runtime import (
     Runtime,
 )
 from openforge.gateway.service import Service
-from openforge.gateway.types import ChatMessage, StartSessionRequest
+from openforge.gateway.types import ChatCompletionCreateRequest, StartSessionRequest
 
 
 class _FakeTrainLoop:
@@ -179,14 +179,18 @@ class _FakeRuntime:
 
     def tokenize_messages(
         self,
-        messages: list[ChatMessage],
+        messages: list[Any],
+        *,
+        tools: list[Any] | None = None,
     ) -> list[int]:
         token_count = sum(len(message.content.split()) for message in messages)
         return list(range(1, token_count + 2))
 
     def tokenize_messages_batch(
         self,
-        message_batches: list[list[ChatMessage]],
+        message_batches: list[list[Any]],
+        *,
+        tools: list[Any] | None = None,
     ) -> list[list[int]]:
         return [self.tokenize_messages(messages) for messages in message_batches]
 
@@ -226,15 +230,47 @@ class _FakeRuntime:
 class _FailingTokenizeRuntime(_FakeRuntime):
     def tokenize_messages(
         self,
-        messages: list[ChatMessage],
+        messages: list[Any],
+        *,
+        tools: list[Any] | None = None,
     ) -> list[int]:
         raise RuntimeError("template boom")
 
     def tokenize_messages_batch(
         self,
-        message_batches: list[list[ChatMessage]],
+        message_batches: list[list[Any]],
+        *,
+        tools: list[Any] | None = None,
     ) -> list[list[int]]:
         raise RuntimeError("template boom")
+
+
+def _chat_request(
+    *,
+    session_id: str,
+    trajectory_id: str,
+    content: str,
+    model: str = "model-a",
+    temperature: float | None = None,
+    top_p: float | None = None,
+    max_completion_tokens: int | None = None,
+) -> ChatCompletionCreateRequest:
+    payload: dict[str, object] = {
+        "_openforge": {
+            "session_id": session_id,
+            "trajectory_id": trajectory_id,
+            "group_id": None,
+        },
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if top_p is not None:
+        payload["top_p"] = top_p
+    if max_completion_tokens is not None:
+        payload["max_completion_tokens"] = max_completion_tokens
+    return ChatCompletionCreateRequest.model_validate(payload)
 
 
 def test_gateway_service_start_generate_and_end() -> None:
@@ -251,12 +287,15 @@ def test_gateway_service_start_generate_and_end() -> None:
             root = await service.start_trajectory(session_id=session.session_id)
 
             generated = await service.generate(
-                session_id=session.session_id,
-                trajectory_id=root.trajectory_id,
-                messages=[ChatMessage(role="user", content="hello world")],
-                sampling_params={"temperature": 0.7, "max_new_tokens": 32},
+                request=_chat_request(
+                    session_id=session.session_id,
+                    trajectory_id=root.trajectory_id,
+                    content="hello world",
+                    temperature=0.7,
+                    max_completion_tokens=32,
+                ),
             )
-            payload = generated.model_dump(mode="json")
+            payload = generated.model_dump(mode="json", exclude_none=True)
             assert payload["id"] == f"chatcmpl_{root.trajectory_id}_0"
             assert payload["object"] == "chat.completion"
             assert payload["model"] == "model-a"
@@ -265,7 +304,6 @@ def test_gateway_service_start_generate_and_end() -> None:
                     "finish_reason": "stop",
                     "index": 0,
                     "message": {"role": "assistant", "content": "reply-3"},
-                    "logprobs": None,
                 }
             ]
             assert payload["usage"] == {
@@ -289,11 +327,13 @@ def test_gateway_service_start_generate_and_end() -> None:
             assert child_turns == []
 
             child_generated = await service.generate(
-                session_id=session.session_id,
-                trajectory_id=child.trajectory_id,
-                messages=[ChatMessage(role="user", content="continue child")],
+                request=_chat_request(
+                    session_id=session.session_id,
+                    trajectory_id=child.trajectory_id,
+                    content="continue child",
+                ),
             )
-            child_payload = child_generated.model_dump(mode="json")
+            child_payload = child_generated.model_dump(mode="json", exclude_none=True)
             assert child_payload["id"] == f"chatcmpl_{child.trajectory_id}_0"
             assert child_payload["choices"][0]["message"]["role"] == "assistant"
 
@@ -392,9 +432,11 @@ def test_gateway_service_releases_runtime_after_last_session_and_allows_switch()
         session = await service.start_session(**_start_session_kwargs("model-a"))
         trajectory = await service.start_trajectory(session_id=session.session_id)
         await service.generate(
-            session_id=session.session_id,
-            trajectory_id=trajectory.trajectory_id,
-            messages=[ChatMessage(role="user", content="hello")],
+            request=_chat_request(
+                session_id=session.session_id,
+                trajectory_id=trajectory.trajectory_id,
+                content="hello",
+            ),
         )
         await service.end_trajectory(
             session_id=session.session_id,
@@ -425,9 +467,11 @@ def test_gateway_service_generate_unknown_session_raises() -> None:
 
         with expect_raises(Exception, "unknown session_id"):
             await service.generate(
-                session_id="missing",
-                trajectory_id="traj_missing",
-                messages=[ChatMessage(role="user", content="hello")],
+                request=_chat_request(
+                    session_id="missing",
+                    trajectory_id="traj_missing",
+                    content="hello",
+                ),
             )
 
         await store.close()
@@ -448,9 +492,11 @@ def test_gateway_service_generate_wraps_tokenization_failure() -> None:
             "template boom",
         ):
             await service.generate(
-                session_id=session.session_id,
-                trajectory_id=trajectory.trajectory_id,
-                messages=[ChatMessage(role="user", content="hello")],
+                request=_chat_request(
+                    session_id=session.session_id,
+                    trajectory_id=trajectory.trajectory_id,
+                    content="hello",
+                ),
             )
 
         await store.close()
@@ -467,16 +513,20 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
         root = await service.start_trajectory(session_id=session.session_id)
 
         generated = await service.generate(
-            session_id=session.session_id,
-            trajectory_id="traj_missing",
-            messages=[ChatMessage(role="user", content="hello")],
+            request=_chat_request(
+                session_id=session.session_id,
+                trajectory_id="traj_missing",
+                content="hello",
+            ),
         )
         assert generated.metadata["trajectory_id"] == "traj_missing"
 
         await service.generate(
-            session_id=session.session_id,
-            trajectory_id=root.trajectory_id,
-            messages=[ChatMessage(role="user", content="hello")],
+            request=_chat_request(
+                session_id=session.session_id,
+                trajectory_id=root.trajectory_id,
+                content="hello",
+            ),
         )
         await service.end_trajectory(
             session_id=session.session_id,
@@ -485,9 +535,11 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
         )
 
         generated_again = await service.generate(
-            session_id=session.session_id,
-            trajectory_id=root.trajectory_id,
-            messages=[ChatMessage(role="user", content="again")],
+            request=_chat_request(
+                session_id=session.session_id,
+                trajectory_id=root.trajectory_id,
+                content="again",
+            ),
         )
         assert generated_again.metadata["trajectory_id"] == root.trajectory_id
         await store.close()
@@ -505,9 +557,11 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
         child = await service.start_trajectory(session_id=session.session_id)
 
         await service.generate(
-            session_id=session.session_id,
-            trajectory_id=root.trajectory_id,
-            messages=[ChatMessage(role="user", content="hello")],
+            request=_chat_request(
+                session_id=session.session_id,
+                trajectory_id=root.trajectory_id,
+                content="hello",
+            ),
         )
         await service.end_trajectory(
             session_id=session.session_id,

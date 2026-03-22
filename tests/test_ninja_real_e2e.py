@@ -113,16 +113,16 @@ def main() -> int:
         )
         session_id = str(started["session_id"])
 
-        responses: list[dict[str, Any]] = []
+        responses: list[Any] = []
 
         @ninja.agent()
-        def agent(*, prompt: str, reward: float) -> float:
-            response = ninja.generate(
-                prompt,
+        def agent(client, *, prompt: str, reward: float) -> float:
+            response = client.chat.completions.create(
+                model=model_path,
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 top_p=1.0,
-                top_k=1,
-                max_new_tokens=8,
+                max_completion_tokens=8,
             )
             responses.append(response)
             return reward
@@ -130,10 +130,10 @@ def main() -> int:
         reward = agent(prompt="Say hello in four words.", reward=0.0)
         assert reward == 0.0
         response = responses[-1]
-        assert response["metadata"]["session_id"] == session_id
-        assert response["metadata"]["rollout_model_version"] == "default"
-        assert response["choices"][0]["message"]["role"] == "assistant"
-        assert isinstance(response["choices"][0]["message"]["content"], str)
+        assert response.metadata["session_id"] == session_id
+        assert response.metadata["rollout_model_version"] == "default"
+        assert response.choices[0].message.role == "assistant"
+        assert isinstance(response.choices[0].message.content, str)
 
         policy_version = agent.policy_version()
         assert policy_version == 0

@@ -7,7 +7,7 @@ import json
 import tempfile
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 from unittest.mock import patch
 
 from _script_test_utils import install_test_stubs, run_tests
@@ -21,7 +21,7 @@ from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.runtime import Generation
-from openforge.gateway.types import ChatMessage, StartSessionRequest
+from openforge.gateway.types import StartSessionRequest
 
 
 class _FakeTrainLoop:
@@ -180,14 +180,18 @@ class _FakeRuntime:
 
     def tokenize_messages(
         self,
-        messages: list[ChatMessage],
+        messages: list[Any],
+        *,
+        tools: list[Any] | None = None,
     ) -> list[int]:
         token_count = sum(len(message.content.split()) for message in messages)
         return list(range(1, token_count + 2))
 
     def tokenize_messages_batch(
         self,
-        message_batches: list[list[ChatMessage]],
+        message_batches: list[list[Any]],
+        *,
+        tools: list[Any] | None = None,
     ) -> list[list[int]]:
         return [self.tokenize_messages(messages) for messages in message_batches]
 
@@ -227,15 +231,47 @@ class _FakeRuntime:
 class _FailingTokenizeRuntime(_FakeRuntime):
     def tokenize_messages(
         self,
-        messages: list[ChatMessage],
+        messages: list[Any],
+        *,
+        tools: list[Any] | None = None,
     ) -> list[int]:
         raise RuntimeError("template boom")
 
     def tokenize_messages_batch(
         self,
-        message_batches: list[list[ChatMessage]],
+        message_batches: list[list[Any]],
+        *,
+        tools: list[Any] | None = None,
     ) -> list[list[int]]:
         raise RuntimeError("template boom")
+
+
+def _chat_payload(
+    *,
+    session_id: str,
+    trajectory_id: str,
+    content: str,
+    model: str = "model-a",
+    temperature: float | None = None,
+    top_p: float | None = None,
+    max_completion_tokens: int | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "_openforge": {
+            "session_id": session_id,
+            "trajectory_id": trajectory_id,
+            "group_id": None,
+        },
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if top_p is not None:
+        payload["top_p"] = top_p
+    if max_completion_tokens is not None:
+        payload["max_completion_tokens"] = max_completion_tokens
+    return payload
 
 
 @contextmanager
@@ -269,11 +305,18 @@ def test_gateway_http_flow() -> None:
         runtime = _FakeRuntime()
         with _patched_app(store=store, runtime=runtime) as app:
             with TestClient(app) as client:
-                models = client.get("/models")
+                models = client.get("/v1/models")
                 assert models.status_code == 200
                 assert models.json() == {
-                    "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
-                    "active_model": None,
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "model-a",
+                            "object": "model",
+                            "created": 0,
+                            "owned_by": "openforge",
+                        }
+                    ],
                 }
 
                 started = client.post(
@@ -289,13 +332,14 @@ def test_gateway_http_flow() -> None:
                 trajectory_id = trajectory.json()["trajectory_id"]
 
                 generated = client.post(
-                    "/generate",
-                    json={
-                        "session_id": session_id,
-                        "trajectory_id": trajectory_id,
-                        "messages": [{"role": "user", "content": "hello"}],
-                        "sampling_params": {"temperature": 0.5, "top_p": 0.9},
-                    },
+                    "/v1/chat/completions",
+                    json=_chat_payload(
+                        session_id=session_id,
+                        trajectory_id=trajectory_id,
+                        content="hello",
+                        temperature=0.5,
+                        top_p=0.9,
+                    ),
                 )
                 assert generated.status_code == 200
                 payload = generated.json()
@@ -306,7 +350,11 @@ def test_gateway_http_flow() -> None:
                     {
                         "finish_reason": "stop",
                         "index": 0,
-                        "message": {"role": "assistant", "content": "reply-2"},
+                        "message": {
+                            "role": "assistant",
+                            "content": "reply-2",
+                            "tool_calls": None,
+                        },
                         "logprobs": None,
                     }
                 ]
@@ -360,16 +408,19 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
                     },
                 }
                 assert client.get("/current_session").status_code == 404
-                assert client.get("/models").json()["active_model"] is None
-                assert client.get("/models").json()["models"] == [
-                    {"id": "model-a", "tokenizer": "model-a-tokenizer"}
+                assert client.get("/v1/models").json()["data"] == [
+                    {
+                        "id": "model-a",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "openforge",
+                    }
                 ]
 
                 started = client.post(
                     "/start_session", json=_start_session_payload("model-a")
                 )
                 assert started.status_code == 200
-                assert client.get("/models").json()["active_model"] == "model-a"
                 assert client.get("/current_session").json() == started.json()
 
 
@@ -469,12 +520,12 @@ def test_gateway_http_releases_model_after_last_session() -> None:
                     json={"session_id": session_id},
                 ).json()["trajectory_id"]
                 generated = client.post(
-                    "/generate",
-                    json={
-                        "session_id": session_id,
-                        "trajectory_id": trajectory_id,
-                        "messages": [{"role": "user", "content": "hello"}],
-                    },
+                    "/v1/chat/completions",
+                    json=_chat_payload(
+                        session_id=session_id,
+                        trajectory_id=trajectory_id,
+                        content="hello",
+                    ),
                 )
                 assert generated.status_code == 200
                 ended_trajectory = client.post(
@@ -492,7 +543,7 @@ def test_gateway_http_releases_model_after_last_session() -> None:
 
                 assert ended_session.status_code == 200
                 assert runtime.shutdown_count == 1
-                assert client.get("/models").json()["active_model"] is None
+                assert client.get("/current_session").status_code == 404
 
                 switched = client.post(
                     "/start_session", json=_start_session_payload("model-b")
@@ -507,21 +558,18 @@ def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
         with _patched_app(store=store, runtime=_FakeRuntime()) as app:
             with TestClient(app) as client:
                 invalid = client.post(
-                    "/generate",
-                    json={
-                        "session_id": "missing",
-                        "messages": [{"role": "user", "content": "hello"}],
-                    },
+                    "/v1/chat/completions",
+                    json={"model": "model-a", "messages": [{"role": "user", "content": "hello"}]},
                 )
                 assert invalid.status_code == 422
 
                 missing_session = client.post(
-                    "/generate",
-                    json={
-                        "session_id": "missing",
-                        "trajectory_id": "traj_missing",
-                        "messages": [{"role": "user", "content": "hello"}],
-                    },
+                    "/v1/chat/completions",
+                    json=_chat_payload(
+                        session_id="missing",
+                        trajectory_id="traj_missing",
+                        content="hello",
+                    ),
                 )
                 assert missing_session.status_code == 400
 
@@ -529,12 +577,12 @@ def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
                     "/start_session", json=_start_session_payload("model-a")
                 ).json()["session_id"]
                 missing_trajectory = client.post(
-                    "/generate",
-                    json={
-                        "session_id": session_id,
-                        "trajectory_id": "traj_missing",
-                        "messages": [{"role": "user", "content": "hello"}],
-                    },
+                    "/v1/chat/completions",
+                    json=_chat_payload(
+                        session_id=session_id,
+                        trajectory_id="traj_missing",
+                        content="hello",
+                    ),
                 )
                 assert missing_trajectory.status_code == 200
                 assert (
@@ -557,12 +605,12 @@ def test_gateway_http_generate_returns_bad_request_when_tokenization_fails() -> 
                 ).json()["trajectory_id"]
 
                 generated = client.post(
-                    "/generate",
-                    json={
-                        "session_id": session_id,
-                        "trajectory_id": trajectory_id,
-                        "messages": [{"role": "user", "content": "hello"}],
-                    },
+                    "/v1/chat/completions",
+                    json=_chat_payload(
+                        session_id=session_id,
+                        trajectory_id=trajectory_id,
+                        content="hello",
+                    ),
                 )
                 assert generated.status_code == 400
                 assert generated.json() == {"detail": "template boom"}
@@ -581,12 +629,12 @@ def test_gateway_http_generate_after_end_trajectory_returns_conflict() -> None:
                     json={"session_id": session_id},
                 ).json()["trajectory_id"]
                 generated = client.post(
-                    "/generate",
-                    json={
-                        "session_id": session_id,
-                        "trajectory_id": trajectory_id,
-                        "messages": [{"role": "user", "content": "hello"}],
-                    },
+                    "/v1/chat/completions",
+                    json=_chat_payload(
+                        session_id=session_id,
+                        trajectory_id=trajectory_id,
+                        content="hello",
+                    ),
                 )
                 assert generated.status_code == 200
                 ended_trajectory = client.post(
@@ -600,12 +648,12 @@ def test_gateway_http_generate_after_end_trajectory_returns_conflict() -> None:
                 assert ended_trajectory.status_code == 200
 
                 again = client.post(
-                    "/generate",
-                    json={
-                        "session_id": session_id,
-                        "trajectory_id": trajectory_id,
-                        "messages": [{"role": "user", "content": "hello again"}],
-                    },
+                    "/v1/chat/completions",
+                    json=_chat_payload(
+                        session_id=session_id,
+                        trajectory_id=trajectory_id,
+                        content="hello again",
+                    ),
                 )
                 assert again.status_code == 200
                 assert again.json()["metadata"]["trajectory_id"] == trajectory_id

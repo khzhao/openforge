@@ -45,8 +45,14 @@ def main() -> int:
         train_kwargs["parallelism"] = args.train_group_parallelism
 
     @ninja.agent()
-    def user_agent(*, prompt: str, ground_truth: str) -> float:
-        response = ninja.generate(prompt, sampling_params=sampling_params)
+    def user_agent(client, *, prompt: str, ground_truth: str) -> float:
+        response = client.chat.completions.create(
+            model=setup["runtime_config"].model.model_name_or_path,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=sampling_params["temperature"],
+            top_p=sampling_params["top_p"],
+            max_completion_tokens=sampling_params["max_new_tokens"],
+        )
         text = response_text(response)
         return float(
             compute_gsm8k_score(

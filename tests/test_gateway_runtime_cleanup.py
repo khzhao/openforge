@@ -23,6 +23,7 @@ import requests
 from huggingface_hub import snapshot_download
 
 from _script_test_utils import require_free_gpu_ids, start_test_ray_cluster
+from test_gateway_real_e2e import chat_payload
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG_ROOT = ROOT / "test_scripts" / "logs"
@@ -364,6 +365,7 @@ def main() -> int:
                 timeout=float(args.request_timeout),
             )
             session_id = str(started["session_id"])
+            model_name = str(started["model"])
             trajectory = request_json(
                 "POST",
                 f"{base_url}/start_trajectory",
@@ -374,20 +376,13 @@ def main() -> int:
 
             request_json(
                 "POST",
-                f"{base_url}/generate",
-                {
-                    "session_id": session_id,
-                    "trajectory_id": trajectory_id,
-                    "messages": [
-                        {"role": "user", "content": "Write a very short greeting."}
-                    ],
-                    "sampling_params": {
-                        "temperature": 0.0,
-                        "top_p": 1.0,
-                        "top_k": 1,
-                        "max_new_tokens": 6,
-                    },
-                },
+                f"{base_url}/v1/chat/completions",
+                chat_payload(
+                    session_id=session_id,
+                    trajectory_id=trajectory_id,
+                    model=model_name,
+                    content="Write a very short greeting.",
+                ),
                 timeout=float(args.request_timeout),
             )
 

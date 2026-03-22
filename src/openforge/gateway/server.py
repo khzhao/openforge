@@ -15,6 +15,8 @@ from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.runtime import Runtime
 from openforge.gateway.service import Service
 from openforge.gateway.types import (
+    ChatCompletionCreateRequest,
+    ChatCompletionResponse,
     DiscardTrajectoryRequest,
     EndSessionRequest,
     EndSessionResponse,
@@ -26,9 +28,8 @@ from openforge.gateway.types import (
     ErrorTrajectoryRequest,
     ExportCheckpointRequest,
     ExportCheckpointResponse,
-    GenerateRequest,
-    GenerateResponse,
-    ModelsResponse,
+    ModelCard,
+    ModelListResponse,
     StartSessionRequest,
     StartSessionResponse,
     StartTrajectoryGroupsRequest,
@@ -88,9 +89,12 @@ def create_app(
     async def info() -> GatewayServerConfig:
         return config
 
-    @app.get("/models", response_model=ModelsResponse)
-    async def list_models() -> ModelsResponse:
-        return await service.list_models()
+    @app.get("/v1/models", response_model=ModelListResponse)
+    async def list_models() -> ModelListResponse:
+        payload = await service.list_models()
+        return ModelListResponse(
+            data=[ModelCard(id=str(model["id"])) for model in payload["models"]]
+        )
 
     @app.get("/current_session", response_model=StartSessionResponse)
     async def current_session() -> StartSessionResponse:
@@ -135,17 +139,11 @@ def create_app(
             )
         )
 
-    @app.post("/generate", response_model=GenerateResponse)
-    async def generate(payload: GenerateRequest) -> GenerateResponse:
-        return await _invoke(
-            service.generate(
-                session_id=payload.session_id,
-                trajectory_id=payload.trajectory_id,
-                group_id=payload.group_id,
-                messages=payload.messages,
-                sampling_params=payload.sampling_params,
-            )
-        )
+    @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+    async def chat_completions(
+        payload: ChatCompletionCreateRequest,
+    ) -> ChatCompletionResponse:
+        return await _invoke(service.generate(request=payload))
 
     @app.post("/end_trajectory", response_model=EndTrajectoryResponse)
     async def end_trajectory(

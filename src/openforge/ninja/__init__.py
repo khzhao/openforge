@@ -7,12 +7,12 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextvars import ContextVar
 from functools import update_wrapper
 from typing import Any, Callable
 from uuid import uuid4
 
 import httpx
+from openai import OpenAI
 
 from openforge import active_state
 from openforge.configs.models import GatewayServerConfig
@@ -20,17 +20,10 @@ from openforge.configs.models import GatewayServerConfig
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-__all__ = [
-    "agent",
-    "Client",
-    "generate",
-]
+__all__ = ["agent"]
 
 _AUTO_CONCURRENCY_CAP = 128
 _AUTO_CONCURRENCY_FLOOR = 32
-_CURRENT_CLIENT: ContextVar[Any | None] = ContextVar(
-    "openforge_ninja_current_client", default=None
-)
 
 
 def _sleep_before_retry(attempt: int) -> None:
@@ -39,7 +32,7 @@ def _sleep_before_retry(attempt: int) -> None:
 
 def _fail_clients_best_effort(
     session: "_ActiveSession",
-    clients: list["Client"],
+    clients: list["_TrajectoryClient"],
 ) -> None:
     if not clients:
         return
@@ -83,21 +76,6 @@ def _resolve_concurrency(
     if concurrency <= 0:
         raise ValueError("concurrency must be > 0")
     return concurrency
-
-
-def _normalize_messages(
-    messages: str | list[dict[str, str]],
-) -> list[dict[str, str]]:
-    if isinstance(messages, str):
-        return [{"role": "user", "content": messages}]
-    return [dict(message) for message in messages]
-
-
-def _current_client() -> Client:
-    client = _CURRENT_CLIENT.get()
-    if client is None:
-        raise RuntimeError("ninja.generate() must be called inside an @ninja.agent")
-    return client
 
 
 def _function_expects_client(func: Callable[..., Any]) -> bool:
@@ -178,8 +156,8 @@ class _ActiveSession:
         *,
         group_id: str | None = None,
         trajectory_id: str | None = None,
-    ) -> Client:
-        return Client(
+    ) -> _TrajectoryClient:
+        return _TrajectoryClient(
             post=self.post,
             session_id=self.session_id,
             trajectory_id=trajectory_id or f"traj_{uuid4().hex}",
@@ -191,7 +169,7 @@ class _ActiveSession:
         *,
         counts: list[int],
         group_ids: list[str | None],
-    ) -> list[list[Client]]:
+    ) -> list[list[_TrajectoryClient]]:
         if len(counts) != len(group_ids):
             raise ValueError("counts must align with group_ids")
         if any(count <= 0 for count in counts):
@@ -229,7 +207,7 @@ class _ActiveSession:
 
     def end_clients(
         self,
-        clients: list["Client"],
+        clients: list["_TrajectoryClient"],
         *,
         rewards: list[float],
     ) -> None:
@@ -246,7 +224,7 @@ class _ActiveSession:
             },
         )
 
-    def fail_clients(self, clients: list["Client"]) -> None:
+    def fail_clients(self, clients: list["_TrajectoryClient"]) -> None:
         if not clients:
             return
         self._retry_post(
@@ -273,6 +251,17 @@ class _ActiveSession:
         payload = response.json()
         assert isinstance(payload, dict)
         return int(payload["policy_version"])
+
+    def agent_client(self, client: "_TrajectoryClient") -> _AgentClient:
+        return _AgentClient(
+            OpenAI(
+                api_key="openforge",
+                base_url=f"{self._base_url}/v1",
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            ),
+            client,
+        )
 
     def post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
         client = self._http_client()
@@ -303,7 +292,7 @@ class _ActiveSession:
         raise AssertionError("unreachable")
 
 
-class Client:
+class _TrajectoryClient:
     """Own one trajectory underneath the gateway's active session."""
 
     def __init__(
@@ -324,25 +313,16 @@ class Client:
     def trajectory_id(self) -> str:
         return self._trajectory_id
 
-    def generate(
-        self,
-        messages: str | list[dict[str, str]],
-        *,
-        sampling_params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        response = self._post(
-            "/generate",
-            {
-                "session_id": self._session_id,
-                "trajectory_id": self._trajectory_id,
-                "group_id": self._group_id,
-                "messages": _normalize_messages(messages),
-                "sampling_params": {} if sampling_params is None else sampling_params,
-            },
-        )
-        response.raise_for_status()
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
+    def group_id(self) -> str | None:
+        return self._group_id
+
+    def mark_used(self) -> None:
         self._used = True
-        return response.json()
 
     def finish(self, reward: float) -> None:
         if not self._used:
@@ -384,16 +364,42 @@ class Client:
         self._used = True
 
 
-def generate(
-    messages: str | list[dict[str, str]],
-    *,
-    sampling_params: dict[str, Any] | None = None,
-    **sampling_kwargs: Any,
-) -> dict[str, Any]:
-    """Generate on the current trajectory inside an ``@ninja.agent`` body."""
-    params = {} if sampling_params is None else dict(sampling_params)
-    params.update(sampling_kwargs)
-    return _current_client().generate(messages, sampling_params=params)
+class _ChatCompletionsClient:
+    def __init__(self, sdk_client: OpenAI, trajectory: _TrajectoryClient) -> None:
+        self._sdk_client = sdk_client
+        self._trajectory = trajectory
+
+    def create(self, **kwargs: Any) -> Any:
+        self._trajectory.mark_used()
+        extra_body = kwargs.pop("extra_body", None)
+        if extra_body is None:
+            extra_body = {}
+        else:
+            extra_body = dict(extra_body)
+        extra_body["_openforge"] = {
+            "session_id": self._trajectory.session_id,
+            "trajectory_id": self._trajectory.trajectory_id,
+            "group_id": self._trajectory.group_id,
+        }
+        return self._sdk_client.chat.completions.create(
+            **kwargs,
+            extra_body=extra_body,
+        )
+
+
+class _ChatClient:
+    def __init__(self, sdk_client: OpenAI, trajectory: _TrajectoryClient) -> None:
+        self.completions = _ChatCompletionsClient(sdk_client, trajectory)
+
+
+class _AgentClient:
+    def __init__(self, sdk_client: OpenAI, trajectory: _TrajectoryClient) -> None:
+        self._sdk_client = sdk_client
+        self.chat = _ChatClient(sdk_client, trajectory)
+        self.models = sdk_client.models
+
+    def close(self) -> None:
+        self._sdk_client.close()
 
 
 class _RegisteredAgent:
@@ -457,48 +463,22 @@ class _RegisteredAgent:
             return results[0]
         return results
 
-    def execute(
-        self,
-        *args: Any,
-        requests: list[dict[str, Any]] | None = None,
-        max_parallelism: int | None = None,
-        group_size: int = 1,
-        retries: int = 0,
-        **kwargs: Any,
-    ) -> Any:
-        return self.sample(
-            *args,
-            requests=requests,
-            concurrency=max_parallelism,
-            num_rollouts=group_size,
-            retries=retries,
-            **kwargs,
-        )
-
     def save(self) -> dict[str, Any]:
         with self._session() as session:
             return session.export_checkpoint()
-
-    def save_checkpoint(self) -> dict[str, Any]:
-        return self.save()
-
-    def export_checkpoint(self) -> dict[str, Any]:
-        return self.save()
 
     def policy_version(self) -> int:
         with self._session() as session:
             return session.current_policy_version()
 
-    def current_policy_version(self) -> int:
-        return self.policy_version()
-
     def _call_body(
         self,
-        client: Client,
+        session: _ActiveSession,
+        client: _TrajectoryClient,
         call_args: tuple[Any, ...],
         call_kwargs: dict[str, Any],
     ) -> float:
-        return float(self._call_func(client, call_args, call_kwargs))
+        return float(self._call_func(session, client, call_args, call_kwargs))
 
     def _invoke(
         self,
@@ -508,7 +488,7 @@ class _RegisteredAgent:
     ) -> Any:
         client = session.client()
         try:
-            result = self._call_func(client, call_args, call_kwargs)
+            result = self._call_func(session, client, call_args, call_kwargs)
         except Exception:
             client.fail()
             raise
@@ -519,17 +499,19 @@ class _RegisteredAgent:
 
     def _call_func(
         self,
-        client: Client,
+        session: _ActiveSession,
+        client: _TrajectoryClient,
         call_args: tuple[Any, ...],
         call_kwargs: dict[str, Any],
     ) -> Any:
-        token = _CURRENT_CLIENT.set(client)
-        try:
-            if self._expects_client:
-                return self._func(client, *call_args, **call_kwargs)
+        if not self._expects_client:
             return self._func(*call_args, **call_kwargs)
+
+        agent_client = session.agent_client(client)
+        try:
+            return self._func(agent_client, *call_args, **call_kwargs)
         finally:
-            _CURRENT_CLIENT.reset(token)
+            agent_client.close()
 
     def _session(self) -> _ActiveSession:
         return _ActiveSession(_resolve_gateway_target(self._gateway_config))
@@ -590,7 +572,7 @@ def _execute_grouped(
         last_error: Exception | None = None
 
         for attempt in range(retries + 1):
-            clients: list[Client] = []
+            clients: list[_TrajectoryClient] = []
             try:
                 clients = session.trajectory_groups(
                     counts=[num_rollouts],
@@ -598,10 +580,15 @@ def _execute_grouped(
                 )[0]
 
                 def run_rollout(
-                    rollout_job: tuple[int, Client],
-                ) -> tuple[int, Client, float]:
+                    rollout_job: tuple[int, _TrajectoryClient],
+                ) -> tuple[int, _TrajectoryClient, float]:
                     rollout_index, client = rollout_job
-                    reward = agent._call_body(client, call_args, call_kwargs)
+                    reward = agent._call_body(
+                        session,
+                        client,
+                        call_args,
+                        call_kwargs,
+                    )
                     return rollout_index, client, reward
 
                 results = _map_parallel(

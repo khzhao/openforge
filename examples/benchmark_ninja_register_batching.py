@@ -49,8 +49,14 @@ def main() -> None:
     )
 
     @ninja.agent(gateway_config)
-    def agent(prompt_text: str) -> float:
-        ninja.generate(prompt_text, sampling_params=sampling_params)
+    def agent(client, prompt_text: str) -> float:
+        client.chat.completions.create(
+            model="Qwen/Qwen2.5-0.5B-Instruct",
+            messages=[{"role": "user", "content": prompt_text}],
+            temperature=sampling_params["temperature"],
+            top_p=sampling_params["top_p"],
+            max_completion_tokens=sampling_params["max_new_tokens"],
+        )
         return 0.0
 
     prompts = [prompt for _ in range(args.episodes)]
