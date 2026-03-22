@@ -103,10 +103,10 @@ uv pip install -r requirements.txt
 
 `uv pip install -r requirements.txt` is required for the runtime stack.
 
-OpenForge installs one CLI:
+OpenForge exposes one CLI module:
 
 ```bash
-uv run openforge --help
+python -m openforge.cli.main --help
 ```
 
 ## Configuration
@@ -167,19 +167,19 @@ training example, and cleans up on exit.
 Shell 1:
 
 ```bash
-uv run openforge gateway start --config examples/gsm8k_gateway.yaml
+python -m openforge.cli.main gateway start --config examples/gsm8k_gateway.yaml
 ```
 
 Shell 2:
 
 ```bash
-uv run openforge session start --runtime-config examples/gsm8k_runtime.yaml
+python -m openforge.cli.main session start --runtime-config examples/gsm8k_runtime.yaml
 ```
 
 Shell 3:
 
 ```bash
-PYTHONUNBUFFERED=1 uv run python examples/train_gsm8k_ninja.py \
+PYTHONUNBUFFERED=1 python examples/train_gsm8k_ninja.py \
   --artifact-dir /tmp/openforge-gsm8k-train \
   --total-epochs 15
 ```
@@ -196,8 +196,8 @@ If you want to use an existing Ray cluster instead of the local default, export
 When you are done:
 
 ```bash
-uv run openforge session stop
-uv run openforge gateway stop
+python -m openforge.cli.main session stop
+python -m openforge.cli.main gateway stop
 ```
 
 ## Repository Guide

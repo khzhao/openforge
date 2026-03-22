@@ -151,7 +151,8 @@ def _wait_for_active_gateway_target(*, timeout: float) -> tuple[str, int]:
             pass
         time.sleep(1.0)
     raise SystemExit(
-        "no active gateway recorded; run `uv run openforge gateway start --config ...` first"
+        "no active gateway recorded; "
+        "run `python -m openforge.cli.main gateway start --config ...` first"
     )
 
 

@@ -158,7 +158,7 @@ class _ActiveSession:
             self.__exit__(None, None, None)
             raise AssertionError(
                 "no active session recorded; "
-                "run `uv run openforge session start --runtime-config ...` first"
+                "run `python -m openforge.cli.main session start --runtime-config ...` first"
             )
         response.raise_for_status()
         payload = response.json()

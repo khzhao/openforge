@@ -288,7 +288,10 @@ def test_register_requires_active_session() -> None:
         return 1.0
 
     with _patched_ninja(active_session_id=None):
-        with expect_raises(AssertionError, "uv run openforge session start"):
+        with expect_raises(
+            AssertionError,
+            "python -m openforge.cli.main session start",
+        ):
             agent(prompt="hello")
 
 
@@ -300,7 +303,10 @@ def test_register_requires_active_gateway_for_implicit_discovery() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         state_path = Path(tmpdir) / "active_gateway.json"
         with patch.object(ninja.active_state, "active_state_path", lambda: state_path):
-            with expect_raises(AssertionError, "uv run openforge gateway start"):
+            with expect_raises(
+                AssertionError,
+                "python -m openforge.cli.main gateway start",
+            ):
                 agent(prompt="hello")
 
 

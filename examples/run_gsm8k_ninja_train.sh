@@ -5,19 +5,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+GATEWAY_LOG="/tmp/openforge-gateway.log"
+: >"$GATEWAY_LOG"
+
 cleanup() {
-  uv run openforge session stop >/dev/null 2>&1 || true
-  uv run openforge gateway stop >/dev/null 2>&1 || true
+  python -m openforge.cli.main session stop >/dev/null 2>&1 || true
+  python -m openforge.cli.main gateway stop >/dev/null 2>&1 || true
 }
 
 trap cleanup EXIT INT TERM
 
-uv run openforge gateway start \
-  --config examples/gsm8k_gateway.yaml &
+python -m openforge.cli.main gateway start \
+  --config examples/gsm8k_gateway.yaml \
+  >"$GATEWAY_LOG" 2>&1 &
 
-uv run openforge session start \
+python -m openforge.cli.main session start \
   --runtime-config examples/gsm8k_runtime.yaml
 
-PYTHONUNBUFFERED=1 uv run python examples/train_gsm8k_ninja.py \
+PYTHONUNBUFFERED=1 python examples/train_gsm8k_ninja.py \
   --max-updates 250 \
   "$@"
