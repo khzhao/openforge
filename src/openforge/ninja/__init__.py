@@ -3,156 +3,124 @@
 from __future__ import annotations
 
 import logging
-import multiprocessing as mp
-import random
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
-from functools import wraps
-from multiprocessing.process import BaseProcess
-from threading import Lock, Thread
+from concurrent.futures import ThreadPoolExecutor
+from functools import update_wrapper
 from typing import Any, Callable
 from uuid import uuid4
 
 import httpx
 
 from openforge.configs.models import GatewayServerConfig
-from openforge.gateway.types import RuntimeConfig
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 __all__ = [
     "Client",
-    "Gateway",
-    "NinjaRunner",
-    "Session",
     "register",
-    "run_train",
 ]
 
 
-class GlobalState:
-    def __init__(self) -> None:
-        self.lock = Lock()
-        self.gateway: Gateway | None = None
-        self.session: Session | None = None
+def _sleep_before_retry(attempt: int) -> None:
+    time.sleep(min(2.0, 0.5 * (2**attempt)))
 
 
-STATE = GlobalState()
+def _map_parallel(
+    items: list[Any],
+    *,
+    max_parallelism: int,
+    fn: Callable[[Any], Any],
+) -> list[Any]:
+    if not items:
+        return []
+    max_workers = max(1, min(max_parallelism, len(items)))
+    if max_workers == 1:
+        return [fn(item) for item in items]
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        return list(executor.map(fn, items))
 
 
-@dataclass(slots=True)
-class _PendingFinish:
-    client: "Client"
-    future: Future[None]
-    reward: float
+def _resolve_max_parallelism(
+    *,
+    max_parallelism: int | None,
+    job_count: int,
+) -> int:
+    if max_parallelism is None:
+        return max(1, job_count)
+    if max_parallelism <= 0:
+        raise ValueError("max_parallelism must be > 0")
+    return max_parallelism
 
 
-@dataclass(slots=True)
-class _HttpLane:
-    client: httpx.Client
-    lock: Lock
+def _normalize_requests(
+    *,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    requests: list[dict[str, Any]] | None,
+) -> tuple[list[tuple[tuple[Any, ...], dict[str, Any]]], bool]:
+    if requests is None:
+        return [(tuple(args), dict(kwargs))], True
+    if args or kwargs:
+        raise ValueError("direct args/kwargs cannot be combined with requests")
+
+    normalized: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    for request in requests:
+        if not isinstance(request, dict):
+            raise TypeError("each request must be a dict")
+        normalized.append(((), dict(request)))
+    return normalized, False
 
 
-class Gateway:
-    """Own the gateway server lifecycle for one local process."""
+class _ActiveSession:
+    REQUEST_TIMEOUT_SECONDS = 300.0
+    END_RETRIES = 3
+    END_RETRY_DELAY_SECONDS = 0.02
 
     def __init__(self, gateway_config: GatewayServerConfig) -> None:
-        self.config = gateway_config
         host = gateway_config.gateway.host
         port = gateway_config.gateway.port
-        self.base_url = f"http://{host}:{port}"
-        self._process: BaseProcess | None = None
-
-    def start(self) -> Gateway:
-        return self
-
-    def __enter__(self) -> Gateway:
-        with STATE.lock:
-            assert STATE.gateway is None, "a gateway is already active"
-
-        ctx = mp.get_context("spawn")
-        self._process = ctx.Process(
-            target=_run_gateway_server,
-            args=(self.config,),
-            # The gateway may start Ray workers and SGLang subprocesses.
-            daemon=False,
-        )
-        self._process.start()
-        self._wait_until_ready()
-
-        with STATE.lock:
-            STATE.gateway = self
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        with STATE.lock:
-            assert STATE.session is None, (
-                "cannot close the gateway while a session is active"
-            )
-            STATE.gateway = None
-
-        process = self._process
-        self._process = None
-        if process is not None:
-            process.terminate()
-            process.join(timeout=10)
-
-    def _wait_until_ready(self, *, timeout: float = 120.0) -> None:
-        deadline = time.monotonic() + timeout
-        client = httpx.Client(base_url=self.base_url, timeout=300.0)
-        try:
-            while time.monotonic() < deadline:
-                try:
-                    if client.get("/health").status_code == 200:
-                        return
-                except (httpx.ConnectError, httpx.ReadError):
-                    pass
-                time.sleep(0.5)
-        finally:
-            client.close()
-        raise TimeoutError("gateway server did not start in time")
-
-
-class Session:
-    """Own one active gateway session."""
-
-    REQUEST_TIMEOUT_SECONDS = 300.0
-    HTTP_LANES = 64
-    MAX_HTTP_CONNECTIONS = 1
-    END_BATCH_RETRIES = 3
-    END_BATCH_MAX_SIZE = 320
-    END_BATCH_MAX_WAIT_SECONDS = 0.02
-    END_BATCH_IDLE_SECONDS = 0.001
-
-    def __init__(self, runtime_config: RuntimeConfig) -> None:
-        self.runtime_config = runtime_config
-        self._base_url: str | None = None
-        self._http_lanes: list[_HttpLane] = []
-        self._http_lane_index = 0
-        self._http_lane_lock = Lock()
+        self._base_url = f"http://{host}:{port}"
+        self._http: httpx.Client | None = None
         self._session_id: str | None = None
-        self._finish_lock = Lock()
-        self._finish_thread: Thread | None = None
-        self._finish_stop = False
-        self._pending_finishes: list[_PendingFinish] = []
 
     @property
     def session_id(self) -> str:
         assert self._session_id is not None, "no active session"
         return self._session_id
 
+    def __enter__(self) -> _ActiveSession:
+        self._http = httpx.Client(
+            base_url=self._base_url,
+            timeout=self.REQUEST_TIMEOUT_SECONDS,
+        )
+        response = self.get("/current_session")
+        if response.status_code == 404:
+            self.__exit__(None, None, None)
+            raise AssertionError("no active session")
+        response.raise_for_status()
+        payload = response.json()
+        assert isinstance(payload, dict)
+        self._session_id = str(payload["session_id"])
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        client = self._http
+        self._http = None
+        self._session_id = None
+        if client is not None:
+            client.close()
+
     def client(
         self,
         *,
         group_id: str | None = None,
+        trajectory_id: str | None = None,
     ) -> Client:
         return Client(
-            finish=self._finish_client,
-            post=self._post,
+            post=self.post,
             session_id=self.session_id,
-            trajectory_id=f"traj_{uuid4().hex}",
+            trajectory_id=trajectory_id or f"traj_{uuid4().hex}",
             group_id=group_id,
         )
 
@@ -164,11 +132,12 @@ class Session:
     ) -> list[list[Client]]:
         if len(counts) != len(group_ids):
             raise ValueError("counts must align with group_ids")
-        if not counts:
-            return []
         if any(count <= 0 for count in counts):
             raise ValueError("count must be >= 1")
-        response = self._post(
+        if not counts:
+            return []
+
+        response = self.post(
             "/start_trajectory_groups",
             {
                 "session_id": self.session_id,
@@ -181,26 +150,20 @@ class Session:
         assert isinstance(payload, dict)
         trajectory_id_groups = payload["trajectory_ids"]
         assert isinstance(trajectory_id_groups, list)
-        client_groups: list[list[Client]] = []
-        for trajectory_ids, group_id in zip(
-            trajectory_id_groups,
-            group_ids,
-            strict=True,
-        ):
-            assert isinstance(trajectory_ids, list)
-            client_groups.append(
-                [
-                    Client(
-                        finish=self._finish_client,
-                        post=self._post,
-                        session_id=self.session_id,
-                        trajectory_id=str(trajectory_id),
-                        group_id=group_id,
-                    )
-                    for trajectory_id in trajectory_ids
-                ]
+        return [
+            [
+                self.client(
+                    group_id=group_id,
+                    trajectory_id=str(trajectory_id),
+                )
+                for trajectory_id in trajectory_ids
+            ]
+            for trajectory_ids, group_id in zip(
+                trajectory_id_groups,
+                group_ids,
+                strict=True,
             )
-        return client_groups
+        ]
 
     def end_clients(
         self,
@@ -212,44 +175,28 @@ class Session:
             raise ValueError("rewards must align with clients")
         if not clients:
             return
-        payload = {
-            "session_id": self.session_id,
-            "trajectory_ids": [client.trajectory_id for client in clients],
-            "final_rewards": rewards,
-        }
-        for attempt in range(self.END_BATCH_RETRIES):
-            try:
-                response = self._post("/end_trajectories", payload)
-                response.raise_for_status()
-                break
-            except httpx.ReadError:
-                if attempt + 1 == self.END_BATCH_RETRIES:
-                    raise
-                time.sleep(self.END_BATCH_MAX_WAIT_SECONDS)
-        for client in clients:
-            client.close()
+        self._retry_post(
+            "/end_trajectories",
+            {
+                "session_id": self.session_id,
+                "trajectory_ids": [client.trajectory_id for client in clients],
+                "final_rewards": rewards,
+            },
+        )
 
     def fail_clients(self, clients: list["Client"]) -> None:
         if not clients:
             return
-        payload = {
-            "session_id": self.session_id,
-            "trajectory_ids": [client.trajectory_id for client in clients],
-        }
-        for attempt in range(self.END_BATCH_RETRIES):
-            try:
-                response = self._post("/error_trajectories", payload)
-                response.raise_for_status()
-                break
-            except httpx.ReadError:
-                if attempt + 1 == self.END_BATCH_RETRIES:
-                    raise
-                time.sleep(self.END_BATCH_MAX_WAIT_SECONDS)
-        for client in clients:
-            client.close()
+        self._retry_post(
+            "/error_trajectories",
+            {
+                "session_id": self.session_id,
+                "trajectory_ids": [client.trajectory_id for client in clients],
+            },
+        )
 
     def export_checkpoint(self) -> dict[str, Any]:
-        response = self._post(
+        response = self.post(
             "/export_checkpoint",
             {"session_id": self.session_id},
         )
@@ -259,152 +206,52 @@ class Session:
         return payload
 
     def current_policy_version(self) -> int:
-        response = self._get("/current_session")
+        response = self.get("/current_session")
         response.raise_for_status()
         payload = response.json()
         assert isinstance(payload, dict)
         return int(payload["policy_version"])
 
-    def start(self) -> Session:
-        return self
+    def post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
+        client = self._http_client()
+        return client.post(path, json=payload)
 
-    def __enter__(self) -> Session:
-        with STATE.lock:
-            gateway = STATE.gateway
-            session = STATE.session
-        assert gateway is not None, "no active gateway"
-        assert session is None, "a session is already active"
+    def get(self, path: str) -> httpx.Response:
+        client = self._http_client()
+        return client.get(path)
 
-        self._base_url = gateway.base_url
-        self._http_lanes = [
-            _HttpLane(client=self._build_http_client(), lock=Lock())
-            for _ in range(self.HTTP_LANES)
-        ]
-        try:
-            response = self._post(
-                "/start_session",
-                {"runtime": self.runtime_config.model_dump(mode="json")},
-            )
-            response.raise_for_status()
-            self._session_id = str(response.json()["session_id"])
-        except Exception:
-            self._close_http_clients()
-            self._base_url = None
-            raise
-        self._finish_stop = False
-        self._pending_finishes = []
-        self._finish_thread = Thread(target=self._flush_finishes, daemon=True)
-        self._finish_thread.start()
+    def _http_client(self) -> httpx.Client:
+        assert self._http is not None, "gateway is not connected"
+        return self._http
 
-        with STATE.lock:
-            STATE.session = self
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        session_id = self.session_id
-        finish_thread = self._finish_thread
-
-        with STATE.lock:
-            STATE.session = None
-        self._finish_stop = True
-        if finish_thread is not None:
-            finish_thread.join()
-        self._finish_thread = None
-        self._session_id = None
-
-        try:
-            response = self._post("/end_session", {"session_id": session_id})
-            response.raise_for_status()
-        finally:
-            self._base_url = None
-            self._close_http_clients()
-
-    def _finish_client(self, client: "Client", reward: float) -> None:
-        future: Future[None] = Future()
-        with self._finish_lock:
-            self._pending_finishes.append(
-                _PendingFinish(
-                    client=client,
-                    future=future,
-                    reward=reward,
-                )
-            )
-        future.result()
-
-    def _flush_finishes(self) -> None:
-        while True:
-            if self._finish_stop and not self._pending_finishes:
-                return
-            if not self._pending_finishes:
-                time.sleep(self.END_BATCH_IDLE_SECONDS)
-                continue
-            time.sleep(self.END_BATCH_MAX_WAIT_SECONDS)
-            with self._finish_lock:
-                batch = self._pending_finishes[: self.END_BATCH_MAX_SIZE]
-                del self._pending_finishes[: len(batch)]
+    def _retry_post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+    ) -> httpx.Response:
+        for attempt in range(self.END_RETRIES):
             try:
-                self.end_clients(
-                    [item.client for item in batch],
-                    rewards=[item.reward for item in batch],
-                )
-            except Exception as exc:
-                for item in batch:
-                    item.future.set_exception(exc)
-            else:
-                for item in batch:
-                    item.future.set_result(None)
-
-    def _close_http_clients(self) -> None:
-        lanes = self._http_lanes
-        self._http_lanes = []
-        self._http_lane_index = 0
-        for lane in lanes:
-            lane.client.close()
-
-    def _build_http_client(self) -> httpx.Client:
-        assert self._base_url is not None, "no active session"
-        return httpx.Client(
-            base_url=self._base_url,
-            timeout=self.REQUEST_TIMEOUT_SECONDS,
-            limits=httpx.Limits(
-                max_connections=self.MAX_HTTP_CONNECTIONS,
-                max_keepalive_connections=self.MAX_HTTP_CONNECTIONS,
-            ),
-        )
-
-    def _next_http_lane(self) -> _HttpLane:
-        assert self._http_lanes, "no active session"
-        with self._http_lane_lock:
-            lane = self._http_lanes[self._http_lane_index]
-            self._http_lane_index = (self._http_lane_index + 1) % len(
-                self._http_lanes
-            )
-        return lane
-
-    def _post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
-        lane = self._next_http_lane()
-        with lane.lock:
-            return lane.client.post(path, json=payload)
-
-    def _get(self, path: str) -> httpx.Response:
-        lane = self._next_http_lane()
-        with lane.lock:
-            return lane.client.get(path)
+                response = self.post(path, payload)
+                response.raise_for_status()
+                return response
+            except httpx.ReadError:
+                if attempt + 1 == self.END_RETRIES:
+                    raise
+                time.sleep(self.END_RETRY_DELAY_SECONDS)
+        raise AssertionError("unreachable")
 
 
 class Client:
-    """Own one trajectory underneath the active session."""
+    """Own one trajectory underneath the gateway's active session."""
 
     def __init__(
         self,
         *,
-        finish: Callable[["Client", float], None],
         post: Callable[[str, dict[str, Any]], httpx.Response],
         session_id: str,
         trajectory_id: str,
         group_id: str | None = None,
     ) -> None:
-        self._finish = finish
         self._post = post
         self._session_id = session_id
         self._trajectory_id = trajectory_id
@@ -414,10 +261,6 @@ class Client:
     @property
     def trajectory_id(self) -> str:
         return self._trajectory_id
-
-    @property
-    def group_id(self) -> str | None:
-        return self._group_id
 
     def generate(
         self,
@@ -440,45 +283,29 @@ class Client:
         return response.json()
 
     def finish(self, reward: float) -> None:
-        try:
-            if not self._used:
-                self._start()
-            self._finish(self, reward)
-        finally:
-            self.close()
+        if not self._used:
+            self._start()
+        response = self._post(
+            "/end_trajectory",
+            {
+                "session_id": self._session_id,
+                "trajectory_id": self._trajectory_id,
+                "final_reward": reward,
+            },
+        )
+        response.raise_for_status()
 
     def fail(self) -> None:
-        try:
-            if not self._used:
-                return
-            response = self._post(
-                "/error_trajectory",
-                {
-                    "session_id": self._session_id,
-                    "trajectory_id": self._trajectory_id,
-                },
-            )
-            response.raise_for_status()
-        finally:
-            self.close()
-
-    def discard(self) -> None:
-        try:
-            if not self._used:
-                return
-            response = self._post(
-                "/discard_trajectory",
-                {
-                    "session_id": self._session_id,
-                    "trajectory_id": self._trajectory_id,
-                },
-            )
-            response.raise_for_status()
-        finally:
-            self.close()
-
-    def close(self) -> None:
-        return
+        if not self._used:
+            return
+        response = self._post(
+            "/error_trajectory",
+            {
+                "session_id": self._session_id,
+                "trajectory_id": self._trajectory_id,
+            },
+        )
+        response.raise_for_status()
 
     def _start(self) -> None:
         response = self._post(
@@ -495,207 +322,188 @@ class Client:
         self._used = True
 
 
-def register(
-    gateway_config: GatewayServerConfig,
-    runtime_config: RuntimeConfig,
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Register a function as an OpenForge agent."""
+class _RegisteredAgent:
+    def __init__(
+        self,
+        *,
+        func: Callable[..., Any],
+        gateway_config: GatewayServerConfig,
+    ) -> None:
+        self._func = func
+        self._gateway_config = gateway_config
+        update_wrapper(self, func)
 
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        @wraps(func)
-        def wrapped(*args: Any, **kwargs: Any) -> Any:
-            with STATE.lock:
-                gateway = STATE.gateway
-                session = STATE.session
-            assert gateway is not None, "no active gateway"
-            assert session is not None, "no active session"
-            group_id = kwargs.pop("__group_id", None)
-            discard = bool(kwargs.pop("__discard", False))
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        with self._session() as session:
+            return self._invoke(session, args, kwargs)
 
-            client = session.client(group_id=group_id)
-            try:
-                result = func(client, *args, **kwargs)
-            except Exception:
-                client.fail()
-                raise
+    def execute(
+        self,
+        *args: Any,
+        requests: list[dict[str, Any]] | None = None,
+        max_parallelism: int | None = None,
+        group_size: int = 1,
+        retries: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        if group_size <= 0:
+            raise ValueError("group_size must be > 0")
+        if retries < 0:
+            raise ValueError("retries must be >= 0")
 
-            if discard:
-                client.discard()
-                return result
+        call_specs, single_request = _normalize_requests(
+            args=args,
+            kwargs=kwargs,
+            requests=requests,
+        )
+        resolved_max_parallelism = _resolve_max_parallelism(
+            max_parallelism=max_parallelism,
+            job_count=len(call_specs) * group_size,
+        )
+        with self._session() as session:
+            if group_size == 1:
+                results = _execute_many(
+                    self,
+                    session,
+                    call_specs,
+                    max_parallelism=resolved_max_parallelism,
+                    retries=retries,
+                )
+            else:
+                results = _execute_grouped(
+                    self,
+                    session,
+                    call_specs,
+                    group_size=group_size,
+                    max_parallelism=resolved_max_parallelism,
+                    retries=retries,
+                )
+        if single_request:
+            return results[0]
+        return results
 
-            reward = float(result)
-            client.finish(reward)
-            return reward
-
-        def run(fn: Callable[[], Any]) -> Any:
-            with Gateway(gateway_config).start():
-                with Session(runtime_config).start():
-                    return fn()
-
-        def export_checkpoint() -> dict[str, Any]:
-            with STATE.lock:
-                session = STATE.session
-            assert session is not None, "no active session"
+    def export_checkpoint(self) -> dict[str, Any]:
+        with self._session() as session:
             return session.export_checkpoint()
 
-        def current_policy_version() -> int:
-            with STATE.lock:
-                session = STATE.session
-            assert session is not None, "no active session"
+    def current_policy_version(self) -> int:
+        with self._session() as session:
             return session.current_policy_version()
 
-        def session() -> Session:
-            with STATE.lock:
-                active_session = STATE.session
-            assert active_session is not None, "no active session"
-            return active_session
+    def _call_body(
+        self,
+        client: Client,
+        call_args: tuple[Any, ...],
+        call_kwargs: dict[str, Any],
+    ) -> float:
+        return float(self._func(client, *call_args, **call_kwargs))
 
-        wrapped.run = run
-        wrapped.export_checkpoint = export_checkpoint
-        wrapped.current_policy_version = current_policy_version
-        wrapped.session = session
-        return wrapped
-
-    return decorator
-
-
-def _run_gateway_server(gateway_config: GatewayServerConfig) -> None:
-    import uvicorn
-
-    from openforge.gateway.server import create_app
-
-    app = create_app(gateway_config)
-    uvicorn.run(
-        app,
-        host=gateway_config.gateway.host,
-        port=gateway_config.gateway.port,
-        access_log=False,
-        log_level="warning",
-    )
-
-
-class NinjaRunner:
-    """Run an OpenForge agent function in a loop."""
-
-    @staticmethod
-    def run(
-        agent_func: Callable[..., Any],
-        *,
-        episodes: int = 1,
-        args: tuple[Any, ...] = (),
-        kwargs: dict[str, Any] | None = None,
-    ) -> None:
-        def execute() -> None:
-            payload = {} if kwargs is None else kwargs
-            for _ in range(episodes):
-                agent_func(*args, **payload)
-
-        agent_func.run(execute)
-
-
-def _parse_policy_version(value: object) -> int:
-    text = str(value)
-    return int(text) if text.isdigit() else 0
-
-
-def _wait_for_rollout_policy_version(
-    session: Session,
-    *,
-    target_version: int,
-    timeout: float,
-) -> int:
-    deadline = time.monotonic() + timeout
-    probe_sampling = {
-        "temperature": 0.0,
-        "top_p": 1.0,
-        "top_k": -1,
-        "max_new_tokens": 8,
-    }
-    while time.monotonic() < deadline:
+    def _invoke(
+        self,
+        session: _ActiveSession,
+        call_args: tuple[Any, ...],
+        call_kwargs: dict[str, Any],
+    ) -> Any:
         client = session.client()
         try:
-            response = client.generate(
-                [{"role": "user", "content": "Reply with OK."}],
-                sampling_params=probe_sampling,
-            )
-        finally:
-            client.discard()
-        version = _parse_policy_version(
-            response.get("metadata", {}).get("rollout_model_version")
-        )
-        if version >= target_version:
-            return version
-        time.sleep(1.0)
-    raise TimeoutError(
-        f"rollout policy_version did not reach {target_version} within {timeout} seconds"
+            result = self._func(client, *call_args, **call_kwargs)
+        except Exception:
+            client.fail()
+            raise
+
+        reward = float(result)
+        client.finish(reward)
+        return reward
+
+    def _session(self) -> _ActiveSession:
+        return _ActiveSession(self._gateway_config)
+
+
+def _execute_many(
+    agent: _RegisteredAgent,
+    session: _ActiveSession,
+    call_specs: list[tuple[tuple[Any, ...], dict[str, Any]]],
+    *,
+    max_parallelism: int,
+    retries: int,
+) -> list[float]:
+    def run_once(call_spec: tuple[tuple[Any, ...], dict[str, Any]]) -> float:
+        last_error: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                return float(agent._invoke(session, call_spec[0], call_spec[1]))
+            except Exception as exc:
+                last_error = exc
+                if attempt >= retries:
+                    raise
+                _sleep_before_retry(attempt)
+        assert last_error is not None
+        raise last_error
+
+    return _map_parallel(
+        call_specs,
+        max_parallelism=max_parallelism,
+        fn=run_once,
     )
 
 
-def _collect_train_groups(
-    agent_func: Callable[..., Any],
-    session: Session,
+def _execute_grouped(
+    agent: _RegisteredAgent,
+    session: _ActiveSession,
+    call_specs: list[tuple[tuple[Any, ...], dict[str, Any]]],
     *,
-    batch_specs: list[tuple[int, dict[str, Any]]],
     group_size: int,
-    parallelism: int,
+    max_parallelism: int,
     retries: int,
-) -> list[dict[str, Any]]:
-    agent_body = getattr(agent_func, "__wrapped__", None)
-    if agent_body is None:
-        raise ValueError("run_train requires an agent registered with openforge.ninja.register")
-
+) -> list[list[float]]:
     last_error: Exception | None = None
+
     for attempt in range(retries + 1):
         client_groups: list[list[Client]] = []
         try:
-            group_ids = [f"train-group-{group_index}" for group_index, _ in batch_specs]
             client_groups = session.trajectory_groups(
-                counts=[group_size for _ in batch_specs],
-                group_ids=group_ids,
+                counts=[group_size for _ in call_specs],
+                group_ids=[f"group_{uuid4().hex}" for _ in call_specs],
             )
             jobs = [
-                (group_index, payload, client)
-                for (group_index, payload), clients in zip(
-                    batch_specs,
-                    client_groups,
-                    strict=True,
+                (request_index, rollout_index, call_args, call_kwargs, client)
+                for request_index, ((call_args, call_kwargs), clients) in enumerate(
+                    zip(call_specs, client_groups, strict=True)
                 )
-                for client in clients
+                for rollout_index, client in enumerate(clients)
             ]
 
-            def execute(job: tuple[int, dict[str, Any], Client]) -> tuple[int, Client, float]:
-                group_index, payload, client = job
-                reward = float(agent_body(client, **payload))
-                return group_index, client, reward
+            def run_job(
+                job: tuple[int, int, tuple[Any, ...], dict[str, Any], Client]
+            ) -> tuple[int, int, Client, float]:
+                request_index, rollout_index, call_args, call_kwargs, client = job
+                reward = agent._call_body(client, call_args, call_kwargs)
+                return request_index, rollout_index, client, reward
 
-            max_workers = max(1, min(parallelism, len(jobs)))
-            if max_workers == 1:
-                results = [execute(job) for job in jobs]
-            else:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    results = list(executor.map(execute, jobs))
-
+            results = _map_parallel(
+                jobs,
+                max_parallelism=max_parallelism,
+                fn=run_job,
+            )
             session.end_clients(
-                [client for _group_index, client, _reward in results],
-                rewards=[reward for _group_index, _client, reward in results],
+                [client for _request_index, _rollout_index, client, _reward in results],
+                rewards=[
+                    reward
+                    for _request_index, _rollout_index, _client, reward in results
+                ],
             )
 
-            by_group: dict[int, list[float]] = {}
-            for group_index, _client, reward in results:
-                by_group.setdefault(group_index, []).append(reward)
-            return [
-                {
-                    "group_index": group_index,
-                    "group_size": len(rewards),
-                    "max_reward": max(rewards),
-                    "mean_reward": sum(rewards) / len(rewards),
-                    "rewards": rewards,
-                }
-                for group_index, rewards in sorted(by_group.items())
+            rewards_by_request = [
+                [0.0 for _ in range(group_size)] for _ in call_specs
             ]
+            for request_index, rollout_index, _client, reward in results:
+                rewards_by_request[request_index][rollout_index] = reward
+            return rewards_by_request
         except Exception as exc:
             last_error = exc
-            pending_clients = [client for clients in client_groups for client in clients]
+            pending_clients = [
+                client for clients in client_groups for client in clients
+            ]
             if pending_clients:
                 try:
                     session.fail_clients(pending_clients)
@@ -707,119 +515,21 @@ def _collect_train_groups(
                             pass
             if attempt >= retries:
                 raise
-            time.sleep(min(2.0, 0.5 * (2**attempt)))
+            _sleep_before_retry(attempt)
 
     assert last_error is not None
     raise last_error
 
 
-def run_train(
-    agent_func: Callable[..., Any],
-    *,
-    inputs: list[dict[str, Any]],
-    group_size: int,
-    epochs: int,
-    seed: int,
-    parallelism: int = 1,
-    retries: int = 0,
-    wait_timeout: float = 1800.0,
-    max_updates: int | None = None,
-) -> dict[str, Any]:
-    """Run grouped on-policy training for a registered Ninja agent."""
-    if group_size <= 0:
-        raise ValueError("group_size must be > 0")
-    if epochs <= 0:
-        raise ValueError("epochs must be > 0")
-    if parallelism <= 0:
-        raise ValueError("parallelism must be > 0")
-    if retries < 0:
-        raise ValueError("retries must be >= 0")
-    if not inputs:
-        raise ValueError("inputs must not be empty")
+def register(
+    gateway_config: GatewayServerConfig,
+) -> Callable[[Callable[..., Any]], _RegisteredAgent]:
+    """Register a function as an OpenForge agent."""
 
-    def execute() -> dict[str, Any]:
-        session = agent_func.session()
-        samples_per_update = int(session.runtime_config.train.global_batch_size)
-        if samples_per_update <= 0:
-            raise ValueError("runtime_config.train.global_batch_size must be > 0")
-        if samples_per_update % group_size != 0:
-            raise ValueError(
-                "runtime_config.train.global_batch_size must be divisible by group_size"
-            )
-        prompt_groups_per_update = samples_per_update // group_size
+    def decorator(func: Callable[..., Any]) -> _RegisteredAgent:
+        return _RegisteredAgent(
+            func=func,
+            gateway_config=gateway_config,
+        )
 
-        rng = random.Random(seed)
-        schedule: list[dict[str, Any]] = []
-        for _epoch in range(epochs):
-            epoch_inputs = list(inputs)
-            rng.shuffle(epoch_inputs)
-            schedule.extend(epoch_inputs)
-
-        available_updates = len(schedule) // prompt_groups_per_update
-        if max_updates is not None:
-            available_updates = min(available_updates, max_updates)
-        if available_updates <= 0:
-            raise ValueError(
-                "not enough prompt groups to perform one update: "
-                f"have {len(schedule)}, need {prompt_groups_per_update}"
-            )
-
-        initial_policy_version = session.current_policy_version()
-        last_update: dict[str, Any] | None = None
-        final_policy_version = initial_policy_version
-        consumed_groups = 0
-        for update_offset in range(available_updates):
-            batch_inputs = schedule[
-                consumed_groups : consumed_groups + prompt_groups_per_update
-            ]
-            batch_specs = [
-                (consumed_groups + index + 1, payload)
-                for index, payload in enumerate(batch_inputs)
-            ]
-            group_results = _collect_train_groups(
-                agent_func,
-                session,
-                batch_specs=batch_specs,
-                group_size=group_size,
-                parallelism=parallelism,
-                retries=retries,
-            )
-            consumed_groups += prompt_groups_per_update
-            target_version = initial_policy_version + update_offset + 1
-            final_policy_version = _wait_for_rollout_policy_version(
-                session,
-                target_version=target_version,
-                timeout=wait_timeout,
-            )
-            rewards = [
-                reward
-                for group in group_results
-                for reward in group["rewards"]
-            ]
-            last_update = {
-                "policy_version": final_policy_version,
-                "prompt_groups": len(group_results),
-                "samples": len(rewards),
-                "max_group_reward": max(group["max_reward"] for group in group_results),
-                "mean_group_reward": sum(
-                    group["mean_reward"] for group in group_results
-                )
-                / len(group_results),
-                "sample_mean_reward": sum(rewards) / len(rewards),
-                "update_index": update_offset + 1,
-            }
-
-        return {
-            "completed_updates": available_updates,
-            "expected_updates": available_updates,
-            "final_checkpoint": session.export_checkpoint(),
-            "final_policy_version": final_policy_version,
-            "last_train_update": last_update,
-            "prompt_groups_per_update": prompt_groups_per_update,
-            "samples_per_update": samples_per_update,
-            "train_groups": len(schedule),
-            "train_groups_consumed": consumed_groups,
-            "train_groups_dropped": len(schedule) - consumed_groups,
-        }
-
-    return agent_func.run(execute)
+    return decorator
