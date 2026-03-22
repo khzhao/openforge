@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import httpx
 
+from openforge import active_state
 from openforge.configs.models import GatewayServerConfig
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -27,7 +28,9 @@ __all__ = [
 
 _AUTO_CONCURRENCY_CAP = 128
 _AUTO_CONCURRENCY_FLOOR = 32
-_CURRENT_CLIENT: ContextVar[Any | None] = ContextVar("openforge_ninja_current_client", default=None)
+_CURRENT_CLIENT: ContextVar[Any | None] = ContextVar(
+    "openforge_ninja_current_client", default=None
+)
 
 
 def _sleep_before_retry(attempt: int) -> None:
@@ -134,9 +137,8 @@ class _ActiveSession:
     END_RETRIES = 3
     END_RETRY_DELAY_SECONDS = 0.02
 
-    def __init__(self, gateway_config: GatewayServerConfig) -> None:
-        host = gateway_config.gateway.host
-        port = gateway_config.gateway.port
+    def __init__(self, gateway_target: tuple[str, int]) -> None:
+        host, port = gateway_target
         self._base_url = f"http://{host}:{port}"
         self._http: httpx.Client | None = None
         self._session_id: str | None = None
@@ -154,7 +156,10 @@ class _ActiveSession:
         response = self.get("/current_session")
         if response.status_code == 404:
             self.__exit__(None, None, None)
-            raise AssertionError("no active session")
+            raise AssertionError(
+                "no active session recorded; "
+                "run `openforge session start --runtime-config ...` first"
+            )
         response.raise_for_status()
         payload = response.json()
         assert isinstance(payload, dict)
@@ -396,7 +401,7 @@ class _RegisteredAgent:
         self,
         *,
         func: Callable[..., Any],
-        gateway_config: GatewayServerConfig,
+        gateway_config: GatewayServerConfig | None,
     ) -> None:
         self._func = func
         self._gateway_config = gateway_config
@@ -527,7 +532,15 @@ class _RegisteredAgent:
             _CURRENT_CLIENT.reset(token)
 
     def _session(self) -> _ActiveSession:
-        return _ActiveSession(self._gateway_config)
+        return _ActiveSession(_resolve_gateway_target(self._gateway_config))
+
+
+def _resolve_gateway_target(
+    gateway_config: GatewayServerConfig | None,
+) -> tuple[str, int]:
+    if gateway_config is not None:
+        return gateway_config.gateway.host, gateway_config.gateway.port
+    return active_state.load_active_gateway_target()
 
 
 def _execute_many(
@@ -571,7 +584,7 @@ def _execute_grouped(
     group_concurrency = max(1, concurrency // rollout_concurrency)
 
     def run_group(
-        group_job: tuple[int, tuple[tuple[Any, ...], dict[str, Any]]]
+        group_job: tuple[int, tuple[tuple[Any, ...], dict[str, Any]]],
     ) -> tuple[int, list[float]]:
         request_index, (call_args, call_kwargs) = group_job
         last_error: Exception | None = None
@@ -585,7 +598,7 @@ def _execute_grouped(
                 )[0]
 
                 def run_rollout(
-                    rollout_job: tuple[int, Client]
+                    rollout_job: tuple[int, Client],
                 ) -> tuple[int, Client, float]:
                     rollout_index, client = rollout_job
                     reward = agent._call_body(client, call_args, call_kwargs)
@@ -629,7 +642,7 @@ def _execute_grouped(
 
 
 def agent(
-    gateway_config: GatewayServerConfig,
+    gateway_config: GatewayServerConfig | None = None,
 ) -> Callable[[Callable[..., Any]], _RegisteredAgent]:
     """Register a function as an OpenForge agent."""
 

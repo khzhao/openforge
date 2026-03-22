@@ -66,7 +66,9 @@ class TrainWorker:
         *,
         global_step: int | None = None,
     ) -> list[TrainStepResult]:
-        packed_batches = [self._pack_mini_batch(mini_batch) for mini_batch in mini_batches]
+        packed_batches = [
+            self._pack_mini_batch(mini_batch) for mini_batch in mini_batches
+        ]
         for microbatches in packed_batches:
             for batch in microbatches:
                 batch["old_log_probs"] = self.engine.compute_old_log_probs(batch)

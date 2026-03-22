@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.scripts]
-gateway = "openforge.gateway.main:main"
+openforge = "openforge.cli.main:main"
 
 [dependency-groups]
 dev = [

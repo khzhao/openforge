@@ -17,15 +17,12 @@ from uuid import uuid4
 
 import datasets
 import httpx
-import yaml
 
+from openforge import active_state
 from openforge.benchmarks.gsm8k import build_gsm8k_prompt, extract_gsm8k_ground_truth
-from openforge.configs.models import GatewayServerConfig
 from openforge.gateway.types import RuntimeConfig
 
 ARTIFACT_ROOT = Path(__file__).resolve().parents[1] / "artifacts"
-GATEWAY_CONFIG_PATH = Path(__file__).with_name("gsm8k_gateway.yaml")
-RUNTIME_CONFIG_PATH = Path(__file__).with_name("gsm8k_runtime.yaml")
 
 
 @dataclass(slots=True)
@@ -55,27 +52,9 @@ def make_artifact_dir(path: str | None, *, prefix: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=prefix, dir=ARTIFACT_ROOT))
 
 
-def load_gateway_config(
-    path: str | Path,
-    *,
-    artifact_dir: Path,
-) -> GatewayServerConfig:
-    """Load the gateway config and relocate its sqlite path into artifacts."""
-    cfg = GatewayServerConfig.from_yaml(path)
-    cfg.data.path = str(artifact_dir / "gateway.sqlite3")
-    return cfg
-
-
-def load_runtime_config(
-    path: str | Path,
-    *,
-    artifact_dir: Path,
-) -> RuntimeConfig:
-    """Load the runtime config and relocate checkpoint output into artifacts."""
-    with Path(path).open(encoding="utf-8") as handle:
-        payload = yaml.safe_load(handle)
-    payload["train"]["checkpoints"] = str(artifact_dir / "checkpoints")
-    return RuntimeConfig.model_validate(payload)
+def load_runtime_config(path: str | Path) -> RuntimeConfig:
+    """Load the runtime config from YAML."""
+    return RuntimeConfig.from_yaml(path)
 
 
 def load_train_examples(
@@ -129,8 +108,14 @@ def build_train_arg_parser() -> argparse.ArgumentParser:
     """Build the shared CLI parser for GSM8K training examples."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact-dir", default=None)
-    parser.add_argument("--gateway-config", default=str(GATEWAY_CONFIG_PATH))
-    parser.add_argument("--runtime-config", default=str(RUNTIME_CONFIG_PATH))
+    parser.add_argument(
+        "--runtime-config",
+        default=None,
+        help=(
+            "Optional runtime YAML. If omitted, the script uses the active "
+            "session runtime recorded by OpenForge."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--group-size", type=int, default=5)
     parser.add_argument("--total-epochs", type=int, default=15)
@@ -159,8 +144,12 @@ def parse_train_args() -> argparse.Namespace:
 def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
     """Load configs, dataset inputs, and metadata for GSM8K training."""
     artifact_dir = make_artifact_dir(args.artifact_dir, prefix="gsm8k-ninja-")
-    gateway_config = load_gateway_config(args.gateway_config, artifact_dir=artifact_dir)
-    runtime_config = load_runtime_config(args.runtime_config, artifact_dir=artifact_dir)
+    gateway_target = active_state.load_active_gateway_target()
+    runtime_config = (
+        active_state.load_active_runtime_config()
+        if args.runtime_config is None
+        else load_runtime_config(args.runtime_config)
+    )
 
     train_examples = load_train_examples(
         seed=args.seed,
@@ -202,7 +191,7 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         "train_sampling": sampling_params,
     }
     return {
-        "gateway_config": gateway_config,
+        "gateway_target": gateway_target,
         "runtime_config": runtime_config,
         "inputs": inputs,
         "sampling_params": sampling_params,
@@ -213,9 +202,10 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
 
 @contextmanager
 def _active_session(
-    gateway_config: GatewayServerConfig,
+    gateway_target: tuple[str, int],
 ) -> Any:
-    base_url = f"http://{gateway_config.gateway.host}:{gateway_config.gateway.port}"
+    host, port = gateway_target
+    base_url = f"http://{host}:{port}"
     client = httpx.Client(base_url=base_url, timeout=300.0)
     try:
         response = client.get("/current_session")
@@ -235,7 +225,7 @@ def _parse_policy_version(value: object) -> int:
 
 
 def _wait_for_rollout_policy_version(
-    gateway_config: GatewayServerConfig,
+    gateway_target: tuple[str, int],
     *,
     target_version: int,
     timeout: float,
@@ -248,7 +238,7 @@ def _wait_for_rollout_policy_version(
         "max_new_tokens": 8,
     }
     while time.monotonic() < deadline:
-        with _active_session(gateway_config) as (client, session_id):
+        with _active_session(gateway_target) as (client, session_id):
             trajectory_id = f"traj_{uuid4().hex}"
             response = client.post(
                 "/generate",
@@ -284,7 +274,7 @@ def _wait_for_rollout_policy_version(
 def run_train(
     agent_func: Any,
     *,
-    gateway_config: GatewayServerConfig,
+    gateway_target: tuple[str, int],
     runtime_config: RuntimeConfig,
     inputs: list[dict[str, Any]],
     group_size: int,
@@ -363,23 +353,17 @@ def run_train(
         ]
         consumed_groups += prompt_groups_per_update
         final_policy_version = _wait_for_rollout_policy_version(
-            gateway_config,
+            gateway_target,
             target_version=initial_policy_version + update_offset + 1,
             timeout=wait_timeout,
         )
-        rewards = [
-            reward
-            for group in group_results
-            for reward in group["rewards"]
-        ]
+        rewards = [reward for group in group_results for reward in group["rewards"]]
         last_update = {
             "policy_version": final_policy_version,
             "prompt_groups": len(group_results),
             "samples": len(rewards),
             "max_group_reward": max(group["max_reward"] for group in group_results),
-            "mean_group_reward": sum(
-                group["mean_reward"] for group in group_results
-            )
+            "mean_group_reward": sum(group["mean_reward"] for group in group_results)
             / len(group_results),
             "sample_mean_reward": sum(rewards) / len(rewards),
             "update_index": update_offset + 1,

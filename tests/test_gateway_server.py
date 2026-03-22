@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -221,12 +222,19 @@ def _patched_app(
 ) -> Iterator[object]:
     _FakeTrainLoop.instances.clear()
     with ExitStack() as stack:
+        state_tmpdir = stack.enter_context(tempfile.TemporaryDirectory())
+        state_path = Path(state_tmpdir) / "active_gateway.json"
         stack.enter_context(patch.object(gateway_service, "TrainLoop", _FakeTrainLoop))
         stack.enter_context(
             patch.object(gateway_server, "_build_store", lambda cfg: store)
         )
         stack.enter_context(
             patch.object(gateway_server, "Runtime", lambda cfg: runtime)
+        )
+        stack.enter_context(
+            patch.object(
+                gateway_server.active_state, "active_state_path", lambda: state_path
+            )
         )
         yield gateway_server.create_app(_server_config())
 
@@ -318,6 +326,15 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
         with _patched_app(store=store, runtime=_FakeRuntime()) as app:
             with TestClient(app) as client:
                 assert client.get("/health").json() == {"ok": True}
+                assert client.get("/info").json() == {
+                    "data": {"path": None},
+                    "gateway": {"host": "127.0.0.1", "port": 0},
+                    "cluster": {
+                        "num_nodes": 1,
+                        "gpus_per_node": 1,
+                        "cpus_per_node": 1,
+                    },
+                }
                 assert client.get("/current_session").status_code == 404
                 assert client.get("/models").json()["active_model"] is None
                 assert client.get("/models").json()["models"] == [
@@ -330,6 +347,62 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
                 assert started.status_code == 200
                 assert client.get("/models").json()["active_model"] == "model-a"
                 assert client.get("/current_session").json() == started.json()
+
+
+def test_gateway_http_updates_shared_state_for_gateway_and_session() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_path = Path(tmpdir) / "active_gateway.json"
+        store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+        runtime = _FakeRuntime()
+        _FakeTrainLoop.instances.clear()
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(gateway_service, "TrainLoop", _FakeTrainLoop)
+            )
+            stack.enter_context(
+                patch.object(gateway_server, "_build_store", lambda cfg: store)
+            )
+            stack.enter_context(
+                patch.object(gateway_server, "Runtime", lambda cfg: runtime)
+            )
+            stack.enter_context(
+                patch.object(
+                    gateway_server.active_state,
+                    "active_state_path",
+                    lambda: state_path,
+                )
+            )
+            app = gateway_server.create_app(_server_config())
+            with TestClient(app) as client:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                assert state["gateway"] == {
+                    "host": "127.0.0.1",
+                    "pid": state["gateway"]["pid"],
+                    "port": 0,
+                }
+                assert isinstance(state["gateway"]["pid"], int)
+                assert state["session"] is None
+                assert state["version"] == 1
+
+                started = client.post(
+                    "/start_session", json=_start_session_payload("model-a")
+                )
+                assert started.status_code == 200
+                session_state = json.loads(state_path.read_text(encoding="utf-8"))
+                assert session_state["session"] == {
+                    "session_id": started.json()["session_id"],
+                    "runtime": _start_session_payload("model-a")["runtime"],
+                }
+
+                ended = client.post(
+                    "/end_session",
+                    json={"session_id": started.json()["session_id"]},
+                )
+                assert ended.status_code == 200
+                ended_state = json.loads(state_path.read_text(encoding="utf-8"))
+                assert ended_state["session"] is None
+
+        assert state_path.exists() is False
 
 
 def test_gateway_http_start_session_reports_errors() -> None:
@@ -595,6 +668,7 @@ def main() -> int:
         [
             test_gateway_http_flow,
             test_gateway_http_health_and_models_reflect_loaded_model,
+            test_gateway_http_updates_shared_state_for_gateway_and_session,
             test_gateway_http_start_session_reports_errors,
             test_gateway_http_releases_model_after_last_session,
             test_gateway_http_generate_validates_request_and_unknown_records,

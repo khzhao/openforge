@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, Field
 
 from openforge.configs.algo import AlgorithmConfig
@@ -61,6 +63,15 @@ class RuntimeConfig(BaseModel):
     model: ModelConfig
     train: TrainConfig
     rollout: RolloutConfig
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "RuntimeConfig":
+        """Load RuntimeConfig from a YAML file."""
+        with Path(path).open(encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("YAML root must be a mapping")
+        return cls.model_validate(raw)
 
 
 class StartSessionRequest(BaseModel):

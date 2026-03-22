@@ -87,7 +87,9 @@ class Service:
         if session_id is None:
             return None
 
-        policy_version = 0 if self._train_loop is None else self._train_loop.policy_version
+        policy_version = (
+            0 if self._train_loop is None else self._train_loop.policy_version
+        )
         model_name = self._active_session_model_name
         if model_name is not None:
             return StartSessionResponse(
@@ -177,7 +179,9 @@ class Service:
         if len(counts) != len(group_ids):
             raise Exception("counts must align with group_ids")
         if not counts:
-            return StartTrajectoryGroupsResponse(session_id=session_id, trajectory_ids=[])
+            return StartTrajectoryGroupsResponse(
+                session_id=session_id, trajectory_ids=[]
+            )
 
         trajectory_ids_per_group: list[list[str]] = []
         for count, group_id in zip(counts, group_ids, strict=True):
@@ -275,7 +279,10 @@ class Service:
             trajectory = self._active_trajectories.get(trajectory_id)
             if trajectory is None:
                 stored_trajectory = await self.store.get_trajectory(trajectory_id)
-                if stored_trajectory is None or stored_trajectory.session_id != session_id:
+                if (
+                    stored_trajectory is None
+                    or stored_trajectory.session_id != session_id
+                ):
                     raise Exception(f"unknown trajectory_id: {trajectory_id}")
                 if stored_trajectory.status == "completed":
                     continue
@@ -429,9 +436,7 @@ class Service:
             trajectory.session_id == session_id
             for trajectory in self._active_trajectories.values()
         ):
-            raise Exception(
-                "all trajectories must be ended before ending the session"
-            )
+            raise Exception("all trajectories must be ended before ending the session")
 
         self._active_session_id = None
         self._active_session_model_name = None
@@ -509,9 +514,7 @@ class Service:
                     return
                 batch = self._pending_finishes
                 self._pending_finishes = []
-            await self.store.create_trajectories(
-                [item.trajectory for item in batch]
-            )
+            await self.store.create_trajectories([item.trajectory for item in batch])
             await self.store.append_turns(
                 [turn for item in batch for turn in item.turns]
             )

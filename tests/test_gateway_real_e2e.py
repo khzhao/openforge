@@ -6,7 +6,7 @@ This script:
 1. Resolves a local or Hub-backed model path.
 2. Writes a temporary OpenForge config for one gateway, one train worker, and one
    rollout replica.
-3. Starts ``openforge.gateway.main`` as a real subprocess.
+3. Starts ``openforge.cli.main gateway start`` as a real subprocess.
 4. Issues HTTP requests to the live gateway:
    ``/models``, ``/start_session``, ``/start_trajectory``, ``/generate``,
    ``/end_trajectory``, and ``/end_session``.
@@ -288,7 +288,15 @@ def main() -> int:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
-    cmd = [sys.executable, "-m", "openforge.gateway.main", "--config", str(config_path)]
+    cmd = [
+        sys.executable,
+        "-m",
+        "openforge.cli.main",
+        "gateway",
+        "start",
+        "--config",
+        str(config_path),
+    ]
     proc = subprocess.Popen(
         cmd,
         cwd=ROOT,

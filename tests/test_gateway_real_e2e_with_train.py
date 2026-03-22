@@ -246,7 +246,15 @@ def main() -> int:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
     proc = subprocess.Popen(
-        [sys.executable, "-m", "openforge.gateway.main", "--config", str(config_path)],
+        [
+            sys.executable,
+            "-m",
+            "openforge.cli.main",
+            "gateway",
+            "start",
+            "--config",
+            str(config_path),
+        ],
         cwd=ROOT,
         env=env,
         stdout=subprocess.PIPE,

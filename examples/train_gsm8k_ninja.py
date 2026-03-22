@@ -30,7 +30,7 @@ def main() -> int:
         )
 
     train_kwargs = {
-        "gateway_config": setup["gateway_config"],
+        "gateway_target": setup["gateway_target"],
         "runtime_config": setup["runtime_config"],
         "inputs": setup["inputs"],
         "group_size": args.group_size,
@@ -44,9 +44,7 @@ def main() -> int:
     if args.train_group_parallelism is not None:
         train_kwargs["parallelism"] = args.train_group_parallelism
 
-    @ninja.agent(
-        gateway_config=setup["gateway_config"],
-    )
+    @ninja.agent()
     def user_agent(*, prompt: str, ground_truth: str) -> float:
         response = ninja.generate(prompt, sampling_params=sampling_params)
         text = response_text(response)

@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import time
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from threading import Lock
 from typing import Iterator
 from unittest.mock import patch
@@ -285,8 +288,46 @@ def test_register_requires_active_session() -> None:
         return 1.0
 
     with _patched_ninja(active_session_id=None):
-        with expect_raises(AssertionError, "no active session"):
+        with expect_raises(AssertionError, "openforge session start"):
             agent(prompt="hello")
+
+
+def test_register_requires_active_gateway_for_implicit_discovery() -> None:
+    @ninja.agent()
+    def agent(prompt: str) -> float:
+        return 1.0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_path = Path(tmpdir) / "active_gateway.json"
+        with patch.object(ninja.active_state, "active_state_path", lambda: state_path):
+            with expect_raises(AssertionError, "openforge gateway start"):
+                agent(prompt="hello")
+
+
+def test_register_discovers_active_gateway_from_shared_state() -> None:
+    @ninja.agent()
+    def agent(prompt: str) -> float:
+        response = ninja.generate(prompt)
+        return 1.0 if response["choices"][0]["message"]["content"] else -1.0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_path = Path(tmpdir) / "active_gateway.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "gateway": {"host": "127.0.0.1", "pid": 4321, "port": 8000},
+                    "session": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch.object(ninja.active_state, "active_state_path", lambda: state_path):
+            with _patched_ninja() as fake_gateway:
+                reward = agent(prompt="hello")
+
+    assert reward == 1.0
+    assert len(fake_gateway.generate_calls) == 1
 
 
 def test_register_routes_explicit_messages() -> None:
@@ -377,7 +418,9 @@ def test_execute_runs_many_requests_by_default() -> None:
         return 1.0 if message["content"] else -1.0
 
     with _patched_ninja() as fake_gateway:
-        rewards = agent.sample(requests=[{"prompt": f"hello {index}"} for index in range(4)])
+        rewards = agent.sample(
+            requests=[{"prompt": f"hello {index}"} for index in range(4)]
+        )
 
     assert rewards == [1.0, 1.0, 1.0, 1.0]
     assert len(fake_gateway.finished) == 4
@@ -460,6 +503,8 @@ def main() -> int:
     return run_tests(
         [
             test_register_requires_active_session,
+            test_register_requires_active_gateway_for_implicit_discovery,
+            test_register_discovers_active_gateway_from_shared_state,
             test_register_routes_explicit_messages,
             test_register_marks_failed_trajectory_on_error,
             test_execute_runs_many_requests_by_default,

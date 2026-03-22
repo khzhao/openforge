@@ -2,28 +2,30 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, TypeVar
 
 from fastapi import FastAPI, HTTPException
 
+from openforge import active_state
 from openforge.configs.models import GatewayServerConfig
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.runtime import Runtime
 from openforge.gateway.service import Service
 from openforge.gateway.types import (
     DiscardTrajectoryRequest,
-    EndTrajectoriesRequest,
-    EndTrajectoriesResponse,
-    ErrorTrajectoriesRequest,
-    ExportCheckpointRequest,
-    ExportCheckpointResponse,
     EndSessionRequest,
     EndSessionResponse,
+    EndTrajectoriesRequest,
+    EndTrajectoriesResponse,
     EndTrajectoryRequest,
     EndTrajectoryResponse,
+    ErrorTrajectoriesRequest,
     ErrorTrajectoryRequest,
+    ExportCheckpointRequest,
+    ExportCheckpointResponse,
     GenerateRequest,
     GenerateResponse,
     ModelsResponse,
@@ -62,11 +64,18 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        pid = os.getpid()
+        active_state.save_active_gateway(
+            host=config.gateway.host,
+            port=config.gateway.port,
+            pid=pid,
+        )
         try:
             yield
         finally:
             await service.shutdown()
             await store.close()
+            active_state.clear_active_gateway(expected_pid=pid)
 
     service = Service(store=store, runtime=runtime)
     app = FastAPI(title="OpenForge Gateway", lifespan=lifespan)
@@ -74,6 +83,10 @@ def create_app(
     @app.get("/health")
     async def health() -> dict[str, bool]:
         return {"ok": True}
+
+    @app.get("/info", response_model=GatewayServerConfig)
+    async def info() -> GatewayServerConfig:
+        return config
 
     @app.get("/models", response_model=ModelsResponse)
     async def list_models() -> ModelsResponse:
@@ -88,11 +101,16 @@ def create_app(
 
     @app.post("/start_session", response_model=StartSessionResponse)
     async def start_session(payload: StartSessionRequest) -> StartSessionResponse:
-        return await _invoke(
+        response = await _invoke(
             service.start_session(
                 runtime_config=payload.runtime,
             )
         )
+        active_state.save_active_session(
+            session_id=response.session_id,
+            runtime=payload.runtime,
+        )
+        return response
 
     @app.post("/start_trajectory", response_model=StartTrajectoryResponse)
     async def start_trajectory(
@@ -188,7 +206,9 @@ def create_app(
 
     @app.post("/end_session", response_model=EndSessionResponse)
     async def end_session(payload: EndSessionRequest) -> EndSessionResponse:
-        return await _invoke(service.end_session(session_id=payload.session_id))
+        response = await _invoke(service.end_session(session_id=payload.session_id))
+        active_state.clear_active_session()
+        return response
 
     @app.post("/export_checkpoint", response_model=ExportCheckpointResponse)
     async def export_checkpoint(

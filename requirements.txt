@@ -1,3 +1,8 @@
+datasets
+huggingface_hub
+httpx
+requests
+safetensors
 setuptools
 sglang[all]
 sglang_router
