@@ -14,10 +14,8 @@ from openforge.gateway.types import ChatMessage, RuntimeConfig
 
 __all__ = [
     "Generation",
-    "ModelBusyError",
     "Runtime",
     "RuntimeSlot",
-    "UnsupportedModelError",
 ]
 
 
@@ -28,14 +26,6 @@ SUPPORTED_MODELS: list[str] = [
 SUPPORTED_TOKENIZERS: list[str] = [
     "Qwen/Qwen2.5-0.5B-Instruct",
 ]
-
-
-class UnsupportedModelError(ValueError):
-    """Raised when the caller requests a model this gateway does not support."""
-
-
-class ModelBusyError(RuntimeError):
-    """Raised when a different model is already active in the single-model slot."""
 
 
 @dataclass(slots=True)
@@ -97,7 +87,7 @@ class Runtime:
     ) -> str:
         model_name = runtime_config.model.model_name_or_path
         if not self._is_supported_model(model_name):
-            raise UnsupportedModelError(f"unsupported model: {model_name}")
+            raise Exception(f"unsupported model: {model_name}")
 
         runtime_cfg = self._build_config(runtime_config=runtime_config)
         if self._loaded_model is None:
@@ -110,7 +100,7 @@ class Runtime:
             return self._loaded_model
 
         if self._loaded_model != runtime_cfg.model.model_name_or_path:
-            raise ModelBusyError(
+            raise Exception(
                 f"gateway already has active model {self._loaded_model!r}; "
                 f"cannot switch to {runtime_cfg.model.model_name_or_path!r}"
             )
@@ -121,11 +111,16 @@ class Runtime:
         messages: Sequence[ChatMessage],
     ) -> list[int]:
         tokenizer = self._get_tokenizer()
-        token_ids = tokenizer.apply_chat_template(
-            [message.model_dump(mode="json") for message in messages],
-            tokenize=True,
-            add_generation_prompt=True,
-        )
+        try:
+            token_ids = tokenizer.apply_chat_template(
+                [message.model_dump(mode="json") for message in messages],
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+        except Exception as exc:
+            raise Exception(
+                f"failed to tokenize messages with chat template: {exc}"
+            ) from exc
         return [int(token_id) for token_id in token_ids]
 
     def tokenize_messages_batch(
@@ -139,11 +134,16 @@ class Runtime:
             [message.model_dump(mode="json") for message in messages]
             for messages in message_batches
         ]
-        token_batches = tokenizer.apply_chat_template(
-            conversations,
-            tokenize=True,
-            add_generation_prompt=True,
-        )
+        try:
+            token_batches = tokenizer.apply_chat_template(
+                conversations,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+        except Exception as exc:
+            raise Exception(
+                f"failed to tokenize messages with chat template: {exc}"
+            ) from exc
         return [
             [int(token_id) for token_id in token_ids] for token_ids in token_batches
         ]

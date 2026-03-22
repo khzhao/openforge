@@ -19,7 +19,7 @@ import openforge.gateway.service as gateway_service
 from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
 from openforge.data import SQLiteOpenForgeStore
-from openforge.gateway.runtime import Generation, ModelBusyError, UnsupportedModelError
+from openforge.gateway.runtime import Generation
 from openforge.gateway.types import ChatMessage, StartSessionRequest
 
 
@@ -165,12 +165,15 @@ class _FakeRuntime:
     def start(self, *, runtime_config) -> str:
         model_name = str(runtime_config.model.model_name_or_path)
         if model_name not in self._supported_models:
-            raise UnsupportedModelError(model_name)
+            raise Exception(f"unsupported model: {model_name}")
         if self._current_model is None:
             self._current_model = model_name
             return model_name
         if self._current_model != model_name:
-            raise ModelBusyError(model_name)
+            raise Exception(
+                f"gateway already has active model {self._current_model!r}; "
+                f"cannot switch to {model_name!r}"
+            )
         return model_name
 
     def tokenize_messages(
@@ -338,7 +341,7 @@ def test_gateway_http_start_session_reports_errors() -> None:
                 unsupported = client.post(
                     "/start_session", json=_start_session_payload("model-c")
                 )
-                assert unsupported.status_code == 404
+                assert unsupported.status_code == 400
 
                 created = client.post(
                     "/start_session", json=_start_session_payload("model-a")
@@ -347,12 +350,12 @@ def test_gateway_http_start_session_reports_errors() -> None:
                 reused = client.post(
                     "/start_session", json=_start_session_payload("model-a")
                 )
-                assert reused.status_code == 409
+                assert reused.status_code == 400
 
                 busy = client.post(
                     "/start_session", json=_start_session_payload("model-b")
                 )
-                assert busy.status_code == 409
+                assert busy.status_code == 400
 
 
 def test_gateway_http_releases_model_after_last_session() -> None:
@@ -423,7 +426,7 @@ def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
                         "messages": [{"role": "user", "content": "hello"}],
                     },
                 )
-                assert missing_session.status_code == 404
+                assert missing_session.status_code == 400
 
                 session_id = client.post(
                     "/start_session", json=_start_session_payload("model-a")
@@ -436,7 +439,7 @@ def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
                         "messages": [{"role": "user", "content": "hello"}],
                     },
                 )
-                assert missing_trajectory.status_code == 404
+                assert missing_trajectory.status_code == 400
 
 
 def test_gateway_http_generate_returns_bad_request_when_tokenization_fails() -> None:
@@ -505,7 +508,7 @@ def test_gateway_http_generate_after_end_trajectory_returns_conflict() -> None:
                         "messages": [{"role": "user", "content": "hello again"}],
                     },
                 )
-                assert again.status_code == 409
+                assert again.status_code == 400
 
 
 def test_gateway_http_end_session_requires_completed_trajectories() -> None:
@@ -514,7 +517,7 @@ def test_gateway_http_end_session_requires_completed_trajectories() -> None:
         with _patched_app(store=store, runtime=_FakeRuntime()) as app:
             with TestClient(app) as client:
                 missing = client.post("/end_session", json={"session_id": "missing"})
-                assert missing.status_code == 404
+                assert missing.status_code == 400
 
                 session_id = client.post(
                     "/start_session", json=_start_session_payload("model-a")
@@ -526,7 +529,7 @@ def test_gateway_http_end_session_requires_completed_trajectories() -> None:
                 incomplete = client.post(
                     "/end_session", json={"session_id": session_id}
                 )
-                assert incomplete.status_code == 409
+                assert incomplete.status_code == 400
 
                 completed = client.post(
                     "/end_trajectory",

@@ -18,19 +18,9 @@ import openforge.gateway.service as gateway_service
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.runtime import (
     Generation,
-    ModelBusyError,
     Runtime,
-    UnsupportedModelError,
 )
-from openforge.gateway.service import (
-    ActiveSessionError,
-    ActiveTrajectoriesRemainError,
-    Service,
-    SessionClosedError,
-    SessionNotFoundError,
-    TrajectoryNotActiveError,
-    TrajectoryNotFoundError,
-)
+from openforge.gateway.service import Service
 from openforge.gateway.types import ChatMessage, StartSessionRequest
 
 
@@ -175,12 +165,15 @@ class _FakeRuntime:
     def start(self, *, runtime_config) -> str:
         model_name = str(runtime_config.model.model_name_or_path)
         if model_name not in self._supported_models:
-            raise UnsupportedModelError(model_name)
+            raise Exception(f"unsupported model: {model_name}")
         if self._current_model is None:
             self._current_model = model_name
             return model_name
         if self._current_model != model_name:
-            raise ModelBusyError(model_name)
+            raise Exception(
+                f"gateway already has active model {self._current_model!r}; "
+                f"cannot switch to {model_name!r}"
+            )
         return model_name
 
     def tokenize_messages(
@@ -352,15 +345,15 @@ def test_gateway_service_start_session_rejects_second_active_session() -> None:
             runtime=_FakeRuntime(("model-a", "model-b")),
         )
 
-        with expect_raises(UnsupportedModelError):
+        with expect_raises(Exception, "unsupported model"):
             await service.start_session(**_start_session_kwargs("model-c"))
 
         await service.start_session(**_start_session_kwargs("model-a"))
 
-        with expect_raises(ActiveSessionError):
+        with expect_raises(Exception, "another session is already active"):
             await service.start_session(**_start_session_kwargs("model-a"))
 
-        with expect_raises(ActiveSessionError):
+        with expect_raises(Exception, "another session is already active"):
             await service.start_session(**_start_session_kwargs("model-b"))
 
         await store.close()
@@ -411,7 +404,7 @@ def test_gateway_service_generate_unknown_session_raises() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         service = Service(store=store, runtime=_FakeRuntime())
 
-        with expect_raises(SessionNotFoundError, "unknown session_id"):
+        with expect_raises(Exception, "unknown session_id"):
             await service.generate(
                 session_id="missing",
                 trajectory_id="traj_missing",
@@ -454,7 +447,7 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
         session = await service.start_session(**_start_session_kwargs("model-a"))
         root = await service.start_trajectory(session_id=session.session_id)
 
-        with expect_raises(TrajectoryNotFoundError, "unknown trajectory_id"):
+        with expect_raises(Exception, "unknown trajectory_id"):
             await service.generate(
                 session_id=session.session_id,
                 trajectory_id="traj_missing",
@@ -472,14 +465,14 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
             final_reward=1.0,
         )
 
-        with expect_raises(TrajectoryNotActiveError, "is not active"):
+        with expect_raises(Exception, "is not active"):
             await service.generate(
                 session_id=session.session_id,
                 trajectory_id=root.trajectory_id,
                 messages=[ChatMessage(role="user", content="again")],
             )
 
-        with expect_raises(TrajectoryNotActiveError, "is not active"):
+        with expect_raises(Exception, "is not active"):
             await service.start_trajectory(
                 session_id=session.session_id,
                 parent_trajectory_id=root.trajectory_id,
@@ -511,7 +504,7 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
         )
 
         with expect_raises(
-            ActiveTrajectoriesRemainError,
+            Exception,
             "all trajectories must be ended",
         ):
             await service.end_session(session_id=session.session_id)
@@ -524,7 +517,7 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
         ended = await service.end_session(session_id=session.session_id)
         assert ended.status == "completed"
 
-        with expect_raises(SessionClosedError, "is not active"):
+        with expect_raises(Exception, "is not active"):
             await service.start_trajectory(session_id=session.session_id)
 
         await store.close()

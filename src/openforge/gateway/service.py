@@ -26,39 +26,7 @@ from openforge.gateway.types import (
     StartTrajectoryResponse,
 )
 
-__all__ = [
-    "ActiveSessionError",
-    "ActiveTrajectoriesRemainError",
-    "Service",
-    "SessionClosedError",
-    "SessionNotFoundError",
-    "TrajectoryNotActiveError",
-    "TrajectoryNotFoundError",
-]
-
-
-class ActiveSessionError(RuntimeError):
-    """Raised when another session is already active."""
-
-
-class SessionNotFoundError(RuntimeError):
-    """Raised when a session id does not exist."""
-
-
-class SessionClosedError(RuntimeError):
-    """Raised when a session is no longer active."""
-
-
-class TrajectoryNotFoundError(RuntimeError):
-    """Raised when a trajectory id does not exist."""
-
-
-class TrajectoryNotActiveError(RuntimeError):
-    """Raised when a trajectory is not active."""
-
-
-class ActiveTrajectoriesRemainError(RuntimeError):
-    """Raised when a session still has active trajectories."""
+__all__ = ["Service"]
 
 
 @dataclass(slots=True)
@@ -127,7 +95,7 @@ class Service:
 
         session = await self.store.get_session(session_id)
         if session is None:
-            raise SessionNotFoundError(f"unknown session_id: {session_id}")
+            raise Exception(f"unknown session_id: {session_id}")
         return StartSessionResponse(
             session_id=session.session_id,
             model=session.model_name,
@@ -140,7 +108,7 @@ class Service:
         runtime_config: RuntimeConfig,
     ) -> StartSessionResponse:
         if self._active_session_id is not None:
-            raise ActiveSessionError("another session is already active")
+            raise Exception("another session is already active")
 
         model_name = runtime_config.model.model_name_or_path
         if self.runtime.current_model() not in (None, model_name):
@@ -203,14 +171,14 @@ class Service:
     ) -> StartTrajectoryGroupsResponse:
         await self._require_active_session(session_id)
         if len(counts) != len(group_ids):
-            raise ValueError("counts must align with group_ids")
+            raise Exception("counts must align with group_ids")
         if not counts:
             return StartTrajectoryGroupsResponse(session_id=session_id, trajectory_ids=[])
 
         trajectory_ids_per_group: list[list[str]] = []
         for count, group_id in zip(counts, group_ids, strict=True):
             if count <= 0:
-                raise ValueError("count must be >= 1")
+                raise Exception("count must be >= 1")
             trajectory_ids = [self._new_id("traj") for _ in range(count)]
             for trajectory_id in trajectory_ids:
                 trajectory = Trajectory(
@@ -285,7 +253,7 @@ class Service:
         final_rewards: list[float],
     ) -> EndTrajectoriesResponse:
         if len(trajectory_ids) != len(final_rewards):
-            raise ValueError("trajectory_ids must align with final_rewards")
+            raise Exception("trajectory_ids must align with final_rewards")
         if not trajectory_ids:
             return EndTrajectoriesResponse(
                 session_id=session_id,
@@ -303,16 +271,14 @@ class Service:
             if trajectory is None:
                 stored_trajectory = await self.store.get_trajectory(trajectory_id)
                 if stored_trajectory is None or stored_trajectory.session_id != session_id:
-                    raise TrajectoryNotFoundError(f"unknown trajectory_id: {trajectory_id}")
+                    raise Exception(f"unknown trajectory_id: {trajectory_id}")
                 if stored_trajectory.status == "completed":
                     continue
-                raise TrajectoryNotActiveError(
-                    f"trajectory {trajectory_id} is not active"
-                )
+                raise Exception(f"trajectory {trajectory_id} is not active")
             if trajectory.session_id != session_id:
-                raise TrajectoryNotFoundError(f"unknown trajectory_id: {trajectory_id}")
+                raise Exception(f"unknown trajectory_id: {trajectory_id}")
             if trajectory.status != "active":
-                raise TrajectoryNotActiveError(f"trajectory {trajectory_id} is not active")
+                raise Exception(f"trajectory {trajectory_id} is not active")
             trajectories_to_update.append(
                 Trajectory(
                     trajectory_id=trajectory.trajectory_id,
@@ -428,7 +394,7 @@ class Service:
         await self._require_active_session(session_id)
         await self._drain_finished_trajectories()
         if self._active_trajectories:
-            raise ActiveTrajectoriesRemainError(
+            raise Exception(
                 "all trajectories must be ended before exporting a checkpoint"
             )
         assert self._train_loop is not None, "train loop must exist for active session"
@@ -454,7 +420,7 @@ class Service:
             trajectory.session_id == session_id
             for trajectory in self._active_trajectories.values()
         ):
-            raise ActiveTrajectoriesRemainError(
+            raise Exception(
                 "all trajectories must be ended before ending the session"
             )
 
@@ -575,11 +541,9 @@ class Service:
                 self._active_turns[trajectory_id] = []
                 continue
             if trajectory.session_id != session_id:
-                raise TrajectoryNotFoundError(f"unknown trajectory_id: {trajectory_id}")
+                raise Exception(f"unknown trajectory_id: {trajectory_id}")
             if trajectory.status != "active":
-                raise TrajectoryNotActiveError(
-                    f"trajectory {trajectory_id} is not active"
-                )
+                raise Exception(f"trajectory {trajectory_id} is not active")
         turn_indexes = [
             len(self._active_turns[trajectory_id]) for trajectory_id in trajectory_ids
         ]
@@ -669,9 +633,9 @@ class Service:
             return Session(session_id=session_id, model_name=active_model_name)
         session = await self.store.get_session(session_id)
         if session is None:
-            raise SessionNotFoundError(f"unknown session_id: {session_id}")
+            raise Exception(f"unknown session_id: {session_id}")
         if session_id != active_session_id:
-            raise SessionClosedError(f"session {session_id} is not active")
+            raise Exception(f"session {session_id} is not active")
         self._active_session_model_name = session.model_name
         return session
 
@@ -684,12 +648,12 @@ class Service:
         trajectory = self._active_trajectories.get(trajectory_id)
         if trajectory is not None:
             if trajectory.session_id != session_id:
-                raise TrajectoryNotFoundError(f"unknown trajectory_id: {trajectory_id}")
+                raise Exception(f"unknown trajectory_id: {trajectory_id}")
             return trajectory
         trajectory = await self.store.get_trajectory(trajectory_id)
         if trajectory is None or trajectory.session_id != session_id:
-            raise TrajectoryNotFoundError(f"unknown trajectory_id: {trajectory_id}")
-        raise TrajectoryNotActiveError(f"trajectory {trajectory_id} is not active")
+            raise Exception(f"unknown trajectory_id: {trajectory_id}")
+        raise Exception(f"trajectory {trajectory_id} is not active")
 
     async def _require_active_trajectories(
         self,
@@ -714,18 +678,12 @@ class Service:
                     stored_trajectory is None
                     or stored_trajectory.session_id != session_id
                 ):
-                    raise TrajectoryNotFoundError(
-                        f"unknown trajectory_id: {trajectory_id}"
-                    )
-                raise TrajectoryNotActiveError(
-                    f"trajectory {trajectory_id} is not active"
-                )
+                    raise Exception(f"unknown trajectory_id: {trajectory_id}")
+                raise Exception(f"trajectory {trajectory_id} is not active")
             if trajectory.session_id != session_id:
-                raise TrajectoryNotFoundError(f"unknown trajectory_id: {trajectory_id}")
+                raise Exception(f"unknown trajectory_id: {trajectory_id}")
             if trajectory.status != "active":
-                raise TrajectoryNotActiveError(
-                    f"trajectory {trajectory_id} is not active"
-                )
+                raise Exception(f"trajectory {trajectory_id} is not active")
         return {
             trajectory_id: self._active_trajectories[trajectory_id]
             for trajectory_id in trajectory_ids
