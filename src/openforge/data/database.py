@@ -77,9 +77,10 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                         session_id,
                         group_id,
                         status,
+                        expected_group_size,
                         final_reward
                     )
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -87,6 +88,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                             trajectory.session_id,
                             trajectory.group_id,
                             trajectory.status,
+                            trajectory.expected_group_size,
                             trajectory.final_reward,
                         )
                         for trajectory in trajectories
@@ -97,7 +99,13 @@ class SQLiteOpenForgeStore(OpenForgeStore):
         async with self._lock:
             row = self._conn.execute(
                 """
-                SELECT trajectory_id, session_id, group_id, status, final_reward
+                SELECT
+                    trajectory_id,
+                    session_id,
+                    group_id,
+                    status,
+                    expected_group_size,
+                    final_reward
                 FROM trajectories
                 WHERE trajectory_id = ?
                 """,
@@ -117,7 +125,13 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                 rows.extend(
                     self._conn.execute(
                         f"""
-                        SELECT trajectory_id, session_id, group_id, status, final_reward
+                        SELECT
+                            trajectory_id,
+                            session_id,
+                            group_id,
+                            status,
+                            expected_group_size,
+                            final_reward
                         FROM trajectories
                         WHERE trajectory_id IN ({placeholders})
                         """,
@@ -133,7 +147,13 @@ class SQLiteOpenForgeStore(OpenForgeStore):
         status: TrajectoryStatus | None = None,
     ) -> list[Trajectory]:
         query = """
-            SELECT trajectory_id, session_id, group_id, status, final_reward
+            SELECT
+                trajectory_id,
+                session_id,
+                group_id,
+                status,
+                expected_group_size,
+                final_reward
             FROM trajectories
             WHERE session_id = ?
         """
@@ -157,6 +177,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                         session_id = ?,
                         group_id = ?,
                         status = ?,
+                        expected_group_size = ?,
                         final_reward = ?
                     WHERE trajectory_id = ?
                     """,
@@ -164,6 +185,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                         trajectory.session_id,
                         trajectory.group_id,
                         trajectory.status,
+                        trajectory.expected_group_size,
                         trajectory.final_reward,
                         trajectory.trajectory_id,
                     ),
@@ -181,6 +203,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     t.session_id,
                     t.group_id,
                     t.status,
+                    t.expected_group_size,
                     t.final_reward
                 FROM trajectories AS t
                 JOIN sessions AS s
@@ -273,6 +296,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     session_id TEXT NOT NULL,
                     group_id TEXT,
                     status TEXT NOT NULL,
+                    expected_group_size INTEGER NOT NULL DEFAULT 1,
                     final_reward REAL,
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 )
@@ -289,6 +313,13 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     """
                     ALTER TABLE trajectories
                     ADD COLUMN group_id TEXT
+                    """
+                )
+            if "expected_group_size" not in trajectory_columns:
+                self._conn.execute(
+                    """
+                    ALTER TABLE trajectories
+                    ADD COLUMN expected_group_size INTEGER NOT NULL DEFAULT 1
                     """
                 )
             self._conn.execute(
@@ -326,6 +357,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
             session_id=str(row["session_id"]),
             group_id=row["group_id"],
             status=str(row["status"]),
+            expected_group_size=int(row["expected_group_size"]),
             final_reward=row["final_reward"],
         )
 

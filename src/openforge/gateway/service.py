@@ -157,6 +157,7 @@ class Service:
             session_id=session_id,
             group_id=group_id,
             status="active",
+            expected_group_size=1,
         )
         self._active_turns[trajectory_id] = []
         return StartTrajectoryResponse(
@@ -189,6 +190,7 @@ class Service:
                     session_id=session_id,
                     group_id=group_id,
                     status="active",
+                    expected_group_size=count,
                 )
                 self._active_trajectories[trajectory_id] = trajectory
                 self._active_turns[trajectory_id] = []
@@ -288,6 +290,7 @@ class Service:
                     session_id=trajectory.session_id,
                     group_id=trajectory.group_id,
                     status="completed",
+                    expected_group_size=trajectory.expected_group_size,
                     final_reward=final_reward,
                 )
             )
@@ -317,6 +320,7 @@ class Service:
                     session_id=trajectory.session_id,
                     group_id=trajectory.group_id,
                     status="failed",
+                    expected_group_size=trajectory.expected_group_size,
                 )
             ]
         )
@@ -352,6 +356,7 @@ class Service:
                     session_id=trajectory.session_id,
                     group_id=trajectory.group_id,
                     status="failed",
+                    expected_group_size=trajectory.expected_group_size,
                 )
             )
         await self._finish_trajectories(trajectories_to_update)
@@ -380,6 +385,7 @@ class Service:
                     session_id=trajectory.session_id,
                     group_id=trajectory.group_id,
                     status="discarded",
+                    expected_group_size=trajectory.expected_group_size,
                 )
             ]
         )
@@ -544,6 +550,7 @@ class Service:
                     session_id=session_id,
                     group_id=group_id,
                     status="active",
+                    expected_group_size=1,
                 )
                 self._active_turns[trajectory_id] = []
                 continue

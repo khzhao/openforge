@@ -32,9 +32,12 @@ class Trajectory:
     session_id: str
     group_id: str | None
     status: TrajectoryStatus
+    expected_group_size: int = 1
     final_reward: float | None = None
 
     def __post_init__(self) -> None:
+        if self.expected_group_size <= 0:
+            raise ValueError("expected_group_size must be >= 1")
         if self.final_reward is not None and self.status == "active":
             raise ValueError("final_reward may only be set on terminal trajectories")
 

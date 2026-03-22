@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -11,6 +12,8 @@ from openforge.data import OpenForgeStore, Trajectory, Turn
 from openforge.runtime import create_algorithm
 
 __all__ = ["TrainLoop"]
+
+logger = logging.getLogger(__name__)
 
 
 class TrainLoop:
@@ -137,6 +140,7 @@ class TrainLoop:
                     session_id=trajectory.session_id,
                     group_id=trajectory.group_id,
                     status="trained",
+                    expected_group_size=trajectory.expected_group_size,
                     final_reward=trajectory.final_reward,
                 )
             )
@@ -159,10 +163,32 @@ class TrainLoop:
         ready_groups = [
             sorted(group, key=lambda trajectory: trajectory.trajectory_id)
             for group in groups.values()
-            if all(trajectory.status == "completed" for trajectory in group)
+            if self._is_ready_group(group)
         ]
         ready_groups.sort(key=lambda group: group[0].trajectory_id)
         return ready_groups
+
+    def _is_ready_group(self, group: list[Trajectory]) -> bool:
+        if not all(trajectory.status == "completed" for trajectory in group):
+            return False
+        expected_sizes = {trajectory.expected_group_size for trajectory in group}
+        if len(expected_sizes) != 1:
+            logger.warning(
+                "skipping group with inconsistent expected_group_size: %s",
+                [trajectory.trajectory_id for trajectory in group],
+            )
+            return False
+        expected_group_size = next(iter(expected_sizes))
+        if len(group) != expected_group_size:
+            if len(group) > expected_group_size:
+                logger.warning(
+                    "skipping oversized group: expected %s trajectories, found %s for %s",
+                    expected_group_size,
+                    len(group),
+                    [trajectory.trajectory_id for trajectory in group],
+                )
+            return False
+        return True
 
     def _select_group_indexes(
         self,
