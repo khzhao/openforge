@@ -6,10 +6,10 @@ import argparse
 import json
 import time
 
+import openforge.ninja as ninja
 from openforge.benchmarks.gsm8k import build_gsm8k_prompt
 from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
-from openforge.ninja import register
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run a simple batched generate benchmark through Ninja register."""
+    """Run a simple batched generate benchmark through Ninja."""
     args = parse_args()
     gateway_config = GatewayServerConfig(
         data=DataConfig(path=None),
@@ -48,18 +48,15 @@ def main() -> None:
         "and May?"
     )
 
-    @register(gateway_config)
-    def agent(client, prompt_text: str) -> float:
-        client.generate(
-            [{"role": "user", "content": prompt_text}],
-            sampling_params=sampling_params,
-        )
+    @ninja.agent(gateway_config)
+    def agent(prompt_text: str) -> float:
+        ninja.generate(prompt_text, sampling_params=sampling_params)
         return 0.0
 
     prompts = [prompt for _ in range(args.episodes)]
 
     started_at = time.perf_counter()
-    agent.execute(
+    agent.sample(
         requests=[{"prompt_text": prompt_text} for prompt_text in prompts],
     )
     elapsed_seconds = time.perf_counter() - started_at

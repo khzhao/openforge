@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from functools import update_wrapper
 from typing import Any, Callable
 from uuid import uuid4
@@ -18,12 +20,14 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 __all__ = [
+    "agent",
     "Client",
-    "register",
+    "generate",
 ]
 
-_AUTO_MAX_PARALLELISM_CAP = 128
-_AUTO_MAX_PARALLELISM_FLOOR = 32
+_AUTO_CONCURRENCY_CAP = 128
+_AUTO_CONCURRENCY_FLOOR = 32
+_CURRENT_CLIENT: ContextVar[Any | None] = ContextVar("openforge_ninja_current_client", default=None)
 
 
 def _sleep_before_retry(attempt: int) -> None:
@@ -49,33 +53,61 @@ def _fail_clients_best_effort(
 def _map_parallel(
     items: list[Any],
     *,
-    max_parallelism: int,
+    concurrency: int,
     fn: Callable[[Any], Any],
 ) -> list[Any]:
     if not items:
         return []
-    max_workers = max(1, min(max_parallelism, len(items)))
+    max_workers = max(1, min(concurrency, len(items)))
     if max_workers == 1:
         return [fn(item) for item in items]
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         return list(executor.map(fn, items))
 
 
-def _resolve_max_parallelism(
+def _resolve_concurrency(
     *,
-    max_parallelism: int | None,
+    concurrency: int | None,
     job_count: int,
 ) -> int:
-    if max_parallelism is None:
+    if concurrency is None:
         cpu_count = os.cpu_count() or 1
         auto_limit = min(
-            _AUTO_MAX_PARALLELISM_CAP,
-            max(_AUTO_MAX_PARALLELISM_FLOOR, cpu_count * 4),
+            _AUTO_CONCURRENCY_CAP,
+            max(_AUTO_CONCURRENCY_FLOOR, cpu_count * 4),
         )
         return max(1, min(job_count, auto_limit))
-    if max_parallelism <= 0:
-        raise ValueError("max_parallelism must be > 0")
-    return max_parallelism
+    if concurrency <= 0:
+        raise ValueError("concurrency must be > 0")
+    return concurrency
+
+
+def _normalize_messages(
+    messages: str | list[dict[str, str]],
+) -> list[dict[str, str]]:
+    if isinstance(messages, str):
+        return [{"role": "user", "content": messages}]
+    return [dict(message) for message in messages]
+
+
+def _current_client() -> Client:
+    client = _CURRENT_CLIENT.get()
+    if client is None:
+        raise RuntimeError("ninja.generate() must be called inside an @ninja.agent")
+    return client
+
+
+def _function_expects_client(func: Callable[..., Any]) -> bool:
+    parameters = list(inspect.signature(func).parameters.values())
+    if not parameters:
+        return False
+    first = parameters[0]
+    if first.kind not in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    ):
+        return False
+    return first.name == "client"
 
 
 def _normalize_requests(
@@ -289,7 +321,7 @@ class Client:
 
     def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: str | list[dict[str, str]],
         *,
         sampling_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -299,7 +331,7 @@ class Client:
                 "session_id": self._session_id,
                 "trajectory_id": self._trajectory_id,
                 "group_id": self._group_id,
-                "messages": messages,
+                "messages": _normalize_messages(messages),
                 "sampling_params": {} if sampling_params is None else sampling_params,
             },
         )
@@ -347,6 +379,18 @@ class Client:
         self._used = True
 
 
+def generate(
+    messages: str | list[dict[str, str]],
+    *,
+    sampling_params: dict[str, Any] | None = None,
+    **sampling_kwargs: Any,
+) -> dict[str, Any]:
+    """Generate on the current trajectory inside an ``@ninja.agent`` body."""
+    params = {} if sampling_params is None else dict(sampling_params)
+    params.update(sampling_kwargs)
+    return _current_client().generate(messages, sampling_params=params)
+
+
 class _RegisteredAgent:
     def __init__(
         self,
@@ -356,11 +400,57 @@ class _RegisteredAgent:
     ) -> None:
         self._func = func
         self._gateway_config = gateway_config
+        self._expects_client = _function_expects_client(func)
         update_wrapper(self, func)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         with self._session() as session:
             return self._invoke(session, args, kwargs)
+
+    def sample(
+        self,
+        *args: Any,
+        requests: list[dict[str, Any]] | None = None,
+        concurrency: int | None = None,
+        num_rollouts: int = 1,
+        retries: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        if num_rollouts <= 0:
+            raise ValueError("num_rollouts must be > 0")
+        if retries < 0:
+            raise ValueError("retries must be >= 0")
+
+        call_specs, single_request = _normalize_requests(
+            args=args,
+            kwargs=kwargs,
+            requests=requests,
+        )
+        resolved_concurrency = _resolve_concurrency(
+            concurrency=concurrency,
+            job_count=len(call_specs) * num_rollouts,
+        )
+        with self._session() as session:
+            if num_rollouts == 1:
+                results = _execute_many(
+                    self,
+                    session,
+                    call_specs,
+                    concurrency=resolved_concurrency,
+                    retries=retries,
+                )
+            else:
+                results = _execute_grouped(
+                    self,
+                    session,
+                    call_specs,
+                    num_rollouts=num_rollouts,
+                    concurrency=resolved_concurrency,
+                    retries=retries,
+                )
+        if single_request:
+            return results[0]
+        return results
 
     def execute(
         self,
@@ -371,49 +461,31 @@ class _RegisteredAgent:
         retries: int = 0,
         **kwargs: Any,
     ) -> Any:
-        if group_size <= 0:
-            raise ValueError("group_size must be > 0")
-        if retries < 0:
-            raise ValueError("retries must be >= 0")
-
-        call_specs, single_request = _normalize_requests(
-            args=args,
-            kwargs=kwargs,
+        return self.sample(
+            *args,
             requests=requests,
+            concurrency=max_parallelism,
+            num_rollouts=group_size,
+            retries=retries,
+            **kwargs,
         )
-        resolved_max_parallelism = _resolve_max_parallelism(
-            max_parallelism=max_parallelism,
-            job_count=len(call_specs) * group_size,
-        )
-        with self._session() as session:
-            if group_size == 1:
-                results = _execute_many(
-                    self,
-                    session,
-                    call_specs,
-                    max_parallelism=resolved_max_parallelism,
-                    retries=retries,
-                )
-            else:
-                results = _execute_grouped(
-                    self,
-                    session,
-                    call_specs,
-                    group_size=group_size,
-                    max_parallelism=resolved_max_parallelism,
-                    retries=retries,
-                )
-        if single_request:
-            return results[0]
-        return results
 
-    def export_checkpoint(self) -> dict[str, Any]:
+    def save(self) -> dict[str, Any]:
         with self._session() as session:
             return session.export_checkpoint()
 
-    def current_policy_version(self) -> int:
+    def save_checkpoint(self) -> dict[str, Any]:
+        return self.save()
+
+    def export_checkpoint(self) -> dict[str, Any]:
+        return self.save()
+
+    def policy_version(self) -> int:
         with self._session() as session:
             return session.current_policy_version()
+
+    def current_policy_version(self) -> int:
+        return self.policy_version()
 
     def _call_body(
         self,
@@ -421,7 +493,7 @@ class _RegisteredAgent:
         call_args: tuple[Any, ...],
         call_kwargs: dict[str, Any],
     ) -> float:
-        return float(self._func(client, *call_args, **call_kwargs))
+        return float(self._call_func(client, call_args, call_kwargs))
 
     def _invoke(
         self,
@@ -431,7 +503,7 @@ class _RegisteredAgent:
     ) -> Any:
         client = session.client()
         try:
-            result = self._func(client, *call_args, **call_kwargs)
+            result = self._call_func(client, call_args, call_kwargs)
         except Exception:
             client.fail()
             raise
@@ -439,6 +511,20 @@ class _RegisteredAgent:
         reward = float(result)
         client.finish(reward)
         return reward
+
+    def _call_func(
+        self,
+        client: Client,
+        call_args: tuple[Any, ...],
+        call_kwargs: dict[str, Any],
+    ) -> Any:
+        token = _CURRENT_CLIENT.set(client)
+        try:
+            if self._expects_client:
+                return self._func(client, *call_args, **call_kwargs)
+            return self._func(*call_args, **call_kwargs)
+        finally:
+            _CURRENT_CLIENT.reset(token)
 
     def _session(self) -> _ActiveSession:
         return _ActiveSession(self._gateway_config)
@@ -449,7 +535,7 @@ def _execute_many(
     session: _ActiveSession,
     call_specs: list[tuple[tuple[Any, ...], dict[str, Any]]],
     *,
-    max_parallelism: int,
+    concurrency: int,
     retries: int,
 ) -> list[float]:
     def run_once(call_spec: tuple[tuple[Any, ...], dict[str, Any]]) -> float:
@@ -467,7 +553,7 @@ def _execute_many(
 
     return _map_parallel(
         call_specs,
-        max_parallelism=max_parallelism,
+        concurrency=concurrency,
         fn=run_once,
     )
 
@@ -477,12 +563,12 @@ def _execute_grouped(
     session: _ActiveSession,
     call_specs: list[tuple[tuple[Any, ...], dict[str, Any]]],
     *,
-    group_size: int,
-    max_parallelism: int,
+    num_rollouts: int,
+    concurrency: int,
     retries: int,
 ) -> list[list[float]]:
-    rollout_parallelism = max(1, min(group_size, max_parallelism))
-    group_parallelism = max(1, max_parallelism // rollout_parallelism)
+    rollout_concurrency = max(1, min(num_rollouts, concurrency))
+    group_concurrency = max(1, concurrency // rollout_concurrency)
 
     def run_group(
         group_job: tuple[int, tuple[tuple[Any, ...], dict[str, Any]]]
@@ -494,7 +580,7 @@ def _execute_grouped(
             clients: list[Client] = []
             try:
                 clients = session.trajectory_groups(
-                    counts=[group_size],
+                    counts=[num_rollouts],
                     group_ids=[f"group_{uuid4().hex}"],
                 )[0]
 
@@ -507,7 +593,7 @@ def _execute_grouped(
 
                 results = _map_parallel(
                     list(enumerate(clients)),
-                    max_parallelism=rollout_parallelism,
+                    concurrency=rollout_concurrency,
                     fn=run_rollout,
                 )
                 session.end_clients(
@@ -515,7 +601,7 @@ def _execute_grouped(
                     rewards=[reward for _rollout_index, _client, reward in results],
                 )
 
-                rewards = [0.0 for _ in range(group_size)]
+                rewards = [0.0 for _ in range(num_rollouts)]
                 for rollout_index, _client, reward in results:
                     rewards[rollout_index] = reward
                 return request_index, rewards
@@ -533,16 +619,16 @@ def _execute_grouped(
 
     grouped_results = _map_parallel(
         list(enumerate(call_specs)),
-        max_parallelism=group_parallelism,
+        concurrency=group_concurrency,
         fn=run_group,
     )
-    rewards_by_request = [[0.0 for _ in range(group_size)] for _ in call_specs]
+    rewards_by_request = [[0.0 for _ in range(num_rollouts)] for _ in call_specs]
     for request_index, rewards in grouped_results:
         rewards_by_request[request_index] = rewards
     return rewards_by_request
 
 
-def register(
+def agent(
     gateway_config: GatewayServerConfig,
 ) -> Callable[[Callable[..., Any]], _RegisteredAgent]:
     """Register a function as an OpenForge agent."""

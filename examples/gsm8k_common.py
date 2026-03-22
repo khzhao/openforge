@@ -333,7 +333,7 @@ def run_train(
             f"have {len(schedule)}, need {prompt_groups_per_update}"
         )
 
-    initial_policy_version = agent_func.current_policy_version()
+    initial_policy_version = agent_func.policy_version()
     final_policy_version = initial_policy_version
     last_update: dict[str, Any] | None = None
     train_updates: list[dict[str, Any]] = []
@@ -342,10 +342,10 @@ def run_train(
         batch_inputs = schedule[
             consumed_groups : consumed_groups + prompt_groups_per_update
         ]
-        reward_groups = agent_func.execute(
+        reward_groups = agent_func.sample(
             requests=batch_inputs,
-            group_size=group_size,
-            max_parallelism=parallelism,
+            num_rollouts=group_size,
+            concurrency=parallelism,
             retries=retries,
         )
         if group_size == 1:
@@ -391,7 +391,7 @@ def run_train(
     return {
         "completed_updates": available_updates,
         "expected_updates": available_updates,
-        "final_checkpoint": agent_func.export_checkpoint(),
+        "final_checkpoint": agent_func.save(),
         "final_policy_version": final_policy_version,
         "last_train_update": last_update,
         "train_updates": train_updates,

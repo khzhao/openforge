@@ -16,7 +16,6 @@ install_test_stubs()
 import openforge.ninja as ninja
 from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
-from openforge.ninja import register
 
 
 def _gateway_config() -> GatewayServerConfig:
@@ -281,8 +280,8 @@ def _patched_ninja(
 
 
 def test_register_requires_active_session() -> None:
-    @register(_gateway_config())
-    def agent(client, prompt: str) -> float:
+    @ninja.agent(_gateway_config())
+    def agent(prompt: str) -> float:
         return 1.0
 
     with _patched_ninja(active_session_id=None):
@@ -291,13 +290,13 @@ def test_register_requires_active_session() -> None:
 
 
 def test_register_routes_explicit_messages() -> None:
-    @register(_gateway_config())
-    def agent(client, prompt: str) -> float:
+    @ninja.agent(_gateway_config())
+    def agent(prompt: str) -> float:
         messages = [{"role": "user", "content": prompt}]
-        first = client.generate(messages, sampling_params={"temperature": 0.7})
+        first = ninja.generate(messages, temperature=0.7)
         messages.append(first["choices"][0]["message"])
         messages.append({"role": "user", "content": "follow up"})
-        second = client.generate(messages)
+        second = ninja.generate(messages)
         trajectory_id = str(first["metadata"]["trajectory_id"])
         assert first["id"] == f"chatcmpl_{trajectory_id}_0"
         assert first["object"] == "chat.completion"
@@ -357,9 +356,9 @@ def test_register_routes_explicit_messages() -> None:
 
 
 def test_register_marks_failed_trajectory_on_error() -> None:
-    @register(_gateway_config())
-    def agent(client, prompt: str) -> float:
-        client.generate([{"role": "user", "content": prompt}])
+    @ninja.agent(_gateway_config())
+    def agent(prompt: str) -> float:
+        ninja.generate(prompt)
         raise RuntimeError("boom")
 
     with _patched_ninja() as fake_gateway:
@@ -371,14 +370,14 @@ def test_register_marks_failed_trajectory_on_error() -> None:
 
 
 def test_execute_runs_many_requests_by_default() -> None:
-    @register(_gateway_config())
-    def agent(client, prompt: str) -> float:
-        response = client.generate([{"role": "user", "content": prompt}])
+    @ninja.agent(_gateway_config())
+    def agent(prompt: str) -> float:
+        response = ninja.generate(prompt)
         message = response["choices"][0]["message"]
         return 1.0 if message["content"] else -1.0
 
     with _patched_ninja() as fake_gateway:
-        rewards = agent.execute(requests=[{"prompt": f"hello {index}"} for index in range(4)])
+        rewards = agent.sample(requests=[{"prompt": f"hello {index}"} for index in range(4)])
 
     assert rewards == [1.0, 1.0, 1.0, 1.0]
     assert len(fake_gateway.finished) == 4
@@ -387,17 +386,17 @@ def test_execute_runs_many_requests_by_default() -> None:
 
 
 def test_execute_uses_group_size_for_grouped_rollouts() -> None:
-    @register(_gateway_config())
-    def agent(client, prompt: str) -> float:
-        response = client.generate([{"role": "user", "content": prompt}])
+    @ninja.agent(_gateway_config())
+    def agent(prompt: str) -> float:
+        response = ninja.generate(prompt)
         message = response["choices"][0]["message"]
         return 1.0 if message["content"] else -1.0
 
     with _patched_ninja() as fake_gateway:
-        rewards = agent.execute(
+        rewards = agent.sample(
             requests=[{"prompt": "hello"}, {"prompt": "goodbye"}],
-            group_size=3,
-            max_parallelism=6,
+            num_rollouts=3,
+            concurrency=6,
         )
 
     assert rewards == [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
@@ -411,9 +410,9 @@ def test_execute_grouped_retries_only_failed_group() -> None:
     prompt_counts: dict[str, int] = {}
     lock = Lock()
 
-    @register(_gateway_config())
-    def agent(client, prompt: str) -> float:
-        response = client.generate([{"role": "user", "content": prompt}])
+    @ninja.agent(_gateway_config())
+    def agent(prompt: str) -> float:
+        response = ninja.generate(prompt)
         assert response["choices"][0]["message"]["content"]
         with lock:
             prompt_counts[prompt] = prompt_counts.get(prompt, 0) + 1
@@ -423,10 +422,10 @@ def test_execute_grouped_retries_only_failed_group() -> None:
         return 1.0
 
     with _patched_ninja() as fake_gateway:
-        rewards = agent.execute(
+        rewards = agent.sample(
             requests=[{"prompt": "hello"}, {"prompt": "goodbye"}],
-            group_size=3,
-            max_parallelism=6,
+            num_rollouts=3,
+            concurrency=6,
             retries=1,
         )
 
@@ -443,14 +442,14 @@ def test_execute_grouped_retries_only_failed_group() -> None:
 
 
 def test_agent_checkpoint_and_policy_accessors() -> None:
-    @register(_gateway_config())
-    def agent(client, prompt: str) -> float:
+    @ninja.agent(_gateway_config())
+    def agent(prompt: str) -> float:
         _ = prompt
         return 1.0
 
     with _patched_ninja():
-        assert agent.current_policy_version() == 0
-        assert agent.export_checkpoint() == {
+        assert agent.policy_version() == 0
+        assert agent.save() == {
             "session_id": "sess_1",
             "policy_version": 0,
             "checkpoint_path": "/tmp/openforge-test-checkpoint",

@@ -315,13 +315,6 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     ADD COLUMN group_id TEXT
                     """
                 )
-            if "expected_group_size" not in trajectory_columns:
-                self._conn.execute(
-                    """
-                    ALTER TABLE trajectories
-                    ADD COLUMN expected_group_size INTEGER NOT NULL DEFAULT 1
-                    """
-                )
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS turns (

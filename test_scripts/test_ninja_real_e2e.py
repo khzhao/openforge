@@ -19,9 +19,9 @@ from test_gateway_real_e2e import (
     make_artifact_dir,
 )
 
+import openforge.ninja as ninja
 from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
-from openforge.ninja import register
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,16 +64,14 @@ def main() -> int:
 
     responses: list[dict[str, Any]] = []
 
-    @register(gateway_config)
-    def agent(client, *, prompt: str, reward: float) -> float:
-        response = client.generate(
-            [{"role": "user", "content": prompt}],
-            sampling_params={
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "top_k": 1,
-                "max_new_tokens": 8,
-            },
+    @ninja.agent(gateway_config)
+    def agent(*, prompt: str, reward: float) -> float:
+        response = ninja.generate(
+            prompt,
+            temperature=0.0,
+            top_p=1.0,
+            top_k=1,
+            max_new_tokens=8,
         )
         responses.append(response)
         return reward

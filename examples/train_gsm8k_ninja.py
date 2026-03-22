@@ -12,8 +12,8 @@ from gsm8k_common import (
     save_summary,
 )
 
+import openforge.ninja as ninja
 from openforge.benchmarks.gsm8k import compute_gsm8k_score
-from openforge.ninja import register
 
 
 def main() -> int:
@@ -44,14 +44,11 @@ def main() -> int:
     if args.train_group_parallelism is not None:
         train_kwargs["parallelism"] = args.train_group_parallelism
 
-    @register(
+    @ninja.agent(
         gateway_config=setup["gateway_config"],
     )
-    def user_agent(client, *, prompt: str, ground_truth: str) -> float:
-        response = client.generate(
-            [{"role": "user", "content": prompt}],
-            sampling_params=sampling_params,
-        )
+    def user_agent(*, prompt: str, ground_truth: str) -> float:
+        response = ninja.generate(prompt, sampling_params=sampling_params)
         text = response_text(response)
         return float(
             compute_gsm8k_score(
