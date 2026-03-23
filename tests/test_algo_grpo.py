@@ -5,11 +5,11 @@ from __future__ import annotations
 import torch
 
 from openforge.algo import GRPOAlgorithm
-from openforge.configs.algo import AlgorithmConfig
+from openforge.configs.algo import GRPOConfig
 
 
 def test_grpo_group_advantages_are_mean_centered_and_std_normalized() -> None:
-    algo = GRPOAlgorithm(AlgorithmConfig())
+    algo = GRPOAlgorithm(GRPOConfig())
 
     advantages = algo.compute_group_advantages(
         torch.tensor([1.0, 2.0, 5.0], dtype=torch.float32)
@@ -24,13 +24,16 @@ def test_grpo_group_advantages_are_mean_centered_and_std_normalized() -> None:
 
 
 def test_grpo_loss_has_policy_gradient_at_unit_ratio() -> None:
-    algo = GRPOAlgorithm(AlgorithmConfig())
+    algo = GRPOAlgorithm(GRPOConfig())
     curr_log_probs = torch.tensor([0.1, -0.3, 0.2], requires_grad=True)
+    old_log_probs = curr_log_probs.detach().clone()
     advantages = torch.tensor([1.5, -2.0, 0.25])
     loss_mask = torch.tensor([1.0, 1.0, 0.0])
 
     outputs = algo.compute_loss(
         curr_log_probs=curr_log_probs,
+        old_log_probs=old_log_probs,
+        rollout_log_probs=None,
         advantages=advantages,
         loss_mask=loss_mask,
     )
@@ -45,10 +48,12 @@ def test_grpo_loss_has_policy_gradient_at_unit_ratio() -> None:
 
 
 def test_grpo_low_var_kl_penalty_is_added() -> None:
-    algo = GRPOAlgorithm(AlgorithmConfig(kl_coef=0.5))
+    algo = GRPOAlgorithm(GRPOConfig(kl_coef=0.5))
 
     outputs = algo.compute_loss(
         curr_log_probs=torch.tensor([0.0, 0.2]),
+        old_log_probs=torch.tensor([0.0, 0.2]),
+        rollout_log_probs=None,
         advantages=torch.tensor([1.0, 1.0]),
         loss_mask=torch.tensor([1.0, 1.0]),
         ref_log_probs=torch.tensor([0.0, -0.1]),
@@ -60,10 +65,12 @@ def test_grpo_low_var_kl_penalty_is_added() -> None:
 
 
 def test_grpo_entropy_bonus_reduces_loss() -> None:
-    algo = GRPOAlgorithm(AlgorithmConfig(entropy_coef=0.3))
+    algo = GRPOAlgorithm(GRPOConfig(entropy_coef=0.3))
 
     outputs = algo.compute_loss(
         curr_log_probs=torch.tensor([0.0, 0.0]),
+        old_log_probs=torch.tensor([0.0, 0.0]),
+        rollout_log_probs=None,
         advantages=torch.tensor([1.0, 1.0]),
         loss_mask=torch.tensor([1.0, 1.0]),
         entropy=torch.tensor([0.5, 1.0]),

@@ -37,10 +37,10 @@ This is the center of the project:
 import openforge.ninja as ninja
 
 @ninja.agent()
-def agent(*, prompt: str, target: str) -> float:
-    response = ninja.generate(
-        prompt,
-        sampling_params={...},
+def agent(client, *, prompt: str, target: str) -> float:
+    response = client.chat.completions.create(
+        model="Qwen/Qwen2.5-0.5B-Instruct",
+        messages=[{"role": "user", "content": prompt}],
     )
     reward = ...
     return reward
@@ -62,7 +62,7 @@ The active environment is recorded on the local machine at:
 - **One public CLI.** OpenForge installs a single user-facing command,
   `openforge`, for gateway and session lifecycle.
 - **Small Python surface.** If you can write a reward function around
-  `ninja.generate(...)`, you can train with OpenForge.
+  `client.chat.completions.create(...)`, you can train with OpenForge.
 - **Shared local discovery.** Once a gateway and session are active, Ninja
   scripts attach automatically. You do not need to thread gateway/session flags
   through every example.
@@ -140,6 +140,12 @@ The bundled GSM8K example is configured for:
 - 3 SGLang rollout replicas
 - GRPO on `Qwen/Qwen2.5-0.5B-Instruct`
 
+There is also a Search-R1-style example configured for:
+
+- GRPO + TIS (`grpo_tis`)
+- `Qwen/Qwen2.5-3B-Instruct`
+- one Python `search` tool inside a multi-turn Ninja agent
+
 OpenForge runs on Ray, but the default behavior is simple:
 
 - if `RAY_ADDRESS` is unset, `session start` creates a local Ray runtime
@@ -200,6 +206,32 @@ python -m openforge.cli.main session stop
 python -m openforge.cli.main gateway stop
 ```
 
+### Search-R1-Style Example
+
+The Search-R1 example keeps the same gateway/session flow, but the agent body is
+multi-turn and uses an explicit search tool:
+
+```bash
+bash examples/run_search_r1_ninja_train.sh
+```
+
+Important details:
+
+- the runtime config is `examples/search_r1_runtime.yaml`
+- the example runtime uses 4 GPUs as `2` train workers plus `2` rollout replicas
+- the agent script is `examples/train_search_r1_ninja.py`
+- the wrapper uses `examples/search_r1_gateway.yaml` for an isolated gateway DB
+- the built-in prompt-data default is `/home/guo/kzhao/data/kzhao/search_r1_train.parquet`
+- the built-in field defaults are `input-key=prompt` and `label-key=reward_model`
+- `session start` is the slow step on a cold `Qwen/Qwen2.5-3B-Instruct` run
+
+If your Search-R1 parquet lives somewhere else, you can still override it:
+
+```bash
+bash examples/run_search_r1_ninja_train.sh \
+  --prompt-data /path/to/train.parquet
+```
+
 ## Repository Guide
 
 - `src/openforge/cli/main.py`
@@ -216,6 +248,10 @@ python -m openforge.cli.main gateway stop
   Minimal end-to-end Ninja training example.
 - `examples/run_gsm8k_ninja_train.sh`
   Convenience wrapper for the full GSM8K flow.
+- `examples/train_search_r1_ninja.py`
+  Search-R1-style multi-turn Ninja example with a Python search tool.
+- `examples/run_search_r1_ninja_train.sh`
+  Convenience wrapper for the Search-R1-style flow.
 - `tests`
   CLI, Ninja, active-state, and gateway coverage.
 

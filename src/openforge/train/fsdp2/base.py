@@ -111,6 +111,7 @@ class FSDP2Engine(TrainBackend):
         loss_mask = batch["loss_mask"].to(self.device).float()
         advantages = batch["advantages"].to(self.device).float()
         old_log_probs = batch["old_log_probs"].to(self.device).float()
+        rollout_log_probs = batch["rollout_log_probs"].to(self.device).float()
         position_ids = batch["position_ids"].to(self.device).long()
 
         # 1. Compute log probabilities for the sampled actions
@@ -145,6 +146,7 @@ class FSDP2Engine(TrainBackend):
             self.algorithm.compute_loss(
                 curr_log_probs=curr_log_probs,
                 old_log_probs=old_log_probs,
+                rollout_log_probs=rollout_log_probs,
                 advantages=advantages[1:],
                 loss_mask=loss_mask,
                 entropy=entropy,

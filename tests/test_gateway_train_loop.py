@@ -11,7 +11,7 @@ from _script_test_utils import install_test_stubs, run_tests
 
 install_test_stubs()
 
-from openforge.configs.algo import AlgorithmConfig
+from openforge.configs.algo import GRPOConfig
 from openforge.data import Session, SQLiteOpenForgeStore, Trajectory, Turn
 from openforge.gateway.train_loop import TrainLoop
 from openforge.train.types import TrainStepResult
@@ -48,7 +48,7 @@ class _FakeTrainManager:
     ) -> None:
         self.world_size = world_size
         self.cfg = SimpleNamespace(
-            algo=AlgorithmConfig(),
+            algo=GRPOConfig(),
             train=_FakeTrainConfig(
                 global_batch_size=global_batch_size,
                 mini_batch_size=mini_batch_size,
@@ -57,7 +57,7 @@ class _FakeTrainManager:
             ),
         )
         self.step_calls: list[tuple[int, list[object]]] = []
-        self.sync_calls: list[tuple[int, str | None]] = []
+        self.sync_calls: list[tuple[int, str | None, int | None]] = []
 
     def step_update(
         self,
@@ -78,8 +78,9 @@ class _FakeTrainManager:
         *,
         policy_version: int,
         mode: str | None = None,
+        bucket_bytes: int | None = None,
     ) -> None:
-        self.sync_calls.append((policy_version, mode))
+        self.sync_calls.append((policy_version, mode, bucket_bytes))
 
 
 def _turn(
@@ -217,12 +218,23 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
         assert trained is True
         assert loop.global_step == 1
         assert loop.policy_version == 1
-        assert train_manager.sync_calls == [(1, "distributed")]
+        assert train_manager.sync_calls == [(1, "distributed", None)]
         assert len(train_manager.step_calls) == 1
         global_step, rank_minibatches = train_manager.step_calls[0]
         assert global_step == 1
         assert len(rank_minibatches) == 2
         assert rank_minibatches[0]["tokens"].tolist() == [[10, 20, 30], [11, 21, 31]]
+        torch.testing.assert_close(
+            rank_minibatches[0]["rollout_log_probs"],
+            torch.tensor(
+                [
+                    [0.0, -0.1],
+                    [0.0, -0.1],
+                ]
+            ),
+            atol=1e-6,
+            rtol=1e-6,
+        )
         assert rank_minibatches[0]["advantages"].tolist() == [
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
@@ -729,7 +741,7 @@ def test_train_loop_run_polls_until_batch_is_ready() -> None:
         await loop.stop()
 
         assert len(train_manager.step_calls) == 1
-        assert train_manager.sync_calls == [(1, "distributed")]
+        assert train_manager.sync_calls == [(1, "distributed", None)]
         t0 = await store.get_trajectory("t0")
         t1 = await store.get_trajectory("t1")
         assert t0 is not None

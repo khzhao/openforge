@@ -24,6 +24,7 @@ class Engine:
     """Managed lifecycle for one SGLang HTTP server."""
 
     REQUEST_TIMEOUT_SECONDS = 5.0
+    WEIGHT_UPDATE_TIMEOUT_SECONDS = 300.0
     HEALTHCHECK_TIMEOUT_SECONDS = 300.0
     HEALTHCHECK_POLL_INTERVAL_SECONDS = 1.0
     PROCESS_TERMINATION_TIMEOUT_SECONDS = 30.0
@@ -127,7 +128,7 @@ class Engine:
             model_path=model_path,
             load_format=load_format,
             flush_cache=flush_cache,
-            weight_version=None if policy_version is None else str(policy_version),
+            weight_version="0" if policy_version is None else str(policy_version),
             timeout=max(self.REQUEST_TIMEOUT_SECONDS, 30.0),
         )
 
@@ -149,7 +150,7 @@ class Engine:
                 world_size=world_size,
                 group_name=group_name,
                 backend=backend,
-                timeout=max(self.REQUEST_TIMEOUT_SECONDS, 30.0),
+                timeout=self.WEIGHT_UPDATE_TIMEOUT_SECONDS,
             )
         )
 
@@ -172,8 +173,8 @@ class Engine:
                 group_name=group_name,
                 load_format=load_format,
                 flush_cache=flush_cache,
-                weight_version=None if policy_version is None else str(policy_version),
-                timeout=max(self.REQUEST_TIMEOUT_SECONDS, 30.0),
+                weight_version="0" if policy_version is None else str(policy_version),
+                timeout=self.WEIGHT_UPDATE_TIMEOUT_SECONDS,
             )
         )
 
@@ -187,7 +188,7 @@ class Engine:
     def destroy_weights_update_group(self, *, group_name: str) -> dict[str, Any]:
         return self.client.destroy_weights_update_group(
             group_name=group_name,
-            timeout=max(self.REQUEST_TIMEOUT_SECONDS, 30.0),
+            timeout=self.WEIGHT_UPDATE_TIMEOUT_SECONDS,
         )
 
     def check_weights(self, *, action: str) -> dict[str, Any]:

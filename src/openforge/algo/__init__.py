@@ -6,7 +6,7 @@ from typing import Protocol
 
 import torch
 
-from openforge.configs.algo import AlgorithmConfig
+from openforge.configs.algo import GRPOConfig, GRPOTISConfig
 
 __all__ = [
     "Algorithm",
@@ -25,6 +25,7 @@ class Algorithm(Protocol):
         *,
         curr_log_probs: torch.Tensor,
         old_log_probs: torch.Tensor,
+        rollout_log_probs: torch.Tensor | None,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
         entropy: torch.Tensor | None = None,
@@ -36,7 +37,7 @@ class Algorithm(Protocol):
 class GRPOAlgorithm:
     """Simple GRPO implementation for one-pass on-policy updates."""
 
-    def __init__(self, cfg: AlgorithmConfig) -> None:
+    def __init__(self, cfg: GRPOConfig | GRPOTISConfig) -> None:
         self.cfg = cfg
 
     def compute_group_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
@@ -50,6 +51,7 @@ class GRPOAlgorithm:
         *,
         curr_log_probs: torch.Tensor,
         old_log_probs: torch.Tensor,
+        rollout_log_probs: torch.Tensor | None,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
         entropy: torch.Tensor | None = None,
@@ -60,9 +62,14 @@ class GRPOAlgorithm:
             min=1.0 - self.cfg.clip_range,
             max=1.0 + self.cfg.clip_range,
         )
+        if self.cfg.name == "grpo_tis":
+            assert rollout_log_probs is not None
+            tis = (old_log_probs - rollout_log_probs).exp().clamp(max=self.cfg.tis_cap)
+        else:
+            tis = 1.0
         policy_loss = -torch.minimum(
-            ratio * advantages,
-            clipped_ratio * advantages,
+            tis * ratio * advantages,
+            tis * clipped_ratio * advantages,
         )
         loss = (policy_loss * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)
         outputs = {

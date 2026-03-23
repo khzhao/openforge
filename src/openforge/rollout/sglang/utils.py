@@ -125,6 +125,7 @@ def generate_sglang_server_args(
         "enable_memory_saver": engine_spec.enable_memory_saver,
         "skip_server_warmup": True,
         "enable_draft_weights_cpu_backup": True,
+        "weight_version": "0",
     }
 
     if engine_spec.sglang_server_overrides:

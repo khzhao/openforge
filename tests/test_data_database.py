@@ -255,7 +255,6 @@ def test_sqlite_openforge_store_rejects_duplicate_turn_indices() -> None:
 
     asyncio.run(run())
 
-
 def main() -> int:
     return run_tests(
         [

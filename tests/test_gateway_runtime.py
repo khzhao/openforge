@@ -40,7 +40,7 @@ def _runtime_config(
     request = StartSessionRequest.model_validate(
         {
             "runtime": {
-                "algo": {"kl_coef": 0.0},
+                "algo": {"name": "grpo", "kl_coef": 0.0},
                 "model": {
                     "model_name_or_path": model_name,
                     "tokenizer_name_or_path": model_name,

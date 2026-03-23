@@ -6,7 +6,7 @@ from typing import Literal
 import yaml
 from pydantic import Field, model_validator
 
-from .algo import AlgorithmConfig
+from .algo import AlgorithmConfig, GRPOConfig
 from .base import OpenForgeBaseModel
 from .cluster import ClusterConfig
 from .rollout import RolloutConfig
@@ -41,7 +41,7 @@ class OpenForgeConfig(OpenForgeBaseModel):
     data: DataConfig
     gateway: GatewayConfig
     model: ModelConfig
-    algo: AlgorithmConfig = Field(default_factory=AlgorithmConfig)
+    algo: AlgorithmConfig = Field(default_factory=GRPOConfig)
     cluster: ClusterConfig
     train: TrainConfig
     rollout: RolloutConfig
@@ -51,6 +51,14 @@ class OpenForgeConfig(OpenForgeBaseModel):
         if self.algo.kl_coef > 0.0 and self.model.reference_model_name_or_path is None:
             raise ValueError(
                 "model.reference_model_name_or_path must be set when algo.kl_coef > 0.0"
+            )
+        if self.algo.name == "grpo" and self.train.max_rollout_policy_lag != 0:
+            raise ValueError(
+                "train.max_rollout_policy_lag must be 0 when algo.name is grpo"
+            )
+        if self.algo.name == "grpo_tis" and self.train.max_rollout_policy_lag <= 0:
+            raise ValueError(
+                "train.max_rollout_policy_lag must be > 0 when algo.name is grpo_tis"
             )
         return self
 

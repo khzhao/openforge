@@ -97,6 +97,19 @@ def create_placement_groups(cfg: OpenForgeConfig):
     rollout_gpus = cfg.rollout.total_gpus
     total_gpus = train_gpus + rollout_gpus
     logger.info(f"Total GPUs requested: {total_gpus}")
+    cluster_gpus = float(ray.cluster_resources().get("GPU", 0.0))
+    available_gpus = float(ray.available_resources().get("GPU", 0.0))
+    logger.info(
+        "Ray GPU resources: cluster={} available={}",
+        cluster_gpus,
+        available_gpus,
+    )
+    if cluster_gpus < total_gpus:
+        raise RuntimeError(
+            "Ray did not detect enough GPUs for this runtime: "
+            f"requested {total_gpus}, cluster reported {cluster_gpus}. "
+            "Check CUDA visibility and GPU access on this machine."
+        )
 
     # 2. Create canary workers to get the cluster topology, then kill them
     bundles = [{"GPU": 1, "CPU": 1} for _ in range(total_gpus)]

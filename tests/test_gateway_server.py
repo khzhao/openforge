@@ -52,7 +52,7 @@ def _start_session_payload(model_name: str = "model-a") -> dict[str, object]:
     request = StartSessionRequest.model_validate(
         {
             "runtime": {
-                "algo": {"kl_coef": 0.0},
+                "algo": {"name": "grpo", "kl_coef": 0.0},
                 "model": {
                     "model_name_or_path": model_name,
                     "tokenizer_name_or_path": f"{model_name}-tokenizer",

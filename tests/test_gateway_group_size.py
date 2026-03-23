@@ -80,6 +80,7 @@ class _FakeTrainManager:
         *,
         policy_version: int,
         mode: str | None = None,
+        bucket_bytes: int | None = None,
     ) -> None:
         self.sync_calls.append(policy_version)
 

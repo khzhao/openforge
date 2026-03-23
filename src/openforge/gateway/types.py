@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from openforge.configs.algo import AlgorithmConfig
 from openforge.configs.models import ModelConfig
@@ -59,6 +59,22 @@ class RuntimeConfig(BaseModel):
     model: ModelConfig
     train: TrainConfig
     rollout: RolloutConfig
+
+    @model_validator(mode="after")
+    def _validate_algo_requirements(self) -> "RuntimeConfig":
+        if self.algo.kl_coef > 0.0 and self.model.reference_model_name_or_path is None:
+            raise ValueError(
+                "model.reference_model_name_or_path must be set when algo.kl_coef > 0.0"
+            )
+        if self.algo.name == "grpo" and self.train.max_rollout_policy_lag != 0:
+            raise ValueError(
+                "train.max_rollout_policy_lag must be 0 when algo.name is grpo"
+            )
+        if self.algo.name == "grpo_tis" and self.train.max_rollout_policy_lag <= 0:
+            raise ValueError(
+                "train.max_rollout_policy_lag must be > 0 when algo.name is grpo_tis"
+            )
+        return self
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "RuntimeConfig":

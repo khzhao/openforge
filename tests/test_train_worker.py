@@ -41,6 +41,9 @@ class _FakeEngine:
     def step_optimizer(self) -> dict[str, float]:
         return {"lr": 0.1}
 
+    def compute_old_log_probs(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        return torch.zeros(batch["loss_mask"].shape[0], dtype=torch.float32)
+
 
 def _sample(
     tokens: list[int],
@@ -57,6 +60,7 @@ def _sample(
             + [True] * (len(tokens) - prompt_length),
             dtype=torch.float32,
         ),
+        "rollout_log_probs": torch.zeros(max(len(tokens) - 1, 0), dtype=torch.float32),
         "lengths": torch.tensor(len(tokens), dtype=torch.long),
     }
 
@@ -77,6 +81,10 @@ def _mini_batch(samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tenso
         ),
         "loss_mask": pad_sequence(
             [sample["loss_mask"] for sample in samples],
+            batch_first=True,
+        ),
+        "rollout_log_probs": pad_sequence(
+            [sample["rollout_log_probs"] for sample in samples],
             batch_first=True,
         ),
         "lengths": torch.stack([sample["lengths"] for sample in samples]),
@@ -120,11 +128,13 @@ def test_train_worker_step_chunks_and_packs_local_minibatch() -> None:
     assert first["tokens"].tolist() == [1, 2, 3, 4, 5, 6, 7]
     assert first["position_ids"].tolist() == [0, 1, 2, 0, 1, 2, 3]
     assert first["loss_mask"].tolist() == [0.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    assert first["rollout_log_probs"].tolist() == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     assert first["advantages"].tolist() == [1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
     assert first["cu_seqlens"].tolist() == [0, 3, 7]
     assert second["tokens"].tolist() == [8, 9, 10, 11, 12, 13, 14, 15]
     assert second["position_ids"].tolist() == [0, 1, 2, 3, 4, 0, 1, 2]
     assert second["loss_mask"].tolist() == [0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0]
+    assert second["rollout_log_probs"].tolist() == [0.0] * 7
     assert second["cu_seqlens"].tolist() == [0, 5, 8]
 
 
@@ -153,6 +163,7 @@ def test_pack_micro_batch_tracks_cu_seqlens_and_advantages() -> None:
         0.25,
     ]
     assert packed["loss_mask"].tolist() == [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+    assert packed["rollout_log_probs"].tolist() == [0.0] * 8
     assert packed["cu_seqlens"].tolist() == [0, 4, 7, 9]
 
 

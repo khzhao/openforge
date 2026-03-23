@@ -17,7 +17,7 @@ def _runtime_config() -> RuntimeConfig:
     request = StartSessionRequest.model_validate(
         {
             "runtime": {
-                "algo": {"kl_coef": 0.0},
+                "algo": {"name": "grpo", "kl_coef": 0.0},
                 "model": {
                     "model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
                     "tokenizer_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",

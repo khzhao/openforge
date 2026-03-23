@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from openforge.algo import GRPOAlgorithm
 from openforge.configs.models import OpenForgeConfig
-from openforge.rollout.manager import RolloutManager
-from openforge.train.manager import TrainManager
+
+if TYPE_CHECKING:
+    from openforge.rollout.manager import RolloutManager
+    from openforge.train.manager import TrainManager
 
 __all__ = [
     "create_algorithm",
@@ -17,7 +21,7 @@ __all__ = [
 
 def create_algorithm(cfg: OpenForgeConfig):
     """Create the configured training algorithm."""
-    if cfg.algo.name == "grpo":
+    if cfg.algo.name in {"grpo", "grpo_tis"}:
         return GRPOAlgorithm(cfg.algo)
     raise ValueError(f"unsupported algorithm: {cfg.algo.name}")
 
@@ -28,6 +32,8 @@ def create_rollout_manager(
     **kwargs,
 ) -> RolloutManager:
     """Create a rollout manager."""
+    from openforge.rollout.manager import RolloutManager
+
     manager = RolloutManager(cfg, placement_groups)
     manager.initialize(**kwargs)
     return manager
@@ -41,6 +47,8 @@ def create_train_manager(
     placement_groups,
 ) -> TrainManager:
     """Create a train manager."""
+    from openforge.train.manager import TrainManager
+
     manager = TrainManager()
     manager.initialize(
         cfg,

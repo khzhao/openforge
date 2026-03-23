@@ -158,6 +158,7 @@ def build_sample(model_path: str) -> dict[str, torch.Tensor]:
         "position_ids": torch.arange(tokens.numel(), dtype=torch.long),
         "advantages": torch.linspace(0.25, 1.0, tokens.numel(), dtype=torch.float32),
         "loss_mask": torch.ones(tokens.numel() - 1, dtype=torch.float32),
+        "rollout_log_probs": torch.zeros(tokens.numel() - 1, dtype=torch.float32),
         "lengths": torch.tensor(tokens.numel(), dtype=torch.long),
     }
 

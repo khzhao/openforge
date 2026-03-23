@@ -31,6 +31,7 @@ def pack_micro_batch(micro_batch: dict[str, torch.Tensor]) -> dict[str, torch.Te
     advantages = []
     position_ids = []
     loss_mask = []
+    rollout_log_probs = []
 
     for index in range(batch_size):
         length = int(lengths[index])
@@ -41,14 +42,22 @@ def pack_micro_batch(micro_batch: dict[str, torch.Tensor]) -> dict[str, torch.Te
 
         sample_loss_mask = micro_batch["loss_mask"][index, : max(length - 1, 0)]
         loss_mask.append(sample_loss_mask)
+        sample_rollout_log_probs = micro_batch["rollout_log_probs"][
+            index, : max(length - 1, 0)
+        ]
+        rollout_log_probs.append(sample_rollout_log_probs)
         if index < batch_size - 1:
             loss_mask.append(torch.zeros(1, dtype=sample_loss_mask.dtype))
+            rollout_log_probs.append(
+                torch.zeros(1, dtype=sample_rollout_log_probs.dtype)
+            )
 
     return {
         "tokens": torch.cat(tokens),
         "position_ids": torch.cat(position_ids),
         "advantages": torch.cat(advantages),
         "loss_mask": torch.cat(loss_mask),
+        "rollout_log_probs": torch.cat(rollout_log_probs),
         "cu_seqlens": torch.tensor(cu_seqlens, dtype=torch.int32),
     }
 

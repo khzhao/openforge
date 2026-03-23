@@ -105,17 +105,20 @@ class WeightUpdater:
         named_buckets = self.train_group.build_tensor_buckets(
             bucket_bytes=self.bucket_bytes,
         )
+        trainer_slept = False
+        self.train_group.sleep()
+        trainer_slept = True
+        bucket_metas = [build_tensor_bucket_meta(bucket) for bucket in named_buckets]
         source_device = torch.device("cuda", 0)
+        torch.cuda.empty_cache()
         torch.cuda.set_device(source_device)
         named_buckets = [
             [(name, tensor.to(source_device).contiguous()) for name, tensor in bucket]
             for bucket in named_buckets
         ]
-        bucket_metas = [build_tensor_bucket_meta(bucket) for bucket in named_buckets]
         flattened_buckets = [flatten_tensor_bucket(bucket) for bucket in named_buckets]
 
         group_name = f"openforge-weight-update-{uuid.uuid4().hex[:10]}"
-        # Rank 0 for this custom process group lives in the driver process.
         master_address = "127.0.0.1"
         master_port = get_free_port(start=20000)
         world_size = 1 + sum(rollout_world_sizes)
@@ -201,6 +204,8 @@ class WeightUpdater:
             except Exception as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
+            if trainer_slept:
+                self.train_group.wakeup()
             if sync_error is None and cleanup_error is not None:
                 raise cleanup_error
 

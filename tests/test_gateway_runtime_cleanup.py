@@ -133,7 +133,7 @@ def build_start_session_payload(
     """Build the user-facing start_session payload."""
     return {
         "runtime": {
-            "algo": {"kl_coef": 0.0},
+            "algo": {"name": "grpo", "kl_coef": 0.0},
             "model": {
                 "model_name_or_path": model_path,
                 "tokenizer_name_or_path": model_path,

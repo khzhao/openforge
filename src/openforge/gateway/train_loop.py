@@ -23,6 +23,7 @@ class TrainLoop:
     """
 
     POLL_INTERVAL_SECONDS = 0.1
+    ROLLOUT_WEIGHT_SYNC_MODE = "distributed"
 
     def __init__(
         self,
@@ -52,6 +53,7 @@ class TrainLoop:
         assert self._task is None
         self._stop = False
         self._task = asyncio.create_task(self.run())
+        self._task.add_done_callback(self._on_done)
 
     async def stop(self) -> None:
         task = self._task
@@ -66,6 +68,17 @@ class TrainLoop:
             if trained:
                 continue
             await asyncio.sleep(self.POLL_INTERVAL_SECONDS)
+
+    def _on_done(self, task: asyncio.Task[None]) -> None:
+        if self._stop or task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+        logger.error(
+            "train loop failed",
+            exc_info=(type(error), error, error.__traceback__),
+        )
 
     async def train_once(self) -> bool:
         ready_groups = await self._list_ready_groups()
@@ -231,7 +244,7 @@ class TrainLoop:
         )
         self.train_manager.sync_rollout_weights(
             policy_version=policy_version,
-            mode="distributed",
+            mode=self.ROLLOUT_WEIGHT_SYNC_MODE,
         )
 
     def _build_samples(
@@ -263,6 +276,10 @@ class TrainLoop:
                         turn.loss_mask,
                         dtype=torch.float32,
                     ),
+                    "rollout_log_probs": torch.tensor(
+                        turn.rollout_log_probs,
+                        dtype=torch.float32,
+                    ),
                     "lengths": torch.tensor(length, dtype=torch.long),
                 }
             )
@@ -285,6 +302,10 @@ class TrainLoop:
             ),
             "loss_mask": pad_sequence(
                 [sample["loss_mask"] for sample in samples],
+                batch_first=True,
+            ),
+            "rollout_log_probs": pad_sequence(
+                [sample["rollout_log_probs"] for sample in samples],
                 batch_first=True,
             ),
             "lengths": torch.stack([sample["lengths"] for sample in samples]),
