@@ -26,6 +26,23 @@ from .memory import offload_optimizer, offload_params, onload_optimizer, onload_
 from .utils import apply_fsdp2, create_device_mesh
 
 
+def _selected_token_log_probs(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+) -> torch.Tensor:
+    """Return log-probs for the selected next-token targets only."""
+    if logits.ndim != 2:
+        raise ValueError(f"logits must be rank-2, got shape {tuple(logits.shape)}")
+    if targets.ndim != 1:
+        raise ValueError(f"targets must be rank-1, got shape {tuple(targets.shape)}")
+    if logits.shape[0] != targets.shape[0]:
+        raise ValueError(
+            "logits and targets must align on sequence length: "
+            f"{logits.shape[0]} != {targets.shape[0]}"
+        )
+    return -F.cross_entropy(logits, targets, reduction="none")
+
+
 class FSDP2Engine(TrainBackend):
     """FSDP2Engine for training. Essentially a wrapper around PyTorch FSDP2."""
 
@@ -116,26 +133,31 @@ class FSDP2Engine(TrainBackend):
 
         # 1. Compute log probabilities for the sampled actions
         targets = tokens[1:]
-        curr_log_probs = self._compute_log_probs(
-            model=self.main_model,
-            tokens=tokens,
-            position_ids=position_ids,
-        )
-        entropy = -(curr_log_probs.exp() * curr_log_probs).sum(dim=-1)
-        curr_log_probs = curr_log_probs.gather(
-            dim=-1, index=targets.unsqueeze(-1)
-        ).squeeze(-1)
+        if self.cfg.algo.entropy_coef > 0.0:
+            curr_full_log_probs = self._compute_log_probs(
+                model=self.main_model,
+                tokens=tokens,
+                position_ids=position_ids,
+            )
+            entropy = -(curr_full_log_probs.exp() * curr_full_log_probs).sum(dim=-1)
+            curr_log_probs = curr_full_log_probs.gather(
+                dim=-1, index=targets.unsqueeze(-1)
+            ).squeeze(-1)
+        else:
+            entropy = None
+            curr_log_probs = self._compute_token_log_probs(
+                model=self.main_model,
+                tokens=tokens,
+                position_ids=position_ids,
+            )
 
         ref_log_probs = None
         if self.ref_model is not None:
-            ref_log_probs = self._compute_log_probs(
+            ref_log_probs = self._compute_token_log_probs(
                 model=self.ref_model,
                 tokens=tokens,
                 position_ids=position_ids,
             )
-            ref_log_probs = ref_log_probs.gather(
-                dim=-1, index=targets.unsqueeze(-1)
-            ).squeeze(-1)
 
         # 2. Delegate the algorithm-specific loss math
         outputs: dict[str, torch.Tensor | None] = {
@@ -159,18 +181,12 @@ class FSDP2Engine(TrainBackend):
     def compute_old_log_probs(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         tokens = batch["tokens"].to(self.device).long()
         position_ids = batch["position_ids"].to(self.device).long()
-        targets = tokens[1:]
-        log_probs = self._compute_log_probs(
+        token_log_probs = self._compute_token_log_probs(
             model=self.main_model,
             tokens=tokens,
             position_ids=position_ids,
         )
-        return (
-            log_probs.gather(dim=-1, index=targets.unsqueeze(-1))
-            .squeeze(-1)
-            .float()
-            .cpu()
-        )
+        return token_log_probs.float().cpu()
 
     def backward(self, forward_out: dict[str, torch.Tensor]) -> None:
         loss = forward_out["loss"] / self.cfg.train.gradient_accumulation_steps
@@ -237,22 +253,45 @@ class FSDP2Engine(TrainBackend):
         tokens: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
+        logits = self._compute_logits(
+            model=model,
+            tokens=tokens,
+            position_ids=position_ids,
+        )
+        return F.log_softmax(logits.float(), dim=-1)
+
+    def _compute_token_log_probs(
+        self,
+        *,
+        model: FSDPModule,
+        tokens: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        logits = self._compute_logits(
+            model=model,
+            tokens=tokens,
+            position_ids=position_ids,
+        )
+        targets = tokens[1:]
+        return _selected_token_log_probs(logits, targets)
+
+    def _compute_logits(
+        self,
+        *,
+        model: FSDPModule,
+        tokens: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor:
         with torch.autocast(
             device_type=self.device.type,
             dtype=get_torch_dtype(self.cfg.train.config.amp.precision),
             enabled=self.amp_enabled,
         ):
-            logits = (
-                model(
-                    input_ids=tokens.unsqueeze(0),
-                    position_ids=position_ids.unsqueeze(0),
-                    use_cache=False,
-                )
-                .logits.squeeze(0)
-                .float()[:-1, :]
-            )
-        log_probs = F.log_softmax(logits, dim=-1)
-        return log_probs
+            return model(
+                input_ids=tokens.unsqueeze(0),
+                position_ids=position_ids.unsqueeze(0),
+                use_cache=False,
+            ).logits.squeeze(0)[:-1, :]
 
     def _create_model(
         self,

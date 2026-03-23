@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from transformers import LlamaConfig, LlamaForCausalLM
 
+from openforge.train.fsdp2.base import _selected_token_log_probs
 from openforge.train.worker import TrainWorker
 from openforge.utils.packed import pack_micro_batch
 
@@ -179,6 +180,21 @@ def _loss(model: LlamaForCausalLM, batch: dict[str, torch.Tensor]) -> torch.Tens
     numerator = (-(batch["advantages"][1:] * token_log_probs) * batch["loss_mask"]).sum()
     denominator = batch["loss_mask"].sum().clamp_min(1.0)
     return numerator / denominator
+
+
+def test_selected_token_log_probs_matches_log_softmax_gather() -> None:
+    torch.manual_seed(0)
+    logits = torch.randn(11, 19)
+    targets = torch.randint(0, logits.shape[-1], (logits.shape[0],))
+
+    expected = (
+        F.log_softmax(logits, dim=-1)
+        .gather(dim=-1, index=targets.unsqueeze(-1))
+        .squeeze(-1)
+    )
+    actual = _selected_token_log_probs(logits, targets)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def _unpacked_loss(
