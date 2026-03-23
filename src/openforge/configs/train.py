@@ -81,6 +81,7 @@ class TrainConfig(OpenForgeBaseModel):
     mini_batch_size: int
     micro_batch_size: int
     ppo_epochs: int = 1
+    max_rollout_policy_lag: int
     checkpoints: str
 
     cpus_per_worker: int
@@ -96,6 +97,8 @@ class TrainConfig(OpenForgeBaseModel):
             raise ValueError("micro_batch_size must be > 0")
         if self.ppo_epochs <= 0:
             raise ValueError("ppo_epochs must be > 0")
+        if self.max_rollout_policy_lag < 0:
+            raise ValueError("max_rollout_policy_lag must be >= 0")
         if self.global_batch_size % self.mini_batch_size != 0:
             raise ValueError("global_batch_size must be divisible by mini_batch_size")
         if self.mini_batch_size % self.micro_batch_size != 0:

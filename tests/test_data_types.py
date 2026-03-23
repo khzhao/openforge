@@ -69,11 +69,12 @@ def test_turn_exposes_prompt_and_completion_token_views() -> None:
     turn = Turn(
         trajectory_id="traj-0",
         turn_index=2,
-        rollout_model_version="v3",
+        rollout_model_version=3,
         prompt_length=3,
         token_ids=[10, 11, 12, 20, 21],
         position_ids=[0, 1, 2, 3, 4],
         loss_mask=[False, False, True, True],
+        rollout_log_probs=[0.0, 0.0, -0.1, -0.2],
     )
 
     assert turn.prompt_token_ids == [10, 11, 12]
@@ -86,11 +87,12 @@ def test_turn_validates_lengths() -> None:
         Turn(
             trajectory_id="traj-0",
             turn_index=0,
-            rollout_model_version="default",
+            rollout_model_version=0,
             prompt_length=1,
             token_ids=[1, 2],
             position_ids=[0],
             loss_mask=[True],
+            rollout_log_probs=[-0.1],
         )
 
 
@@ -100,11 +102,12 @@ def test_turn_rejects_negative_turn_index() -> None:
         Turn(
             trajectory_id="traj-0",
             turn_index=-1,
-            rollout_model_version="default",
+            rollout_model_version=0,
             prompt_length=1,
             token_ids=[1, 2],
             position_ids=[0, 1],
             loss_mask=[True],
+            rollout_log_probs=[-0.1],
         )
 
 
@@ -114,11 +117,12 @@ def test_turn_rejects_invalid_prompt_length() -> None:
         Turn(
             trajectory_id="traj-0",
             turn_index=0,
-            rollout_model_version="default",
+            rollout_model_version=0,
             prompt_length=3,
             token_ids=[1, 2],
             position_ids=[0, 1],
             loss_mask=[True],
+            rollout_log_probs=[-0.1],
         )
 
 
@@ -128,25 +132,27 @@ def test_turn_rejects_invalid_loss_mask_length() -> None:
         Turn(
             trajectory_id="traj-0",
             turn_index=0,
-            rollout_model_version="default",
+            rollout_model_version=0,
             prompt_length=1,
             token_ids=[1, 2, 3],
             position_ids=[0, 1, 2],
             loss_mask=[True],
+            rollout_log_probs=[-0.1, -0.2],
         )
 
 
-def test_turn_rejects_empty_rollout_model_version() -> None:
-    """Reject an empty rollout model version."""
-    with expect_raises(ValueError, match="rollout_model_version"):
+def test_turn_rejects_invalid_rollout_log_probs_length() -> None:
+    """Reject rollout logprobs that do not cover every predicted token."""
+    with expect_raises(ValueError, match="rollout_log_probs"):
         Turn(
             trajectory_id="traj-0",
             turn_index=0,
-            rollout_model_version="",
+            rollout_model_version=0,
             prompt_length=1,
             token_ids=[1, 2],
             position_ids=[0, 1],
             loss_mask=[True],
+            rollout_log_probs=[],
         )
 
 
@@ -162,7 +168,7 @@ def main() -> int:
             test_turn_rejects_negative_turn_index,
             test_turn_rejects_invalid_prompt_length,
             test_turn_rejects_invalid_loss_mask_length,
-            test_turn_rejects_empty_rollout_model_version,
+            test_turn_rejects_invalid_rollout_log_probs_length,
         ]
     )
 

@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from transformers import AutoTokenizer
-
 from openforge.configs.models import GatewayServerConfig, OpenForgeConfig
 from openforge.gateway.types import (
     ChatCompletionMessage,
@@ -40,12 +38,18 @@ class Generation:
 
     text: str
     token_ids: list[int]
-    rollout_model_version: str
+    rollout_model_version: int
+    rollout_log_probs: list[float]
     finish_reason: str = "stop"
 
     def __post_init__(self) -> None:
-        if not self.rollout_model_version:
-            raise ValueError("rollout_model_version must be non-empty")
+        if self.rollout_model_version < 0:
+            raise ValueError("rollout_model_version must be >= 0")
+        if len(self.rollout_log_probs) != len(self.token_ids):
+            raise ValueError(
+                "rollout_log_probs must align with token_ids: "
+                f"{len(self.rollout_log_probs)} != {len(self.token_ids)}"
+            )
 
 
 @dataclass(slots=True)
@@ -168,7 +172,7 @@ class Runtime:
     ) -> Generation:
         payload = self._slot.rollout_manager.router.generate(
             self._build_sampling_params(sampling_params),
-            return_logprob=False,
+            return_logprob=True,
             input_ids=[int(token_id) for token_id in input_ids],
         )
         return Generation(**self._parse_generation_info(payload))
@@ -186,7 +190,7 @@ class Runtime:
         sampling_payload = self._build_sampling_params(sampling_params)
         payload = self._slot.rollout_manager.router.generate(
             sampling_payload,
-            return_logprob=False,
+            return_logprob=True,
             input_ids=requests,
         )
         if isinstance(payload, dict):
@@ -338,19 +342,32 @@ class Runtime:
         weight_version = meta_info.get("weight_version")
         if weight_version is None:
             raise ValueError("generate payload missing meta_info.weight_version")
-        rollout_model_version = str(weight_version)
-        if not rollout_model_version:
-            raise ValueError("generate payload has empty meta_info.weight_version")
+        rollout_model_version = int(weight_version)
+
+        output_token_logprobs = meta_info.get("output_token_logprobs")
+        if not isinstance(output_token_logprobs, list):
+            raise ValueError("generate payload missing meta_info.output_token_logprobs")
+        rollout_log_probs = [
+            float(token_logprob[0]) for token_logprob in output_token_logprobs
+        ]
+        if len(rollout_log_probs) != len(token_ids):
+            raise ValueError(
+                "generate payload has misaligned output_token_logprobs: "
+                f"{len(rollout_log_probs)} != {len(token_ids)}"
+            )
 
         return {
             "text": text,
             "token_ids": token_ids,
             "finish_reason": finish_reason_text,
             "rollout_model_version": rollout_model_version,
+            "rollout_log_probs": rollout_log_probs,
         }
 
     def _get_tokenizer(self):
         if self._tokenizer is None:
+            from transformers import AutoTokenizer
+
             self._tokenizer = AutoTokenizer.from_pretrained(self._tokenizer_name)
         return self._tokenizer
 

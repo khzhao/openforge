@@ -56,17 +56,18 @@ class Turn:
 
     trajectory_id: str
     turn_index: int
-    rollout_model_version: str
+    rollout_model_version: int
     prompt_length: int
     token_ids: list[int]
     position_ids: list[int]
     loss_mask: list[bool]
+    rollout_log_probs: list[float]
 
     def __post_init__(self) -> None:
         if self.turn_index < 0:
             raise ValueError("turn_index must be >= 0")
-        if not self.rollout_model_version:
-            raise ValueError("rollout_model_version must be non-empty")
+        if self.rollout_model_version < 0:
+            raise ValueError("rollout_model_version must be >= 0")
         if self.prompt_length < 0 or self.prompt_length > len(self.token_ids):
             raise ValueError("prompt_length must be between 0 and len(token_ids)")
         if len(self.position_ids) != len(self.token_ids):
@@ -77,6 +78,11 @@ class Turn:
             raise ValueError(
                 "loss_mask must have one entry per predicted token: "
                 f"{len(self.loss_mask)} != {predicted_token_count}"
+            )
+        if len(self.rollout_log_probs) != predicted_token_count:
+            raise ValueError(
+                "rollout_log_probs must have one entry per predicted token: "
+                f"{len(self.rollout_log_probs)} != {predicted_token_count}"
             )
 
     @property

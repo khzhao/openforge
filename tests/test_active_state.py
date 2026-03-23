@@ -57,6 +57,7 @@ def _runtime_config() -> RuntimeConfig:
                     "global_batch_size": 8,
                     "mini_batch_size": 4,
                     "micro_batch_size": 1,
+                    "max_rollout_policy_lag": 0,
                     "checkpoints": "./checkpoints",
                     "cpus_per_worker": 1,
                     "parallel": {

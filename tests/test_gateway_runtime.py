@@ -79,6 +79,7 @@ def _runtime_config(
                     "global_batch_size": 1,
                     "mini_batch_size": 1,
                     "micro_batch_size": 1,
+                    "max_rollout_policy_lag": 0,
                     "checkpoints": "/tmp/openforge-test-checkpoints",
                     "cpus_per_worker": 1,
                     "parallel": {
@@ -343,8 +344,9 @@ def test_runtime_generate_forwards_input_ids() -> None:
                 "text": "reply-3",
                 "output_ids": [11, 12],
                 "meta_info": {
+                    "output_token_logprobs": [[-0.1, 11, "a"], [-0.2, 12, "b"]],
                     "finish_reason": "stop",
-                    "weight_version": "default",
+                    "weight_version": 0,
                 },
             }
 
@@ -361,8 +363,10 @@ def test_runtime_generate_forwards_input_ids() -> None:
     generation = runtime.generate(input_ids=[1, 2, 3])
 
     assert generation.token_ids == [11, 12]
+    assert generation.rollout_log_probs == [-0.1, -0.2]
+    assert generation.rollout_model_version == 0
     assert captured["kwargs"] == {
-        "return_logprob": False,
+        "return_logprob": True,
         "input_ids": [1, 2, 3],
     }
 

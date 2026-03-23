@@ -37,10 +37,12 @@ class _FakeTrainConfig:
         global_batch_size: int,
         mini_batch_size: int,
         micro_batch_size: int,
+        max_rollout_policy_lag: int,
     ) -> None:
         self.global_batch_size = global_batch_size
         self.mini_batch_size = mini_batch_size
         self.micro_batch_size = micro_batch_size
+        self.max_rollout_policy_lag = max_rollout_policy_lag
 
 
 class _FakeTrainManager:
@@ -50,6 +52,7 @@ class _FakeTrainManager:
         global_batch_size: int,
         mini_batch_size: int,
         micro_batch_size: int,
+        max_rollout_policy_lag: int,
     ) -> None:
         self.world_size = 1
         self.cfg = SimpleNamespace(
@@ -58,6 +61,7 @@ class _FakeTrainManager:
                 global_batch_size=global_batch_size,
                 mini_batch_size=mini_batch_size,
                 micro_batch_size=micro_batch_size,
+                max_rollout_policy_lag=max_rollout_policy_lag,
             ),
         )
         self.step_calls: list[int] = []
@@ -84,11 +88,12 @@ def _turn(trajectory_id: str) -> Turn:
     return Turn(
         trajectory_id=trajectory_id,
         turn_index=0,
-        rollout_model_version="policy-0",
+        rollout_model_version=0,
         prompt_length=2,
         token_ids=[1, 2, 3],
         position_ids=[0, 1, 2],
         loss_mask=[False, True],
+        rollout_log_probs=[0.0, -0.1],
     )
 
 
@@ -133,6 +138,7 @@ def test_train_loop_waits_for_expected_group_size() -> None:
                 global_batch_size=2,
                 mini_batch_size=2,
                 micro_batch_size=1,
+                max_rollout_policy_lag=0,
             ),
         )
 
@@ -173,6 +179,7 @@ def test_train_loop_trains_when_group_reaches_expected_size() -> None:
             global_batch_size=2,
             mini_batch_size=2,
             micro_batch_size=1,
+            max_rollout_policy_lag=0,
         )
         loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
 

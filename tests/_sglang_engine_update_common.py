@@ -95,6 +95,7 @@ def build_cfg(
                 "global_batch_size": 1,
                 "mini_batch_size": 1,
                 "micro_batch_size": 1,
+                "max_rollout_policy_lag": 0,
                 "checkpoints": checkpoint_root,
                 "cpus_per_worker": 1,
                 "parallel": {

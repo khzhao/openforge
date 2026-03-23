@@ -105,6 +105,7 @@ def build_start_session_payload(
                 "global_batch_size": 2,
                 "mini_batch_size": 2,
                 "micro_batch_size": 1,
+                "max_rollout_policy_lag": 0,
                 "checkpoints": checkpoint_root,
                 "cpus_per_worker": 1,
                 "parallel": {
@@ -402,7 +403,7 @@ def main() -> int:
         )
         record_event(response_log_path, events, "generate_post_train", post_train_turn)
         rollout_model_version = post_train_turn["metadata"]["rollout_model_version"]
-        assert rollout_model_version != "default"
+        assert int(rollout_model_version) > 0
 
         ended_post_train = request_json(
             "POST",

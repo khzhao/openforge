@@ -17,12 +17,12 @@ from openforge.gateway.types import (
     AssistantMessage,
     AssistantToolCall,
     AssistantToolCallFunction,
+    ChatCompletionChoice,
     ChatCompletionCreateRequest,
     ChatCompletionMessage,
     ChatCompletionResponse,
     ChatCompletionTool,
     ChatCompletionToolChoice,
-    ChatCompletionChoice,
     CompletionUsage,
     EndSessionResponse,
     EndTrajectoriesResponse,
@@ -593,16 +593,11 @@ class Service:
         turn_indexes = [
             len(self._active_turns[trajectory_id]) for trajectory_id in trajectory_ids
         ]
-        input_ids_per_item = await asyncio.to_thread(
-            self._tokenize_messages_batch_deduped,
+        input_ids_per_item, generations = await asyncio.to_thread(
+            self._tokenize_and_generate_batch,
             messages_per_item,
             tools,
-        )
-
-        generations = await asyncio.to_thread(
-            self.runtime.generate_batch,
-            input_ids=input_ids_per_item,
-            sampling_params=sampling_params,
+            sampling_params,
         )
 
         turns_to_append: list[Turn] = []
@@ -660,10 +655,29 @@ class Service:
         )
         return [list(unique_input_ids[index]) for index in key_indexes]
 
+    def _tokenize_and_generate_batch(
+        self,
+        message_batches: list[list[ChatCompletionMessage]],
+        tools: list[ChatCompletionTool] | None,
+        sampling_params: dict[str, object],
+    ) -> tuple[list[list[int]], list[Generation]]:
+        input_ids_per_item = self._tokenize_messages_batch_deduped(
+            message_batches,
+            tools,
+        )
+        generations = self.runtime.generate_batch(
+            input_ids=input_ids_per_item,
+            sampling_params=sampling_params,
+        )
+        return input_ids_per_item, generations
+
     @staticmethod
     def _messages_key(messages: list[ChatCompletionMessage]) -> str:
         return json.dumps(
-            [message.model_dump(mode="json", exclude_none=True) for message in messages],
+            [
+                message.model_dump(mode="json", exclude_none=True)
+                for message in messages
+            ],
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -872,9 +886,7 @@ class Service:
                 return None
 
         selected_name = tool_choice.function.name
-        selected_tools = [
-            tool for tool in tools if tool.function.name == selected_name
-        ]
+        selected_tools = [tool for tool in tools if tool.function.name == selected_name]
         if not selected_tools:
             raise Exception(f"unknown tool_choice function: {selected_name}")
         return selected_tools
@@ -929,4 +941,6 @@ class Service:
             token_ids=[*input_ids, *generation.token_ids],
             position_ids=list(range(prompt_length + completion_length)),
             loss_mask=[False] * prompt_prediction_count + [True] * completion_length,
+            rollout_log_probs=[0.0] * prompt_prediction_count
+            + generation.rollout_log_probs,
         )

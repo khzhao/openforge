@@ -63,6 +63,7 @@ def build_cfg(*, visible_gpus: int, train_gpus: int, rollout_gpus: int) -> OpenF
                 "global_batch_size": 1,
                 "mini_batch_size": 1,
                 "micro_batch_size": 1,
+                "max_rollout_policy_lag": 0,
                 "checkpoints": "/tmp/openforge-test-checkpoints",
                 "cpus_per_worker": 1,
                 "parallel": {

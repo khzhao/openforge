@@ -18,11 +18,12 @@ def _turn(trajectory_id: str, turn_index: int) -> Turn:
     return Turn(
         trajectory_id=trajectory_id,
         turn_index=turn_index,
-        rollout_model_version="version-7",
+        rollout_model_version=7,
         prompt_length=3,
         token_ids=token_ids,
         position_ids=list(range(len(token_ids))),
         loss_mask=[False, False, True],
+        rollout_log_probs=[0.0, 0.0, -0.1],
     )
 
 
@@ -215,6 +216,10 @@ def test_sqlite_openforge_store_persists_reopened_data_and_orders_turns() -> Non
         assert trajectory.status == "completed"
         assert trajectory.final_reward == 1.0
         assert [turn.turn_index for turn in turns] == [0, 1]
+        assert [turn.rollout_log_probs for turn in turns] == [
+            [0.0, 0.0, -0.1],
+            [0.0, 0.0, -0.1],
+        ]
 
         await store.close()
 

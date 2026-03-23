@@ -177,7 +177,7 @@ class _FakeGateway:
                         "session_id": self.active_session_id,
                         "trajectory_id": trajectory_id,
                         "token_ids": [1, 2],
-                        "rollout_model_version": "v1",
+                        "rollout_model_version": 1,
                     },
                 },
             )
@@ -403,7 +403,7 @@ def test_register_routes_explicit_messages() -> None:
             "session_id": "sess_1",
             "trajectory_id": trajectory_id,
             "token_ids": [1, 2],
-            "rollout_model_version": "v1",
+            "rollout_model_version": 1,
         }
         assert first.model_dump(exclude_none=True)["choices"] == [
             {

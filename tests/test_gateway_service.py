@@ -98,6 +98,7 @@ def _start_session_kwargs(model_name: str = "model-a") -> dict[str, object]:
                     "global_batch_size": 1,
                     "mini_batch_size": 1,
                     "micro_batch_size": 1,
+                    "max_rollout_policy_lag": 0,
                     "checkpoints": "/tmp/openforge-test-checkpoints",
                     "cpus_per_worker": 1,
                     "parallel": {
@@ -205,7 +206,8 @@ class _FakeRuntime:
         return Generation(
             text=f"reply-{prompt_tail}",
             token_ids=[100 + prompt_tail, 200 + prompt_tail],
-            rollout_model_version="v5",
+            rollout_model_version=5,
+            rollout_log_probs=[-0.1, -0.2],
         )
 
     def generate_batch(
@@ -315,7 +317,7 @@ def test_gateway_service_start_generate_and_end() -> None:
                 "session_id": session.session_id,
                 "trajectory_id": root.trajectory_id,
                 "token_ids": [103, 203],
-                "rollout_model_version": "v5",
+                "rollout_model_version": 5,
             }
             assert runtime.last_sampling_params == {
                 "temperature": 0.7,
@@ -592,18 +594,20 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
         asyncio.run(run())
 
 
-def test_parse_generation_payload_prefers_weight_version() -> None:
+def test_parse_generation_payload_parses_numeric_weight_version() -> None:
     generation = Runtime._parse_generation_info(
         {
             "text": "hello",
             "output_ids": [10, 11],
             "meta_info": {
                 "finish_reason": "stop",
-                "weight_version": "default",
+                "weight_version": 0,
+                "output_token_logprobs": [[-0.1, 10, "a"], [-0.2, 11, "b"]],
             },
         },
     )
-    assert generation["rollout_model_version"] == "default"
+    assert generation["rollout_model_version"] == 0
+    assert generation["rollout_log_probs"] == [-0.1, -0.2]
 
 
 def test_gateway_controller_parses_router_payload() -> None:
@@ -612,15 +616,17 @@ def test_gateway_controller_parses_router_payload() -> None:
             "text": "hello",
             "output_ids": [11, 12],
             "meta_info": {
+                "output_token_logprobs": [[-0.1, 11, "a"], [-0.2, 12, "b"]],
                 "finish_reason": {"type": "stop"},
-                "weight_version": "policy-7",
+                "weight_version": 7,
             },
         },
     )
     assert generation["text"] == "hello"
     assert generation["token_ids"] == [11, 12]
     assert generation["finish_reason"] == "stop"
-    assert generation["rollout_model_version"] == "policy-7"
+    assert generation["rollout_model_version"] == 7
+    assert generation["rollout_log_probs"] == [-0.1, -0.2]
 
 
 def test_gateway_controller_parses_router_payload_with_meta_token_ids() -> None:
@@ -629,14 +635,16 @@ def test_gateway_controller_parses_router_payload_with_meta_token_ids() -> None:
             "text": "hello",
             "meta_info": {
                 "token_ids": [101, 102],
+                "output_token_logprobs": [[-0.1, 101, "a"], [-0.2, 102, "b"]],
                 "finish_reason": "length",
-                "weight_version": "default",
+                "weight_version": 0,
             },
         },
     )
     assert generation["token_ids"] == [101, 102]
     assert generation["finish_reason"] == "length"
-    assert generation["rollout_model_version"] == "default"
+    assert generation["rollout_model_version"] == 0
+    assert generation["rollout_log_probs"] == [-0.1, -0.2]
 
 
 def test_gateway_controller_requires_output_token_ids() -> None:
@@ -645,8 +653,9 @@ def test_gateway_controller_requires_output_token_ids() -> None:
             {
                 "text": "hello",
                 "meta_info": {
+                    "output_token_logprobs": [[-0.1, 10, "a"]],
                     "finish_reason": "stop",
-                    "weight_version": "default",
+                    "weight_version": 0,
                 },
             }
         )
@@ -658,14 +667,16 @@ def test_gateway_controller_parses_router_payload_without_extra_fields() -> None
             "text": "hello",
             "output_ids": [11, 12],
             "meta_info": {
+                "output_token_logprobs": [[-0.1, 11, "a"], [-0.2, 12, "b"]],
                 "finish_reason": "stop",
-                "weight_version": "default",
+                "weight_version": 0,
             },
         }
     )
     assert generation["token_ids"] == [11, 12]
     assert generation["finish_reason"] == "stop"
-    assert generation["rollout_model_version"] == "default"
+    assert generation["rollout_model_version"] == 0
+    assert generation["rollout_log_probs"] == [-0.1, -0.2]
 
 
 def test_parse_generation_payload_requires_weight_version() -> None:
@@ -675,6 +686,7 @@ def test_parse_generation_payload_requires_weight_version() -> None:
                 "text": "hello",
                 "output_ids": [10],
                 "meta_info": {
+                    "output_token_logprobs": [[-0.1, 10, "a"]],
                     "finish_reason": "stop",
                 },
             }
@@ -692,7 +704,7 @@ def main() -> int:
             test_gateway_service_generate_wraps_tokenization_failure,
             test_gateway_service_trajectory_lifecycle_errors,
             test_gateway_service_end_session_requires_all_trajectories_completed,
-            test_parse_generation_payload_prefers_weight_version,
+            test_parse_generation_payload_parses_numeric_weight_version,
             test_gateway_controller_parses_router_payload,
             test_gateway_controller_parses_router_payload_with_meta_token_ids,
             test_gateway_controller_requires_output_token_ids,

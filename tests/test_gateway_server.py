@@ -91,6 +91,7 @@ def _start_session_payload(model_name: str = "model-a") -> dict[str, object]:
                     "global_batch_size": 1,
                     "mini_batch_size": 1,
                     "micro_batch_size": 1,
+                    "max_rollout_policy_lag": 0,
                     "checkpoints": "/tmp/openforge-test-checkpoints",
                     "cpus_per_worker": 1,
                     "parallel": {
@@ -206,7 +207,8 @@ class _FakeRuntime:
         return Generation(
             text=f"reply-{prompt_tail}",
             token_ids=[10 + prompt_tail, 20 + prompt_tail],
-            rollout_model_version="v4",
+            rollout_model_version=4,
+            rollout_log_probs=[-0.1, -0.2],
         )
 
     def generate_batch(
@@ -367,7 +369,7 @@ def test_gateway_http_flow() -> None:
                     "session_id": session_id,
                     "trajectory_id": trajectory_id,
                     "token_ids": [12, 22],
-                    "rollout_model_version": "v4",
+                    "rollout_model_version": 4,
                 }
                 assert runtime.last_sampling_params == {
                     "temperature": 0.5,

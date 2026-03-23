@@ -17,7 +17,7 @@ def _install_service_import_stubs() -> None:
     class Generation:
         text: str
         token_ids: list[int]
-        rollout_model_version: str
+        rollout_model_version: int
         finish_reason: str = "stop"
 
     class Runtime:
@@ -57,7 +57,7 @@ def test_build_generate_response_parses_complete_tool_call() -> None:
                 "</tool_call>"
             ),
             token_ids=[10, 11],
-            rollout_model_version="v1",
+            rollout_model_version=1,
             finish_reason="stop",
         ),
     )
@@ -93,7 +93,7 @@ def test_build_generate_response_keeps_truncated_tool_call_as_text() -> None:
         generation=Generation(
             text='before <tool_call>{"name":"search","arguments":{"query":"2+2"}}',
             token_ids=[10, 11],
-            rollout_model_version="v1",
+            rollout_model_version=1,
             finish_reason="length",
         ),
     )

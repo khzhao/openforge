@@ -237,9 +237,10 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                         prompt_length,
                         token_ids_json,
                         position_ids_json,
-                        loss_mask_json
+                        loss_mask_json,
+                        rollout_log_probs_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -250,6 +251,7 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                             json.dumps(turn.token_ids),
                             json.dumps(turn.position_ids),
                             json.dumps(turn.loss_mask),
+                            json.dumps(turn.rollout_log_probs),
                         )
                         for turn in turns
                     ],
@@ -266,7 +268,8 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                     prompt_length,
                     token_ids_json,
                     position_ids_json,
-                    loss_mask_json
+                    loss_mask_json,
+                    rollout_log_probs_json
                 FROM turns
                 WHERE trajectory_id = ?
                 ORDER BY turn_index ASC
@@ -320,11 +323,12 @@ class SQLiteOpenForgeStore(OpenForgeStore):
                 CREATE TABLE IF NOT EXISTS turns (
                     trajectory_id TEXT NOT NULL,
                     turn_index INTEGER NOT NULL,
-                    rollout_model_version TEXT NOT NULL,
+                    rollout_model_version INTEGER NOT NULL,
                     prompt_length INTEGER NOT NULL,
                     token_ids_json TEXT NOT NULL,
                     position_ids_json TEXT NOT NULL,
                     loss_mask_json TEXT NOT NULL,
+                    rollout_log_probs_json TEXT NOT NULL,
                     PRIMARY KEY (trajectory_id, turn_index),
                     FOREIGN KEY(trajectory_id) REFERENCES trajectories(trajectory_id)
                 )
@@ -359,11 +363,12 @@ class SQLiteOpenForgeStore(OpenForgeStore):
         return Turn(
             trajectory_id=str(row["trajectory_id"]),
             turn_index=int(row["turn_index"]),
-            rollout_model_version=str(row["rollout_model_version"]),
+            rollout_model_version=int(row["rollout_model_version"]),
             prompt_length=int(row["prompt_length"]),
             token_ids=list(json.loads(str(row["token_ids_json"]))),
             position_ids=list(json.loads(str(row["position_ids_json"]))),
             loss_mask=list(json.loads(str(row["loss_mask_json"]))),
+            rollout_log_probs=list(json.loads(str(row["rollout_log_probs_json"]))),
         )
 
     @staticmethod

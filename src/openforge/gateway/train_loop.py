@@ -69,15 +69,27 @@ class TrainLoop:
 
     async def train_once(self) -> bool:
         ready_groups = await self._list_ready_groups()
+        eligible_groups: list[list[Trajectory]] = []
         group_sample_counts: list[int] = []
         turns_by_trajectory_id: dict[str, list[Turn]] = {}
         for group in ready_groups:
             sample_count = 0
+            group_rollout_version = self.policy_version
             for trajectory in group:
                 turns = await self.store.list_turns(trajectory.trajectory_id)
                 assert turns
                 turns_by_trajectory_id[trajectory.trajectory_id] = turns
+                group_rollout_version = min(
+                    group_rollout_version,
+                    min(turn.rollout_model_version for turn in turns),
+                )
                 sample_count += len(turns)
+            if (
+                self.policy_version - group_rollout_version
+                > self.train.max_rollout_policy_lag
+            ):
+                continue
+            eligible_groups.append(group)
             group_sample_counts.append(sample_count)
 
         selected_group_indexes = self._select_group_indexes(group_sample_counts)
@@ -87,7 +99,7 @@ class TrainLoop:
         trajectories: list[Trajectory] = []
         samples: list[dict[str, torch.Tensor]] = []
         for index in selected_group_indexes:
-            group = ready_groups[index]
+            group = eligible_groups[index]
             rewards = torch.tensor(
                 [float(trajectory.final_reward) for trajectory in group],
                 dtype=torch.float32,

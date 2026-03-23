@@ -131,7 +131,7 @@ def main() -> int:
         assert reward == 0.0
         response = responses[-1]
         assert response.metadata["session_id"] == session_id
-        assert response.metadata["rollout_model_version"] == "default"
+        assert response.metadata["rollout_model_version"] == 0
         assert response.choices[0].message.role == "assistant"
         assert isinstance(response.choices[0].message.content, str)
 

@@ -24,10 +24,12 @@ class _FakeTrainConfig:
         global_batch_size: int,
         mini_batch_size: int,
         micro_batch_size: int,
+        max_rollout_policy_lag: int,
     ) -> None:
         self.global_batch_size = global_batch_size
         self.mini_batch_size = mini_batch_size
         self.micro_batch_size = micro_batch_size
+        self.max_rollout_policy_lag = max_rollout_policy_lag
 
     @property
     def gradient_accumulation_steps(self) -> int:
@@ -42,6 +44,7 @@ class _FakeTrainManager:
         global_batch_size: int,
         mini_batch_size: int,
         micro_batch_size: int,
+        max_rollout_policy_lag: int,
     ) -> None:
         self.world_size = world_size
         self.cfg = SimpleNamespace(
@@ -50,6 +53,7 @@ class _FakeTrainManager:
                 global_batch_size=global_batch_size,
                 mini_batch_size=mini_batch_size,
                 micro_batch_size=micro_batch_size,
+                max_rollout_policy_lag=max_rollout_policy_lag,
             ),
         )
         self.step_calls: list[tuple[int, list[object]]] = []
@@ -84,16 +88,19 @@ def _turn(
     turn_index: int,
     prompt_length: int,
     token_ids: list[int],
+    rollout_model_version: int = 0,
 ) -> Turn:
     return Turn(
         trajectory_id=trajectory_id,
         turn_index=turn_index,
-        rollout_model_version="policy-0",
+        rollout_model_version=rollout_model_version,
         prompt_length=prompt_length,
         token_ids=token_ids,
         position_ids=list(range(len(token_ids))),
         loss_mask=[False] * max(prompt_length - 1, 0)
         + [True] * (len(token_ids) - prompt_length),
+        rollout_log_probs=[0.0] * max(prompt_length - 1, 0)
+        + [-0.1] * (len(token_ids) - prompt_length),
     )
 
 
@@ -121,6 +128,7 @@ async def _completed_trajectory(
     prompt_length: int = 2,
     group_id: str | None = None,
     expected_group_size: int = 1,
+    rollout_model_version: int = 0,
 ) -> None:
     await _create_trajectory(
         store,
@@ -140,6 +148,7 @@ async def _completed_trajectory(
             turn_index=0,
             prompt_length=prompt_length,
             token_ids=token_ids,
+            rollout_model_version=rollout_model_version,
         )
     )
 
@@ -153,6 +162,7 @@ async def _completed_multiturn_trajectory(
     turns: list[tuple[int, list[int]]],
     group_id: str | None = None,
     expected_group_size: int = 1,
+    rollout_model_version: int = 0,
 ) -> None:
     await _create_trajectory(
         store,
@@ -173,6 +183,7 @@ async def _completed_multiturn_trajectory(
                 turn_index=turn_index,
                 prompt_length=prompt_length,
                 token_ids=token_ids,
+                rollout_model_version=rollout_model_version,
             )
         )
 
@@ -197,6 +208,7 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
             global_batch_size=4,
             mini_batch_size=2,
             micro_batch_size=1,
+            max_rollout_policy_lag=0,
         )
         loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
 
@@ -230,6 +242,55 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
         assert trained_ids == ["trained", "trained", "trained", "trained"]
         assert remaining is not None
         assert remaining.status == "completed"
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_train_loop_skips_groups_beyond_rollout_policy_lag() -> None:
+    """Skip completed groups that are too stale for the current policy version."""
+
+    async def run() -> None:
+        store = SQLiteOpenForgeStore(":memory:")
+        await store.create_session(Session(session_id="s0", model_name="model-a"))
+        await _completed_trajectory(
+            store,
+            session_id="s0",
+            trajectory_id="fresh",
+            reward=1.0,
+            token_ids=[1, 2, 3],
+            rollout_model_version=4,
+        )
+        await _completed_trajectory(
+            store,
+            session_id="s0",
+            trajectory_id="stale",
+            reward=2.0,
+            token_ids=[4, 5, 6],
+            rollout_model_version=1,
+        )
+
+        train_manager = _FakeTrainManager(
+            world_size=1,
+            global_batch_size=1,
+            mini_batch_size=1,
+            micro_batch_size=1,
+            max_rollout_policy_lag=1,
+        )
+        loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
+        loop.policy_version = 5
+
+        trained = await loop.train_once()
+
+        assert trained is True
+        _global_step, rank_minibatches = train_manager.step_calls[0]
+        assert rank_minibatches[0]["tokens"].tolist() == [[1, 2, 3]]
+        fresh = await store.get_trajectory("fresh")
+        stale = await store.get_trajectory("stale")
+        assert fresh is not None
+        assert stale is not None
+        assert fresh.status == "trained"
+        assert stale.status == "completed"
         await store.close()
 
     asyncio.run(run())
@@ -275,6 +336,7 @@ def test_train_loop_train_once_splits_rank_local_minibatches() -> None:
             global_batch_size=4,
             mini_batch_size=4,
             micro_batch_size=2,
+            max_rollout_policy_lag=0,
         )
         loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
 
@@ -329,6 +391,7 @@ def test_train_loop_builds_group_relative_advantages() -> None:
             global_batch_size=2,
             mini_batch_size=2,
             micro_batch_size=1,
+            max_rollout_policy_lag=0,
         )
         loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
 
@@ -390,6 +453,7 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
             global_batch_size=3,
             mini_batch_size=3,
             micro_batch_size=1,
+            max_rollout_policy_lag=0,
         )
         loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
 
@@ -459,6 +523,7 @@ def test_train_loop_counts_batch_size_in_turns() -> None:
             global_batch_size=2,
             mini_batch_size=2,
             micro_batch_size=1,
+            max_rollout_policy_lag=0,
         )
         loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
 
@@ -532,6 +597,7 @@ def test_train_loop_waits_for_all_siblings_in_group() -> None:
             global_batch_size=2,
             mini_batch_size=2,
             micro_batch_size=1,
+            max_rollout_policy_lag=0,
         )
         loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
 
@@ -574,6 +640,7 @@ def test_train_loop_trains_completed_sibling_group_together() -> None:
             global_batch_size=2,
             mini_batch_size=2,
             micro_batch_size=1,
+            max_rollout_policy_lag=0,
         )
         loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
 
@@ -635,6 +702,7 @@ def test_train_loop_run_polls_until_batch_is_ready() -> None:
             global_batch_size=2,
             mini_batch_size=2,
             micro_batch_size=1,
+            max_rollout_policy_lag=0,
         )
         loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
         loop.POLL_INTERVAL_SECONDS = 0.01
@@ -681,6 +749,7 @@ def main() -> int:
             test_train_loop_builds_group_relative_advantages,
             test_train_loop_uses_all_turns_in_completed_trajectory,
             test_train_loop_counts_batch_size_in_turns,
+            test_train_loop_skips_groups_beyond_rollout_policy_lag,
             test_train_loop_waits_for_all_siblings_in_group,
             test_train_loop_trains_completed_sibling_group_together,
             test_train_loop_run_polls_until_batch_is_ready,
