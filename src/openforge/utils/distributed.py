@@ -16,26 +16,6 @@ from torch.distributed.distributed_c10d import (
     rendezvous,
 )
 
-GLOO_GROUP = None
-
-
-def init_gloo_group():
-    """Initialize Gloo group for distributed communication."""
-    global GLOO_GROUP
-    if GLOO_GROUP is None:
-        GLOO_GROUP = dist.new_group(backend="gloo")
-    return GLOO_GROUP
-
-
-def get_gloo_group():
-    """Get the Gloo group for distributed communication."""
-    global GLOO_GROUP
-    if GLOO_GROUP is None:
-        raise RuntimeError(
-            "Gloo group has not been initialized. Call _init_gloo_group() first."
-        )
-    return GLOO_GROUP
-
 
 # Copied from PyTorch to allow creating multiple main groups.
 # https://github.com/pytorch/pytorch/blob/main/torch/distributed/distributed_c10d.py
