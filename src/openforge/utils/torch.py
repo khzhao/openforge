@@ -1,6 +1,7 @@
 # Copyright 2026 openforge
 
-from contextlib import ContextManager, contextmanager
+from contextlib import contextmanager
+from typing import ContextManager
 
 import torch
 
