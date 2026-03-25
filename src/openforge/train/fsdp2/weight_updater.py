@@ -108,15 +108,11 @@ class WeightUpdater:
         trainer_slept = False
         self.train_group.sleep()
         trainer_slept = True
+        num_buckets = len(named_buckets)
         bucket_metas = [build_tensor_bucket_meta(bucket) for bucket in named_buckets]
         source_device = torch.device("cuda", 0)
         torch.cuda.empty_cache()
         torch.cuda.set_device(source_device)
-        named_buckets = [
-            [(name, tensor.to(source_device).contiguous()) for name, tensor in bucket]
-            for bucket in named_buckets
-        ]
-        flattened_buckets = [flatten_tensor_bucket(bucket) for bucket in named_buckets]
 
         group_name = f"openforge-weight-update-{uuid.uuid4().hex[:10]}"
         master_address = "127.0.0.1"
@@ -158,10 +154,15 @@ class WeightUpdater:
                     for worker in rollout_workers
                 ]
             )
-            for bucket_index, (meta, flattened_bucket) in enumerate(
-                zip(bucket_metas, flattened_buckets, strict=True)
+            for bucket_index, (meta, bucket) in enumerate(
+                zip(bucket_metas, named_buckets, strict=True)
             ):
-                flush_cache = bucket_index == len(flattened_buckets) - 1
+                bucket_on_device = [
+                    (name, tensor.to(source_device).contiguous())
+                    for name, tensor in bucket
+                ]
+                flattened_bucket = flatten_tensor_bucket(bucket_on_device)
+                flush_cache = bucket_index == num_buckets - 1
                 ray.get(
                     [
                         worker.begin_update_weights_from_distributed.remote(
@@ -177,6 +178,9 @@ class WeightUpdater:
                     ]
                 )
                 dist.broadcast(flattened_bucket, src=0, group=process_group)
+                del bucket_on_device
+                del flattened_bucket
+                torch.cuda.empty_cache()
                 ray.get(
                     [
                         worker.wait_pending_runtime_call.remote()

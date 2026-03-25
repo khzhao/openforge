@@ -462,8 +462,8 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
 
         train_manager = _FakeTrainManager(
             world_size=1,
-            global_batch_size=3,
-            mini_batch_size=3,
+            global_batch_size=2,
+            mini_batch_size=2,
             micro_batch_size=1,
             max_rollout_policy_lag=0,
         )
@@ -506,8 +506,8 @@ def test_train_loop_uses_all_turns_in_completed_trajectory() -> None:
     asyncio.run(run())
 
 
-def test_train_loop_counts_batch_size_in_turns() -> None:
-    """Measure batch readiness in stored turns rather than trajectories."""
+def test_train_loop_counts_batch_size_in_trajectories() -> None:
+    """Measure batch readiness in completed trajectories, not stored turns."""
 
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
@@ -546,8 +546,10 @@ def test_train_loop_counts_batch_size_in_turns() -> None:
         assert rank_minibatches[0]["tokens"].tolist() == [
             [1, 2, 3],
             [1, 2, 4],
+            [7, 8, 9],
         ]
         assert rank_minibatches[0]["advantages"].tolist() == [
+            [0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
         ]
@@ -556,7 +558,78 @@ def test_train_loop_counts_batch_size_in_turns() -> None:
         assert t0 is not None
         assert t1 is not None
         assert t0.status == "trained"
-        assert t1.status == "completed"
+        assert t1.status == "trained"
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_train_loop_handles_variable_turn_counts_per_trajectory() -> None:
+    """Train once even when trajectories contribute different numbers of turns."""
+
+    async def run() -> None:
+        store = SQLiteOpenForgeStore(":memory:")
+        await store.create_session(Session(session_id="s0", model_name="model-a"))
+        await _completed_multiturn_trajectory(
+            store,
+            session_id="s0",
+            trajectory_id="t0",
+            reward=1.0,
+            turns=[
+                (2, [1, 2, 3]),
+                (2, [1, 2, 4]),
+            ],
+        )
+        await _completed_multiturn_trajectory(
+            store,
+            session_id="s0",
+            trajectory_id="t1",
+            reward=2.0,
+            turns=[
+                (2, [5, 6, 7]),
+                (2, [5, 6, 8]),
+            ],
+        )
+        await _completed_trajectory(
+            store,
+            session_id="s0",
+            trajectory_id="t2",
+            reward=3.0,
+            token_ids=[9, 10, 11],
+        )
+        await _completed_trajectory(
+            store,
+            session_id="s0",
+            trajectory_id="t3",
+            reward=4.0,
+            token_ids=[12, 13, 14],
+        )
+
+        train_manager = _FakeTrainManager(
+            world_size=1,
+            global_batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size=1,
+            max_rollout_policy_lag=0,
+        )
+        loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
+
+        trained = await loop.train_once()
+
+        assert trained is True
+        _global_step, rank_minibatches = train_manager.step_calls[0]
+        assert rank_minibatches[0]["tokens"].tolist() == [
+            [1, 2, 3],
+            [1, 2, 4],
+            [5, 6, 7],
+            [5, 6, 8],
+            [9, 10, 11],
+            [12, 13, 14],
+        ]
+        for trajectory_id in ["t0", "t1", "t2", "t3"]:
+            trajectory = await store.get_trajectory(trajectory_id)
+            assert trajectory is not None
+            assert trajectory.status == "trained"
         await store.close()
 
     asyncio.run(run())
@@ -760,7 +833,8 @@ def main() -> int:
             test_train_loop_train_once_splits_rank_local_minibatches,
             test_train_loop_builds_group_relative_advantages,
             test_train_loop_uses_all_turns_in_completed_trajectory,
-            test_train_loop_counts_batch_size_in_turns,
+            test_train_loop_counts_batch_size_in_trajectories,
+            test_train_loop_handles_variable_turn_counts_per_trajectory,
             test_train_loop_skips_groups_beyond_rollout_policy_lag,
             test_train_loop_waits_for_all_siblings_in_group,
             test_train_loop_trains_completed_sibling_group_together,

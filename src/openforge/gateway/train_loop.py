@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 class TrainLoop:
     """Background trainer for one session.
 
-    One completed trajectory contributes one sample per stored turn.
+    Batch readiness is measured in completed trajectories.
+    One completed trajectory still contributes one sample per stored turn.
     """
 
     POLL_INTERVAL_SECONDS = 0.1
@@ -83,10 +84,9 @@ class TrainLoop:
     async def train_once(self) -> bool:
         ready_groups = await self._list_ready_groups()
         eligible_groups: list[list[Trajectory]] = []
-        group_sample_counts: list[int] = []
+        group_trajectory_counts: list[int] = []
         turns_by_trajectory_id: dict[str, list[Turn]] = {}
         for group in ready_groups:
-            sample_count = 0
             group_rollout_version = self.policy_version
             for trajectory in group:
                 turns = await self.store.list_turns(trajectory.trajectory_id)
@@ -96,21 +96,20 @@ class TrainLoop:
                     group_rollout_version,
                     min(turn.rollout_model_version for turn in turns),
                 )
-                sample_count += len(turns)
             if (
                 self.policy_version - group_rollout_version
                 > self.train.max_rollout_policy_lag
             ):
                 continue
             eligible_groups.append(group)
-            group_sample_counts.append(sample_count)
+            group_trajectory_counts.append(len(group))
 
-        selected_group_indexes = self._select_group_indexes(group_sample_counts)
+        selected_group_indexes = self._select_group_indexes(group_trajectory_counts)
         if selected_group_indexes is None:
             return False
 
         trajectories: list[Trajectory] = []
-        samples: list[dict[str, torch.Tensor]] = []
+        trajectory_samples: list[list[dict[str, torch.Tensor]]] = []
         for index in selected_group_indexes:
             group = eligible_groups[index]
             rewards = torch.tensor(
@@ -124,7 +123,7 @@ class TrainLoop:
                 strict=True,
             ):
                 trajectories.append(trajectory)
-                samples.extend(
+                trajectory_samples.append(
                     self._build_samples(
                         trajectory,
                         turns_by_trajectory_id[trajectory.trajectory_id],
@@ -132,20 +131,29 @@ class TrainLoop:
                     )
                 )
 
-        assert len(samples) == self.train.global_batch_size
+        assert len(trajectory_samples) == self.train.global_batch_size
         rank_minibatches_per_update: list[list[dict[str, torch.Tensor]]] = []
         offset = 0
-        samples_per_minibatch = self.world_size * self.train.mini_batch_size
-        while offset < len(samples):
+        trajectories_per_minibatch = self.world_size * self.train.mini_batch_size
+        while offset < len(trajectory_samples):
             rank_minibatches: list[dict[str, torch.Tensor]] = []
             for _rank in range(self.world_size):
+                rank_trajectories = trajectory_samples[
+                    offset : offset + self.train.mini_batch_size
+                ]
                 rank_minibatches.append(
-                    self._collate(samples[offset : offset + self.train.mini_batch_size])
+                    self._collate(
+                        [
+                            sample
+                            for trajectory in rank_trajectories
+                            for sample in trajectory
+                        ]
+                    )
                 )
                 offset += self.train.mini_batch_size
             rank_minibatches_per_update.append(rank_minibatches)
         assert (
-            len(rank_minibatches_per_update) * samples_per_minibatch
+            len(rank_minibatches_per_update) * trajectories_per_minibatch
             == self.train.global_batch_size
         )
 
