@@ -11,6 +11,7 @@ GATEWAY_LOG="$JOB_DIR/gateway.log"
 SESSION_LOG="$JOB_DIR/session.log"
 GATEWAY_DB="$JOB_DIR/gateway.sqlite3"
 GATEWAY_CONFIG="$JOB_DIR/gateway.yaml"
+TRAIN_GROUP_PARALLELISM="${OPENFORGE_TRAIN_GROUP_PARALLELISM:-320}"
 
 mkdir -p "$JOB_DIR"
 
@@ -27,6 +28,7 @@ echo "GATEWAY_DB=$GATEWAY_DB"
 echo "GATEWAY_LOG=$GATEWAY_LOG"
 echo "SESSION_LOG=$SESSION_LOG"
 echo "ARTIFACT_DIR=$ARTIFACT_DIR"
+echo "TRAIN_GROUP_PARALLELISM=$TRAIN_GROUP_PARALLELISM"
 
 python - "$ROOT/examples/search_r1/gateway.yaml" "$GATEWAY_CONFIG" "$GATEWAY_DB" <<'PY'
 from pathlib import Path
@@ -63,4 +65,5 @@ echo "Session started; logs: $SESSION_LOG"
 echo "Starting training..."
 PYTHONUNBUFFERED=1 python -m examples.search_r1.train_ninja \
   --artifact-dir "$ARTIFACT_DIR" \
+  --train-group-parallelism "$TRAIN_GROUP_PARALLELISM" \
   "$@"

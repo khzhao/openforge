@@ -238,6 +238,8 @@ class Runtime:
         if not ray.is_initialized():
             ray.init(
                 address=os.environ.get("RAY_ADDRESS", "local"),
+                num_cpus=self._cfg.cluster.total_cpus,
+                num_gpus=self._cfg.cluster.total_gpus,
                 log_to_driver=False,
             )
             started_ray = True

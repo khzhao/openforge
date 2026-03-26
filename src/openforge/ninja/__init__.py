@@ -14,17 +14,18 @@ from typing import Any, Callable
 from uuid import uuid4
 
 import httpx
-from openai import OpenAI
 
 from openforge import active_state
 from openforge.configs.models import GatewayServerConfig
+from openforge.gateway.types import ChatCompletionResponse, ModelListResponse
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 __all__ = ["agent", "train"]
 
-_AUTO_CONCURRENCY_CAP = 128
+_AUTO_CONCURRENCY_CAP = 512
+_AUTO_CONCURRENCY_CPU_MULTIPLIER = 16
 _AUTO_CONCURRENCY_FLOOR = 32
 _TRAIN_STATUS_POLL_INTERVAL_SECONDS = 0.25
 
@@ -73,7 +74,10 @@ def _resolve_concurrency(
         cpu_count = os.cpu_count() or 1
         auto_limit = min(
             _AUTO_CONCURRENCY_CAP,
-            max(_AUTO_CONCURRENCY_FLOOR, cpu_count * 4),
+            max(
+                _AUTO_CONCURRENCY_FLOOR,
+                cpu_count * _AUTO_CONCURRENCY_CPU_MULTIPLIER,
+            ),
         )
         return max(1, min(job_count, auto_limit))
     if concurrency <= 0:
@@ -189,6 +193,7 @@ class _ActiveSession:
         *,
         group_id: str | None = None,
         trajectory_id: str | None = None,
+        used: bool = False,
     ) -> _TrajectoryClient:
         return _TrajectoryClient(
             post=self.post,
@@ -196,6 +201,7 @@ class _ActiveSession:
             session_id=self.session_id,
             trajectory_id=trajectory_id or f"traj_{uuid4().hex}",
             group_id=group_id,
+            used=used,
         )
 
     def trajectory_groups(
@@ -229,6 +235,7 @@ class _ActiveSession:
                 self.client(
                     group_id=group_id,
                     trajectory_id=str(trajectory_id),
+                    used=True,
                 )
                 for trajectory_id in trajectory_ids
             ]
@@ -304,15 +311,7 @@ class _ActiveSession:
         }
 
     def agent_client(self, client: "_TrajectoryClient") -> _AgentClient:
-        return _AgentClient(
-            OpenAI(
-                api_key="openforge",
-                base_url=f"{self._base_url}/v1",
-                timeout=self.REQUEST_TIMEOUT_SECONDS,
-                max_retries=0,
-            ),
-            client,
-        )
+        return _AgentClient(self, client)
 
     def post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
         client = self._http_client()
@@ -354,13 +353,14 @@ class _TrajectoryClient:
         session_id: str,
         trajectory_id: str,
         group_id: str | None = None,
+        used: bool = False,
     ) -> None:
         self._post = post
         self._retry_post = retry_post
         self._session_id = session_id
         self._trajectory_id = trajectory_id
         self._group_id = group_id
-        self._used = False
+        self._used = used
 
     @property
     def trajectory_id(self) -> str:
@@ -418,41 +418,55 @@ class _TrajectoryClient:
 
 
 class _ChatCompletionsClient:
-    def __init__(self, sdk_client: OpenAI, trajectory: _TrajectoryClient) -> None:
-        self._sdk_client = sdk_client
+    def __init__(
+        self,
+        session: _ActiveSession,
+        trajectory: _TrajectoryClient,
+    ) -> None:
+        self._session = session
         self._trajectory = trajectory
 
-    def create(self, **kwargs: Any) -> Any:
+    def create(self, **kwargs: Any) -> ChatCompletionResponse:
         self._trajectory.mark_used()
         extra_body = kwargs.pop("extra_body", None)
         if extra_body is None:
             extra_body = {}
         else:
             extra_body = dict(extra_body)
-        extra_body["_openforge"] = {
+        payload = dict(kwargs)
+        payload.update(extra_body)
+        payload["_openforge"] = {
             "session_id": self._trajectory.session_id,
             "trajectory_id": self._trajectory.trajectory_id,
             "group_id": self._trajectory.group_id,
         }
-        return self._sdk_client.chat.completions.create(
-            **kwargs,
-            extra_body=extra_body,
-        )
+        response = self._session.post("/v1/chat/completions", payload)
+        response.raise_for_status()
+        return ChatCompletionResponse.model_validate(response.json())
 
 
 class _ChatClient:
-    def __init__(self, sdk_client: OpenAI, trajectory: _TrajectoryClient) -> None:
-        self.completions = _ChatCompletionsClient(sdk_client, trajectory)
+    def __init__(self, session: _ActiveSession, trajectory: _TrajectoryClient) -> None:
+        self.completions = _ChatCompletionsClient(session, trajectory)
+
+
+class _ModelsClient:
+    def __init__(self, session: _ActiveSession) -> None:
+        self._session = session
+
+    def list(self) -> ModelListResponse:
+        response = self._session.get("/v1/models")
+        response.raise_for_status()
+        return ModelListResponse.model_validate(response.json())
 
 
 class _AgentClient:
-    def __init__(self, sdk_client: OpenAI, trajectory: _TrajectoryClient) -> None:
-        self._sdk_client = sdk_client
-        self.chat = _ChatClient(sdk_client, trajectory)
-        self.models = sdk_client.models
+    def __init__(self, session: _ActiveSession, trajectory: _TrajectoryClient) -> None:
+        self.chat = _ChatClient(session, trajectory)
+        self.models = _ModelsClient(session)
 
     def close(self) -> None:
-        self._sdk_client.close()
+        return None
 
 
 class _RegisteredAgent:

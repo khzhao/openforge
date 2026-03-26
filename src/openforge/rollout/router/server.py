@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Sequence
@@ -61,11 +62,12 @@ class _RouterState:
         self._trajectory_workers: dict[str, str] = {}
         self._trajectory_expected_versions: dict[str, int] = {}
         self._worker_sync_errors = dict.fromkeys(self._worker_names, None)
+        self._last_health_refresh_monotonic = 0.0
         self._latest_published_train_version = max(
             self._worker_versions.values(),
             default=0,
         )
-        self._refresh_worker_health()
+        self._refresh_worker_health(force=True)
 
     def start(self) -> None:
         """Start the reconcile loop."""
@@ -91,7 +93,7 @@ class _RouterState:
 
     def can_generate(self) -> bool:
         """Return whether any healthy worker can serve requests."""
-        self._refresh_worker_health()
+        self._refresh_worker_health(force=True)
         with self._condition:
             return any(self._worker_health.values())
 
@@ -245,7 +247,7 @@ class _RouterState:
 
     def status_payload(self) -> dict[str, Any]:
         """Return router status."""
-        self._refresh_worker_health()
+        self._refresh_worker_health(force=True)
         with self._condition:
             return {
                 "latest_published_train_version": self._latest_published_train_version,
@@ -274,7 +276,14 @@ class _RouterState:
                 },
             }
 
-    def _refresh_worker_health(self) -> None:
+    def _refresh_worker_health(self, *, force: bool = False) -> None:
+        if not force:
+            now = time.monotonic()
+            if now - self._last_health_refresh_monotonic < min(
+                1.0, float(self.spec.health_check_interval_secs)
+            ):
+                return
+
         health_by_name: dict[str, bool] = {}
         for worker_name in self._worker_names:
             try:
@@ -286,6 +295,7 @@ class _RouterState:
             health_by_name[worker_name] = healthy
 
         with self._condition:
+            self._last_health_refresh_monotonic = time.monotonic()
             self._worker_health.update(health_by_name)
             self._condition.notify_all()
 
@@ -349,7 +359,7 @@ class _RouterState:
 
     def _reconcile_loop(self) -> None:
         while not self._reconcile_stop.is_set():
-            self._refresh_worker_health()
+            self._refresh_worker_health(force=True)
             ready_worker_names, target_version = self._take_ready_workers()
             if not ready_worker_names:
                 with self._condition:

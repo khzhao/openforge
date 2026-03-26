@@ -13,7 +13,6 @@ from typing import Iterator
 from unittest.mock import patch
 
 import httpx
-from openai.types.chat import ChatCompletion
 
 from _script_test_utils import expect_raises, install_test_stubs, run_tests
 
@@ -430,34 +429,8 @@ def _patched_ninja(
         def close(self) -> None:
             return None
 
-    class _FakeOpenAI:
-        def __init__(self, *args, **kwargs) -> None:
-            self.chat = self._Chat()
-            self.models = object()
-
-        class _Chat:
-            def __init__(self) -> None:
-                self.completions = _FakeOpenAI._Completions()
-
-        class _Completions:
-            def create(self, **kwargs):
-                extra_body = dict(kwargs.pop("extra_body", {}))
-                payload = dict(kwargs)
-                payload.update(extra_body)
-                response = gateway.handle(
-                    "POST",
-                    "/v1/chat/completions",
-                    payload,
-                )
-                response.raise_for_status()
-                return ChatCompletion.model_validate(response.json())
-
-        def close(self) -> None:
-            return None
-
     with ExitStack() as stack:
         stack.enter_context(patch.object(ninja.httpx, "Client", _FakeHttpClient))
-        stack.enter_context(patch.object(ninja, "OpenAI", _FakeOpenAI))
         yield gateway
 
 
@@ -745,6 +718,23 @@ def test_execute_grouped_retries_only_failed_group() -> None:
     assert failed_prompts == {"hello"}
 
 
+def test_grouped_fail_fallback_marks_started_clients_failed() -> None:
+    with _patched_ninja() as fake_gateway:
+        session = ninja._ActiveSession(("127.0.0.1", 8000))
+        with session:
+            clients = session.trajectory_groups(
+                counts=[3],
+                group_ids=["group_1"],
+            )[0]
+            session.fail_clients = lambda _clients: (_ for _ in ()).throw(  # type: ignore[method-assign]
+                RuntimeError("boom")
+            )
+            ninja._fail_clients_best_effort(session, clients)
+
+    assert len(fake_gateway.failed) == 3
+    assert fake_gateway.active_trajectory_ids == set()
+
+
 def test_sample_validates_requests_before_connecting() -> None:
     @ninja.agent(_gateway_config())
     def agent(client, *, prompt: str, ground_truth: str) -> float:
@@ -934,6 +924,7 @@ def main() -> int:
             test_execute_uses_group_size_for_grouped_rollouts,
             test_execute_accepts_num_rollouts_alias,
             test_execute_grouped_retries_only_failed_group,
+            test_grouped_fail_fallback_marks_started_clients_failed,
             test_sample_validates_requests_before_connecting,
             test_register_retries_single_finish_on_read_error,
             test_register_retries_single_fail_on_read_error,

@@ -79,6 +79,10 @@ class Service:
         self._generate_lock = asyncio.Lock()
         self._generate_task: asyncio.Task[None] | None = None
         self._pending_generates: list[_PendingGenerate] = []
+        self._runtime_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="openforge-gateway-runtime",
+        )
 
     async def current_session(self) -> StartSessionResponse | None:
         session_id = self._active_session_id
@@ -486,7 +490,10 @@ class Service:
         self._active_session_model_name = None
         self._active_trajectories = {}
         self._active_turn_counts = {}
-        await self.runtime.shutdown()
+        try:
+            await self.runtime.shutdown()
+        finally:
+            self._runtime_executor.shutdown(wait=False, cancel_futures=True)
 
     def _ensure_generate_task_locked(self) -> None:
         task = self._generate_task
@@ -671,11 +678,10 @@ class Service:
 
     async def _run_blocking_call(self, fn: object, /, *args: object, **kwargs: object):
         loop = asyncio.get_running_loop()
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            return await loop.run_in_executor(
-                executor,
-                partial(fn, *args, **kwargs),
-            )
+        return await loop.run_in_executor(
+            self._runtime_executor,
+            partial(fn, *args, **kwargs),
+        )
 
     @staticmethod
     def _messages_key(messages: list[ChatCompletionMessage]) -> str:

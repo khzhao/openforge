@@ -1,7 +1,6 @@
 datasets
 huggingface_hub
 httpx
-openai>=2.6.1
 requests
 safetensors
 setuptools
