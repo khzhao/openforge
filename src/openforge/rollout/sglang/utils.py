@@ -6,7 +6,6 @@ from multiprocessing.process import BaseProcess
 from typing import Any
 
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import kill_process_tree
 
 from openforge.rollout.sglang.types import EngineAddr, EngineSpec
 
@@ -19,26 +18,6 @@ def stop_spawn_resource_tracker() -> None:
     if tracker._fd is None:
         return
     tracker._stop()
-
-
-def stop_spawned_process(
-    process: BaseProcess | None,
-    *,
-    timeout: float,
-) -> None:
-    """Stop one multiprocessing child."""
-    if process is None:
-        return
-
-    if process.is_alive():
-        try:
-            kill_process_tree(process.pid, include_parent=True)
-        except Exception:
-            process.terminate()
-        process.join(timeout=timeout)
-        if process.is_alive():
-            process.kill()
-            process.join(timeout=timeout)
 
 
 def get_local_gpu_id(global_gpu_id: int) -> int:

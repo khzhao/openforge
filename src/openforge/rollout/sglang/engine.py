@@ -8,13 +8,13 @@ from loguru import logger
 
 from openforge.rollout.sglang.types import EngineAddr, EngineSpec
 from openforge.utils.networking import get_free_port
+from openforge.utils.processes import stop_spawned_process
 from openforge.utils.ray import get_current_ray_node_ip_address
 
 from .client import SGLangClient
 from .utils import (
     generate_sglang_server_args,
     launch_sglang_process,
-    stop_spawned_process,
 )
 
 __all__ = ["Engine"]

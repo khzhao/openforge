@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 __all__ = ["RouterSpec"]
 
@@ -15,8 +14,6 @@ class RouterSpec:
     router_name: str
     router_ip: str
     router_port: int
-    policy: Literal["cache_aware", "round_robin"]
-    worker_urls: list[str]
 
     request_timeout_secs: int
     worker_startup_timeout_secs: int
