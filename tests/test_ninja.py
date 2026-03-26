@@ -229,6 +229,10 @@ class _FakeGateway:
                 sampling_params["temperature"] = payload["temperature"]
             if "top_p" in payload:
                 sampling_params["top_p"] = payload["top_p"]
+            if "top_k" in payload:
+                sampling_params["top_k"] = payload["top_k"]
+            if "repetition_penalty" in payload:
+                sampling_params["repetition_penalty"] = payload["repetition_penalty"]
             if "max_completion_tokens" in payload:
                 sampling_params["max_new_tokens"] = payload["max_completion_tokens"]
             with self._lock:
@@ -521,6 +525,8 @@ def test_register_routes_explicit_messages() -> None:
             model="model-a",
             messages=messages,
             temperature=0.7,
+            top_k=-1,
+            repetition_penalty=1.1,
         )
         messages.append({"role": "assistant", "content": first.choices[0].message.content})
         messages.append({"role": "user", "content": "follow up"})
@@ -569,7 +575,11 @@ def test_register_routes_explicit_messages() -> None:
         {
             "trajectory_id": trajectory_id,
             "messages": [{"role": "user", "content": "hello"}],
-            "sampling_params": {"temperature": 0.7},
+            "sampling_params": {
+                "temperature": 0.7,
+                "top_k": -1,
+                "repetition_penalty": 1.1,
+            },
         },
         {
             "trajectory_id": trajectory_id,

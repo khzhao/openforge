@@ -28,6 +28,11 @@
   Gateway-first RL • Minimal agent API • Config-first setup
 </p>
 
+## Correspondence
+
+- Kevin Zhao: `kzhao16 [at] gmail [dot] com`
+- Zhaoran Wang: `zhaoran.wang [at] u [dot] northwestern [dot] edu`
+
 ## OpenForge
 
 Most post-training repos ask you to edit launch scripts, shell state, and
@@ -76,8 +81,9 @@ The important API points are:
   trained before returning a summary.
 
 If a gateway and session are active, `@ninja.agent()` discovers them
-automatically. If you need to target a different gateway explicitly, you can
-still pass `gateway_config=...`.
+automatically. If you need to target a different gateway explicitly, pass a
+`GatewayServerConfig` as the decorator argument, for example
+`@ninja.agent(gateway_config)`.
 
 The active environment is recorded on the local machine at:
 
@@ -107,10 +113,11 @@ The active environment is recorded on the local machine at:
 | `gateway` | Runs the FastAPI control plane, owns the live runtime, exposes `/health`, `/info`, session lifecycle, generation, and checkpoint export. |
 | `ninja` | The user-facing Python API for agent code. It registers agents, routes OpenAI-style chat-completions calls through the active gateway/session, and exposes grouped training via `ninja.train(...)`. |
 | `active_state` | Stores the active gateway and active session on the local machine so scripts can auto-discover the current environment. |
+| `benchmarks` | Prompt-building and scoring helpers used by the bundled examples and benchmarks. |
 | `configs` | Pydantic-backed YAML models for gateway, cluster, model, rollout, and training setup. |
 | `data` | SQLite-backed storage for sessions and trajectories. |
 | `rollout` / `train` | SGLang rollout management and FSDP2 training infrastructure. |
-| `examples` | Runnable configs plus the GSM8K Ninja example. |
+| `examples` | Runnable configs, training scripts, shared helpers, and the batching benchmark. |
 
 ## Installation
 
@@ -268,34 +275,73 @@ bash examples/search_r1/run_ninja_train.sh \
   --prompt-data /path/to/train.parquet
 ```
 
-## Repository Guide
+## Repository Layout
+
+```text
+.
+├── assets/
+│   └── openforge-ninja.png
+├── examples/
+│   ├── benchmark_ninja_register_batching.py
+│   ├── shared.py
+│   ├── gsm8k/
+│   │   ├── common.py
+│   │   ├── gateway.yaml
+│   │   ├── run_ninja_train.sh
+│   │   ├── runtime.yaml
+│   │   └── train_ninja.py
+│   └── search_r1/
+│       ├── gateway.yaml
+│       ├── run_ninja_train.sh
+│       ├── runtime.yaml
+│       └── train_ninja.py
+├── src/openforge/
+│   ├── active_state.py
+│   ├── algo/
+│   ├── benchmarks/
+│   ├── cli/
+│   ├── configs/
+│   ├── data/
+│   ├── gateway/
+│   ├── ninja/
+│   ├── rollout/
+│   │   ├── router/
+│   │   └── sglang/
+│   ├── train/
+│   │   ├── fsdp2/
+│   │   └── server/
+│   ├── runtime.py
+│   └── utils/
+├── tests/
+├── pyproject.toml
+├── requirements.txt
+└── README.md
+```
+
+Key paths:
 
 - `src/openforge/cli/main.py`
   The only public CLI entrypoint.
-- `src/openforge/gateway/server.py`
-  Gateway API, `/info`, shared-state updates, and route definitions.
-- `src/openforge/gateway/runtime.py`
-  Runtime ownership for the loaded model and rollout/train managers.
 - `src/openforge/ninja/__init__.py`
-  Agent registration, request execution, grouped training, and active-gateway
-  discovery.
-- `src/openforge/active_state.py`
-  Machine-local shared state for the active gateway/session.
-- `examples/gsm8k/train_ninja.py`
-  Minimal end-to-end Ninja training example.
-- `examples/gsm8k/common.py`
-  GSM8K-specific dataset preparation and CLI setup.
+  Agent registration, request execution, checkpoint export, and grouped
+  training.
+- `src/openforge/gateway/`
+  FastAPI server, runtime/service lifecycle, and gateway-facing types.
+- `src/openforge/rollout/`
+  Rollout orchestration plus router and SGLang integrations.
+- `src/openforge/train/`
+  Training manager/runtime code, the FSDP2 backend, and the train-side server.
+- `src/openforge/benchmarks/gsm8k.py`
+  GSM8K prompt building and scoring helpers used by the examples.
 - `examples/shared.py`
   Shared artifact helpers and the outer `ninja.train(...)` scheduling loop used
   by the bundled examples.
-- `examples/gsm8k/run_ninja_train.sh`
-  Convenience wrapper for the full GSM8K flow.
-- `examples/search_r1/train_ninja.py`
-  Search-R1-style multi-turn Ninja example with a Python search tool.
-- `examples/search_r1/run_ninja_train.sh`
-  Convenience wrapper for the Search-R1-style flow.
-- `tests`
-  CLI, Ninja, active-state, and gateway coverage.
+- `tests/`
+  Unit, integration, and real-runtime coverage for CLI, gateway, rollout,
+  training, and Ninja flows.
+- `checkpoints/`
+  A generated local output directory that may appear after training runs. It is
+  gitignored and not part of the source layout.
 
 ## Development
 
@@ -310,7 +356,7 @@ python tests/test_ninja.py
 
 ## Current Scope
 
-OpenForge is intentionally focused today: single-node, gateway-driven
-post-training with GRPO, SGLang rollout, FSDP2 training, and the bundled GSM8K
-example. If you want a small agent API on top of a real runtime stack, that is
-the point of this repo.
+OpenForge is intentionally focused today: gateway-driven post-training with
+GRPO and GRPO+TIS, SGLang rollout, FSDP2 training, and the bundled GSM8K plus
+Search-R1-style examples. If you want a small agent API on top of a real
+runtime stack, that is the point of this repo.

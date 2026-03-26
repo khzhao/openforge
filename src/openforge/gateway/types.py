@@ -240,7 +240,9 @@ class ChatCompletionCreateRequest(BaseModel):
     temperature: float | None = None
     tool_choice: ChatCompletionToolChoice | None = None
     tools: list[ChatCompletionTool] | None = None
+    top_k: int | None = None
     top_p: float | None = None
+    repetition_penalty: float | None = None
     user: str | None = None
 
 

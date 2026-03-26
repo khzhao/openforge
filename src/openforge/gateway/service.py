@@ -909,6 +909,10 @@ class Service:
             sampling_params["temperature"] = request.temperature
         if request.top_p is not None:
             sampling_params["top_p"] = request.top_p
+        if request.top_k is not None:
+            sampling_params["top_k"] = request.top_k
+        if request.repetition_penalty is not None:
+            sampling_params["repetition_penalty"] = request.repetition_penalty
 
         max_tokens = request.max_completion_tokens
         if max_tokens is None:

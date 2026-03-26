@@ -61,7 +61,7 @@ rollout:
   request:
     temperature: 0.0
     top_p: 1.0
-    top_k: -1
+    top_k: 1
     repetition_penalty: 1.0
     max_new_tokens: 256
     stop: []

@@ -75,6 +75,8 @@ def build_train_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--train-temperature", type=float, default=1.0)
     parser.add_argument("--train-top-p", type=float, default=1.0)
+    parser.add_argument("--train-top-k", type=int, default=-1)
+    parser.add_argument("--repetition-penalty", type=float, default=1.0)
     return parser
 
 
@@ -97,6 +99,8 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
     sampling_params = {
         "temperature": args.train_temperature,
         "top_p": args.train_top_p,
+        "top_k": args.train_top_k,
+        "repetition_penalty": args.repetition_penalty,
         "max_new_tokens": runtime_config.rollout.request.max_new_tokens,
     }
     inputs = [

@@ -28,6 +28,8 @@ def main() -> int:
             messages=[{"role": "user", "content": prompt}],
             temperature=sampling_params["temperature"],
             top_p=sampling_params["top_p"],
+            top_k=sampling_params["top_k"],
+            repetition_penalty=sampling_params["repetition_penalty"],
             max_completion_tokens=sampling_params["max_new_tokens"],
         )
         text = response_text(response)

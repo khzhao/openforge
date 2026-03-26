@@ -283,6 +283,8 @@ def _chat_request(
     model: str = "model-a",
     temperature: float | None = None,
     top_p: float | None = None,
+    top_k: int | None = None,
+    repetition_penalty: float | None = None,
     max_completion_tokens: int | None = None,
 ) -> ChatCompletionCreateRequest:
     payload: dict[str, object] = {
@@ -298,6 +300,10 @@ def _chat_request(
         payload["temperature"] = temperature
     if top_p is not None:
         payload["top_p"] = top_p
+    if top_k is not None:
+        payload["top_k"] = top_k
+    if repetition_penalty is not None:
+        payload["repetition_penalty"] = repetition_penalty
     if max_completion_tokens is not None:
         payload["max_completion_tokens"] = max_completion_tokens
     return ChatCompletionCreateRequest.model_validate(payload)
@@ -322,6 +328,8 @@ def test_gateway_service_start_generate_and_end() -> None:
                     trajectory_id=root.trajectory_id,
                     content="hello world",
                     temperature=0.7,
+                    top_k=-1,
+                    repetition_penalty=1.1,
                     max_completion_tokens=32,
                 ),
             )
@@ -349,6 +357,8 @@ def test_gateway_service_start_generate_and_end() -> None:
             }
             assert runtime.last_sampling_params == {
                 "temperature": 0.7,
+                "top_k": -1,
+                "repetition_penalty": 1.1,
                 "max_new_tokens": 32,
             }
             assert runtime.last_trajectory_ids == [root.trajectory_id]
