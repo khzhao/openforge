@@ -146,7 +146,6 @@ def _start_session_payload(model_name: str = "model-a") -> dict[str, object]:
                         "stop_token_ids": [],
                         "skip_special_tokens": True,
                         "no_stop_trim": False,
-                        "spaces_between_words": True,
                     },
                     "engine_groups": [
                         {
@@ -187,6 +186,8 @@ class _FakeRuntime:
         self._current_model: str | None = None
         self._train = _FakeTrainRuntime()
         self.last_sampling_params: dict[str, object] | None = None
+        self.last_trajectory_ids: list[str] | None = None
+        self.released_trajectory_ids: list[list[str]] = []
         self.shutdown_count = 0
 
     def list_models(self) -> list[dict[str, str]]:
@@ -247,9 +248,11 @@ class _FakeRuntime:
     def generate_batch(
         self,
         *,
+        trajectory_ids: list[str] | None = None,
         input_ids: list[list[int]],
         sampling_params: dict[str, object] | None = None,
     ) -> list[Generation]:
+        self.last_trajectory_ids = trajectory_ids
         return [
             self.generate(input_ids=item, sampling_params=sampling_params)
             for item in input_ids
@@ -258,12 +261,13 @@ class _FakeRuntime:
     def train(self) -> _FakeTrainRuntime:
         return self._train
 
-    def shutdown(self) -> None:
+    def release_trajectories(self, trajectory_ids: list[str]) -> None:
+        self.released_trajectory_ids.append(list(trajectory_ids))
+
+    async def shutdown(self) -> None:
         self.shutdown_count += 1
         self._current_model = None
-        import asyncio
-
-        asyncio.run(self._train.shutdown())
+        await self._train.shutdown()
 
 
 class _FailingTokenizeRuntime(_FakeRuntime):
@@ -409,6 +413,7 @@ def test_gateway_http_flow() -> None:
                     "temperature": 0.5,
                     "top_p": 0.9,
                 }
+                assert runtime.last_trajectory_ids == [trajectory_id]
 
                 ended_trajectory = client.post(
                     "/end_trajectory",
@@ -687,8 +692,10 @@ def test_gateway_http_generate_after_end_trajectory_returns_conflict() -> None:
                         content="hello again",
                     ),
                 )
-                assert again.status_code == 200
-                assert again.json()["metadata"]["trajectory_id"] == trajectory_id
+                assert again.status_code == 400
+                assert again.json() == {
+                    "detail": f"trajectory {trajectory_id} is not active"
+                }
 
 
 def test_gateway_http_end_session_requires_completed_trajectories() -> None:

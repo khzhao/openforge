@@ -144,7 +144,6 @@ def _start_session_kwargs(model_name: str = "model-a") -> dict[str, object]:
                         "stop_token_ids": [],
                         "skip_special_tokens": True,
                         "no_stop_trim": False,
-                        "spaces_between_words": True,
                     },
                     "engine_groups": [
                         {
@@ -177,6 +176,8 @@ class _FakeRuntime:
         self._current_model: str | None = None
         self._train = _FakeTrainRuntime()
         self.last_sampling_params: dict[str, object] | None = None
+        self.last_trajectory_ids: list[str] | None = None
+        self.released_trajectory_ids: list[list[str]] = []
         self.shutdown_count = 0
 
     def list_models(self) -> list[dict[str, str]]:
@@ -237,9 +238,11 @@ class _FakeRuntime:
     def generate_batch(
         self,
         *,
+        trajectory_ids: list[str] | None = None,
         input_ids: list[list[int]],
         sampling_params: dict[str, object] | None = None,
     ) -> list[Generation]:
+        self.last_trajectory_ids = trajectory_ids
         return [
             self.generate(input_ids=item, sampling_params=sampling_params)
             for item in input_ids
@@ -248,10 +251,13 @@ class _FakeRuntime:
     def train(self) -> _FakeTrainRuntime:
         return self._train
 
-    def shutdown(self) -> None:
+    def release_trajectories(self, trajectory_ids: list[str]) -> None:
+        self.released_trajectory_ids.append(list(trajectory_ids))
+
+    async def shutdown(self) -> None:
         self.shutdown_count += 1
         self._current_model = None
-        asyncio.run(self._train.shutdown())
+        await self._train.shutdown()
 
 
 class _FailingTokenizeRuntime(_FakeRuntime):
@@ -348,6 +354,7 @@ def test_gateway_service_start_generate_and_end() -> None:
                 "temperature": 0.7,
                 "max_new_tokens": 32,
             }
+            assert runtime.last_trajectory_ids == [root.trajectory_id]
 
             child = await service.start_trajectory(session_id=session.session_id)
             child_turns = await store.list_turns(child.trajectory_id)
@@ -395,24 +402,18 @@ def test_gateway_service_start_generate_and_end() -> None:
     asyncio.run(run())
 
 
-def test_gateway_service_list_models_and_start_session_tracks_active_model() -> None:
+def test_gateway_service_current_session_tracks_active_model() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
         runtime = _FakeRuntime()
         service = Service(store=store, runtime=runtime)
 
-        assert await service.list_models() == {
-            "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
-            "active_model": None,
-        }
+        assert runtime.current_model() is None
         assert await service.current_session() is None
 
         created = await service.start_session(**_start_session_kwargs("model-a"))
 
-        assert await service.list_models() == {
-            "models": [{"id": "model-a", "tokenizer": "model-a-tokenizer"}],
-            "active_model": "model-a",
-        }
+        assert runtime.current_model() == "model-a"
         assert created.model == "model-a"
         assert await service.current_session() == created
 
@@ -558,11 +559,20 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
         generated_again = await service.generate(
             request=_chat_request(
                 session_id=session.session_id,
-                trajectory_id=root.trajectory_id,
+                trajectory_id="traj_missing",
                 content="again",
             ),
         )
-        assert generated_again.metadata["trajectory_id"] == root.trajectory_id
+        assert generated_again.metadata["trajectory_id"] == "traj_missing"
+
+        with expect_raises(Exception, f"trajectory {root.trajectory_id} is not active"):
+            await service.generate(
+                request=_chat_request(
+                    session_id=session.session_id,
+                    trajectory_id=root.trajectory_id,
+                    content="again",
+                ),
+            )
         await store.close()
 
     asyncio.run(run())
@@ -714,7 +724,7 @@ def main() -> int:
     return run_tests(
         [
             test_gateway_service_start_generate_and_end,
-            test_gateway_service_list_models_and_start_session_tracks_active_model,
+            test_gateway_service_current_session_tracks_active_model,
             test_gateway_service_start_session_rejects_second_active_session,
             test_gateway_service_releases_runtime_after_last_session_and_allows_switch,
             test_gateway_service_generate_unknown_session_raises,

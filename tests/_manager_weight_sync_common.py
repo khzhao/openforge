@@ -120,7 +120,6 @@ def build_cfg(
                     "stop_token_ids": [],
                     "skip_special_tokens": True,
                     "no_stop_trim": False,
-                    "spaces_between_words": True,
                 },
                 "engine_groups": [
                     {

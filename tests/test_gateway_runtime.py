@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import types
 from contextlib import ExitStack
 from unittest.mock import patch
@@ -110,7 +112,6 @@ def _runtime_config(
                         "stop_token_ids": [],
                         "skip_special_tokens": True,
                         "no_stop_trim": False,
-                        "spaces_between_words": True,
                     },
                     "engine_groups": [
                         {
@@ -275,12 +276,68 @@ def test_runtime_start_slot_uses_explicit_ray_address() -> None:
     assert state["address"] == "ray://cluster"
 
 
+def test_runtime_start_slot_leaves_nccl_defaults_to_train_and_rollout() -> None:
+    runtime = Runtime(cfg=_server_config())
+    state = {
+        "cumem": None,
+        "nvls": None,
+    }
+
+    def init(*, address: str, log_to_driver: bool) -> None:
+        return
+
+    def create_train_runtime(*args, **kwargs):
+        state["cumem"] = os.environ.get("NCCL_CUMEM_ENABLE")
+        state["nvls"] = os.environ.get("NCCL_NVLS_ENABLE")
+        return _FakeTrainRuntime()
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(ray, "is_initialized", lambda: False))
+        stack.enter_context(patch.object(ray, "init", init))
+        stack.enter_context(
+            patch.object(
+                ray_utils,
+                "create_placement_groups",
+                lambda cfg: {"actor": ("pg", [0], [0]), "rollout": ("pg", [1], [1])},
+            )
+        )
+        stack.enter_context(
+            patch.object(networking_utils, "get_host_ip", lambda: "127.0.0.1")
+        )
+        stack.enter_context(
+            patch.object(
+                networking_utils,
+                "get_free_port",
+                lambda start=20000: 20000,
+            )
+        )
+        stack.enter_context(
+            patch.object(runtime_api, "create_train_runtime", create_train_runtime)
+        )
+        stack.enter_context(
+            patch.object(
+                runtime_api,
+                "create_rollout_manager",
+                lambda *args, **kwargs: types.SimpleNamespace(
+                    shutdown=lambda: None,
+                    engine_workers=[],
+                    router_url="http://127.0.0.1:31000",
+                ),
+            )
+        )
+        stack.enter_context(patch.dict("os.environ", {}, clear=True))
+        runtime._start_slot(runtime._build_config(runtime_config=_runtime_config()))
+
+    assert state["cumem"] is None
+    assert state["nvls"] is None
+
+
 def test_runtime_shutdown_also_shuts_down_ray() -> None:
     runtime = Runtime(cfg=_server_config())
     state = {"slot_shutdown_called": False, "ray_shutdown_called": False}
 
     class FakeSlot:
-        def shutdown(self) -> None:
+        async def shutdown(self) -> None:
             state["slot_shutdown_called"] = True
 
     runtime._slot = FakeSlot()
@@ -295,7 +352,7 @@ def test_runtime_shutdown_also_shuts_down_ray() -> None:
                 lambda: state.__setitem__("ray_shutdown_called", True),
             )
         )
-        runtime.shutdown()
+        asyncio.run(runtime.shutdown())
 
     assert state["slot_shutdown_called"] is True
     assert state["ray_shutdown_called"] is True
@@ -371,6 +428,60 @@ def test_runtime_generate_forwards_input_ids() -> None:
     }
 
 
+def test_runtime_generate_batch_forwards_trajectory_ids() -> None:
+    runtime = Runtime(cfg=_server_config())
+    runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
+
+    captured: dict[str, object] = {}
+
+    class FakeRouter:
+        def generate(self, sampling_params, **kwargs):
+            captured["sampling_params"] = sampling_params
+            captured["kwargs"] = kwargs
+            return [
+                {
+                    "text": "reply-1",
+                    "output_ids": [11],
+                    "meta_info": {
+                        "output_token_logprobs": [[-0.1, 11, "a"]],
+                        "finish_reason": "stop",
+                        "weight_version": 3,
+                    },
+                },
+                {
+                    "text": "reply-2",
+                    "output_ids": [12],
+                    "meta_info": {
+                        "output_token_logprobs": [[-0.2, 12, "b"]],
+                        "finish_reason": "stop",
+                        "weight_version": 3,
+                    },
+                },
+            ]
+
+    class FakeRolloutManager:
+        def __init__(self) -> None:
+            self.router = FakeRouter()
+
+    class FakeSlot:
+        def __init__(self) -> None:
+            self.rollout_manager = FakeRolloutManager()
+
+    runtime._slot = FakeSlot()
+
+    generations = runtime.generate_batch(
+        trajectory_ids=["traj-1", "traj-2"],
+        input_ids=[[1], [2]],
+    )
+
+    assert [generation.rollout_model_version for generation in generations] == [3, 3]
+    assert captured["kwargs"] == {
+        "return_logprob": True,
+        "trajectory_ids": ["traj-1", "traj-2"],
+        "input_ids": [[1], [2]],
+    }
+
+
 def main() -> int:
     return run_tests(
         [
@@ -380,6 +491,7 @@ def main() -> int:
             test_runtime_shutdown_also_shuts_down_ray,
             test_runtime_tokenize_messages_propagates_chat_template_failure,
             test_runtime_generate_forwards_input_ids,
+            test_runtime_generate_batch_forwards_trajectory_ids,
         ]
     )
 

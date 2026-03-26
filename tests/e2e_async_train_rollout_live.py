@@ -134,7 +134,6 @@ def build_runtime_config(checkpoint_dir: Path) -> RuntimeConfig:
                     "stop_token_ids": [],
                     "skip_special_tokens": False,
                     "no_stop_trim": False,
-                    "spaces_between_words": True,
                 },
                 "engine_groups": [
                     {
@@ -348,7 +347,6 @@ def hold_trajectory(
         [ChatMessage.model_validate({"role": "user", "content": prompt})]
     )
     sampling_params = runtime._runtime_cfg.rollout.request.model_dump()
-    sampling_params.pop("spaces_between_words", None)
     payload = slot.rollout_manager.router.generate(
         sampling_params,
         input_ids=input_ids,
