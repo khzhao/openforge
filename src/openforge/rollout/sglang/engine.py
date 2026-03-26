@@ -6,7 +6,7 @@ from typing import Any
 
 from loguru import logger
 
-from openforge.rollout.types import EngineAddr, EngineSpec
+from openforge.rollout.sglang.types import EngineAddr, EngineSpec
 from openforge.utils.networking import get_free_port
 from openforge.utils.ray import get_current_ray_node_ip_address
 

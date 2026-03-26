@@ -7,9 +7,8 @@ from typing import Any
 
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
-from sglang_router.router_args import RouterArgs
 
-from openforge.rollout.types import EngineAddr, EngineSpec, RouterSpec
+from openforge.rollout.sglang.types import EngineAddr, EngineSpec
 
 
 def stop_spawn_resource_tracker() -> None:
@@ -63,13 +62,6 @@ def _coerce_server_args(server_args: ServerArgs | dict[str, Any]) -> ServerArgs:
     if isinstance(server_args, ServerArgs):
         return server_args
     return ServerArgs(**server_args)
-
-
-def _coerce_router_args(router_args: RouterArgs | dict[str, Any]) -> RouterArgs:
-    """Normalize a RouterArgs payload to a concrete RouterArgs object."""
-    if isinstance(router_args, RouterArgs):
-        return router_args
-    return RouterArgs(**router_args)
 
 
 def serve_sglang(server_args: ServerArgs | dict[str, Any]) -> None:
@@ -131,37 +123,3 @@ def generate_sglang_server_args(
     if engine_spec.sglang_server_overrides:
         server_args_payload.update(engine_spec.sglang_server_overrides)
     return ServerArgs(**server_args_payload)
-
-
-def generate_sglang_router_args(router_spec: RouterSpec) -> RouterArgs:
-    """Generate SGLang router arguments for a rollout engine group."""
-    router_args_payload = {
-        "worker_urls": router_spec.worker_urls,
-        "host": router_spec.router_ip,
-        "port": router_spec.router_port,
-        "policy": router_spec.policy,
-        "log_level": router_spec.log_level,
-        "request_timeout_secs": router_spec.request_timeout_secs,
-        "worker_startup_timeout_secs": router_spec.worker_startup_timeout_secs,
-        "worker_startup_check_interval": router_spec.worker_startup_check_interval,
-        "health_check_timeout_secs": router_spec.health_check_timeout_secs,
-        "health_check_interval_secs": router_spec.health_check_interval_secs,
-    }
-    return RouterArgs(**router_args_payload)
-
-
-def serve_sglang_router(router_args: RouterArgs | dict[str, Any]) -> None:
-    """Serve SGLang router."""
-    from sglang_router.launch_router import launch_router
-
-    router_args = _coerce_router_args(router_args)
-    router_args.host = str(router_args.host).strip("[]")
-    launch_router(router_args)
-
-
-def launch_sglang_router(router_args: RouterArgs | dict[str, Any]) -> BaseProcess:
-    """Launch a SGLang router process."""
-    ctx = multiprocessing.get_context("spawn")
-    process = ctx.Process(target=serve_sglang_router, args=(router_args,))
-    process.start()
-    return process
