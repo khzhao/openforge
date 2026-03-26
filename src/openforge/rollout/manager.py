@@ -12,6 +12,7 @@ from openforge.rollout.router.types import RouterSpec
 from openforge.rollout.sglang.engine import Engine
 from openforge.rollout.sglang.engine_group import EngineGroup
 from openforge.rollout.sglang.types import EngineAddr, EngineSpec
+from openforge.utils.nccl import apply_nccl_env_defaults
 from openforge.utils.networking import get_free_port, get_host_ip
 
 __all__ = ["RolloutManager"]
@@ -39,6 +40,7 @@ class RolloutManager:
         engine_addrs: dict[str, EngineAddr] | None = None,
         **router_kwargs: Any,
     ) -> None:
+        apply_nccl_env_defaults()
         self._engine_group = EngineGroup(self.cfg, self.placement_groups)
         self._engine_group.initialize(engine_addrs=engine_addrs)
 

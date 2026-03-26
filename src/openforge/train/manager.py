@@ -13,6 +13,7 @@ from openforge.rollout.router.client import RolloutRouterClient
 from openforge.train.fsdp2.weight_updater import WeightUpdater
 from openforge.train.types import TrainStepResult, TrainWorkerSpec, TrainWorkerState
 from openforge.train.worker import RayTrainWorker
+from openforge.utils.nccl import apply_nccl_env_defaults
 
 __all__ = ["TrainManager"]
 
@@ -34,6 +35,7 @@ class TrainManager:
         placement_group: dict[str, tuple[PlacementGroup, list[int], list[int]]],
     ) -> list[TrainWorkerState]:
         assert "actor" in placement_group, "actor placement group must be provided"
+        nccl_env_vars = apply_nccl_env_defaults()
 
         self.cfg = cfg
         self.master_addr = master_addr
@@ -72,6 +74,7 @@ class TrainManager:
                     placement_group=self.pg,
                     placement_group_bundle_index=bundle_index,
                 ),
+                runtime_env={"env_vars": dict(nccl_env_vars)},
             ).remote()
             for bundle_index in self.reordered_bundle_indices
         ]

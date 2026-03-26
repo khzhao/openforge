@@ -11,6 +11,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.sglang.engine import Engine
 from openforge.rollout.sglang.types import EngineAddr, EngineSpec
+from openforge.utils.nccl import apply_nccl_env_defaults
 from openforge.utils.ray import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 
 __all__ = [
@@ -72,6 +73,7 @@ def start_sglang_engines(
     engine_addrs: dict[str, EngineAddr] | None = None,
 ) -> dict[str, Any]:
     """Build engine launch specs from exact placements supplied by the caller."""
+    nccl_env_vars = apply_nccl_env_defaults()
     assert len(cfg.rollout.engine_groups) == 1, (
         "Only one engine group is supported for rollout right now"
     )
@@ -117,6 +119,7 @@ def start_sglang_engines(
             ),
             runtime_env={
                 "env_vars": {
+                    **dict(nccl_env_vars),
                     **dict.fromkeys(NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, "1"),
                 }
             },
