@@ -303,7 +303,6 @@ def main() -> int:
         raise ValueError("search-top-k must be > 0")
 
     artifact_dir = make_artifact_dir(args.artifact_dir, prefix="search-r1-ninja-")
-    gateway_target = active_state.load_active_gateway_target()
     runtime_config = (
         active_state.load_active_runtime_config()
         if args.runtime_config is None
@@ -388,7 +387,6 @@ def main() -> int:
     summary.update(
         run_train(
             search_agent,
-            gateway_target=gateway_target,
             runtime_config=runtime_config,
             inputs=inputs,
             group_size=args.group_size,

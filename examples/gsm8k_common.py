@@ -8,16 +8,13 @@ import os
 import random
 import socket
 import tempfile
-import time
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
-from uuid import uuid4
 
 import datasets
-import httpx
 
+import openforge.ninja as ninja
 from openforge import active_state
 from openforge.benchmarks.gsm8k import build_gsm8k_prompt, extract_gsm8k_ground_truth
 from openforge.gateway.types import RuntimeConfig
@@ -144,7 +141,6 @@ def parse_train_args() -> argparse.Namespace:
 def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
     """Load configs, dataset inputs, and metadata for GSM8K training."""
     artifact_dir = make_artifact_dir(args.artifact_dir, prefix="gsm8k-ninja-")
-    gateway_target = active_state.load_active_gateway_target()
     runtime_config = (
         active_state.load_active_runtime_config()
         if args.runtime_config is None
@@ -178,7 +174,7 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         "max_updates": args.max_updates,
         "model_path": runtime_config.model.model_name_or_path,
         "reward_method": "strict",
-        "samples_per_update": runtime_config.train.global_batch_size,
+        "global_batch_size": runtime_config.train.global_batch_size,
         "slurm_step_gpus": str(os.environ.get("SLURM_STEP_GPUS")),
         "total_epochs": args.total_epochs,
         "train_examples": len(train_examples),
@@ -191,7 +187,6 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         "train_sampling": sampling_params,
     }
     return {
-        "gateway_target": gateway_target,
         "runtime_config": runtime_config,
         "inputs": inputs,
         "sampling_params": sampling_params,
@@ -200,86 +195,9 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-@contextmanager
-def _active_session(
-    gateway_target: tuple[str, int],
-) -> Any:
-    host, port = gateway_target
-    base_url = f"http://{host}:{port}"
-    client = httpx.Client(base_url=base_url, timeout=300.0)
-    try:
-        response = client.get("/current_session")
-        if response.status_code == 404:
-            raise AssertionError("no active session")
-        response.raise_for_status()
-        payload = response.json()
-        assert isinstance(payload, dict)
-        yield client, str(payload["session_id"]), str(payload["model"])
-    finally:
-        client.close()
-
-
-def _parse_policy_version(value: object) -> int:
-    text = str(value)
-    return int(text) if text.isdigit() else 0
-
-
-def _wait_for_rollout_policy_version(
-    gateway_target: tuple[str, int],
-    *,
-    target_version: int,
-    timeout: float,
-) -> int:
-    deadline = time.monotonic() + timeout
-    probe_sampling = {
-        "temperature": 0.0,
-        "top_p": 1.0,
-        "top_k": -1,
-        "max_new_tokens": 8,
-    }
-    while time.monotonic() < deadline:
-        with _active_session(gateway_target) as (client, session_id, model_name):
-            trajectory_id = f"traj_{uuid4().hex}"
-            response = client.post(
-                "/v1/chat/completions",
-                json={
-                    "_openforge": {
-                        "session_id": session_id,
-                        "trajectory_id": trajectory_id,
-                        "group_id": None,
-                    },
-                    "model": model_name,
-                    "messages": [{"role": "user", "content": "Reply with OK."}],
-                    "temperature": probe_sampling["temperature"],
-                    "top_p": probe_sampling["top_p"],
-                    "max_completion_tokens": probe_sampling["max_new_tokens"],
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-            discard = client.post(
-                "/discard_trajectory",
-                json={
-                    "session_id": session_id,
-                    "trajectory_id": trajectory_id,
-                },
-            )
-            discard.raise_for_status()
-        version = _parse_policy_version(
-            payload.get("metadata", {}).get("rollout_model_version")
-        )
-        if version >= target_version:
-            return version
-        time.sleep(1.0)
-    raise TimeoutError(
-        f"rollout policy_version did not reach {target_version} within {timeout} seconds"
-    )
-
-
 def run_train(
     agent_func: Any,
     *,
-    gateway_target: tuple[str, int],
     runtime_config: RuntimeConfig,
     inputs: list[dict[str, Any]],
     group_size: int,
@@ -303,15 +221,15 @@ def run_train(
     if not inputs:
         raise ValueError("inputs must not be empty")
 
-    samples_per_update = int(runtime_config.train.global_batch_size)
-    if samples_per_update <= 0:
+    global_batch_size = int(runtime_config.train.global_batch_size)
+    if global_batch_size <= 0:
         raise ValueError("runtime_config.train.global_batch_size must be > 0")
-    if samples_per_update % group_size != 0:
+    if global_batch_size % group_size != 0:
         raise ValueError(
             "runtime_config.train.global_batch_size must be divisible by group_size"
         )
 
-    prompt_groups_per_update = samples_per_update // group_size
+    prompt_groups_per_update = global_batch_size // group_size
     rng = random.Random(seed)
     schedule: list[dict[str, Any]] = []
     for _epoch in range(epochs):
@@ -328,8 +246,7 @@ def run_train(
             f"have {len(schedule)}, need {prompt_groups_per_update}"
         )
 
-    initial_policy_version = agent_func.policy_version()
-    final_policy_version = initial_policy_version
+    final_policy_version: int | None = None
     last_update: dict[str, Any] | None = None
     train_updates: list[dict[str, Any]] = []
     consumed_groups = 0
@@ -337,40 +254,23 @@ def run_train(
         batch_inputs = schedule[
             consumed_groups : consumed_groups + prompt_groups_per_update
         ]
-        reward_groups = agent_func.sample(
-            requests=batch_inputs,
-            num_rollouts=group_size,
+        train_summary = ninja.train(
+            agent_func,
+            inputs=batch_inputs,
+            group_size=group_size,
             concurrency=parallelism,
             retries=retries,
+            wait_timeout=wait_timeout,
         )
-        if group_size == 1:
-            reward_groups = [[float(reward)] for reward in reward_groups]
-
-        group_results = [
-            {
-                "group_index": consumed_groups + index + 1,
-                "group_size": len(rewards),
-                "max_reward": max(rewards),
-                "mean_reward": sum(rewards) / len(rewards),
-                "rewards": rewards,
-            }
-            for index, rewards in enumerate(reward_groups)
-        ]
+        final_policy_version = int(train_summary["final_policy_version"])
         consumed_groups += prompt_groups_per_update
-        final_policy_version = _wait_for_rollout_policy_version(
-            gateway_target,
-            target_version=initial_policy_version + update_offset + 1,
-            timeout=wait_timeout,
-        )
-        rewards = [reward for group in group_results for reward in group["rewards"]]
         last_update = {
             "policy_version": final_policy_version,
-            "prompt_groups": len(group_results),
-            "samples": len(rewards),
-            "max_group_reward": max(group["max_reward"] for group in group_results),
-            "mean_group_reward": sum(group["mean_reward"] for group in group_results)
-            / len(group_results),
-            "sample_mean_reward": sum(rewards) / len(rewards),
+            "prompt_groups": int(train_summary["prompt_groups"]),
+            "samples": int(train_summary["samples"]),
+            "max_group_reward": float(train_summary["max_group_reward"]),
+            "mean_group_reward": float(train_summary["mean_group_reward"]),
+            "sample_mean_reward": float(train_summary["sample_mean_reward"]),
             "update_index": update_offset + 1,
         }
         train_updates.append(dict(last_update))
@@ -381,11 +281,11 @@ def run_train(
         "completed_updates": available_updates,
         "expected_updates": available_updates,
         "final_checkpoint": agent_func.save(),
-        "final_policy_version": final_policy_version,
+        "final_policy_version": 0 if final_policy_version is None else final_policy_version,
         "last_train_update": last_update,
         "train_updates": train_updates,
         "prompt_groups_per_update": prompt_groups_per_update,
-        "samples_per_update": samples_per_update,
+        "global_batch_size": global_batch_size,
         "train_groups": len(schedule),
         "train_groups_consumed": consumed_groups,
         "train_groups_dropped": len(schedule) - consumed_groups,

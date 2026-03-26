@@ -30,7 +30,6 @@ def main() -> int:
         )
 
     train_kwargs = {
-        "gateway_target": setup["gateway_target"],
         "runtime_config": setup["runtime_config"],
         "inputs": setup["inputs"],
         "group_size": args.group_size,

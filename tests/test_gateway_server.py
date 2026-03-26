@@ -190,11 +190,8 @@ class _FakeRuntime:
         self.released_trajectory_ids: list[list[str]] = []
         self.shutdown_count = 0
 
-    def list_models(self) -> list[dict[str, str]]:
-        return [
-            {"id": model_name, "tokenizer": f"{model_name}-tokenizer"}
-            for model_name in self._supported_models
-        ]
+    def list_models(self) -> list[str]:
+        return list(self._supported_models)
 
     def current_model(self) -> str | None:
         return self._current_model

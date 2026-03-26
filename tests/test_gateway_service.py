@@ -180,11 +180,8 @@ class _FakeRuntime:
         self.released_trajectory_ids: list[list[str]] = []
         self.shutdown_count = 0
 
-    def list_models(self) -> list[dict[str, str]]:
-        return [
-            {"id": model_name, "tokenizer": f"{model_name}-tokenizer"}
-            for model_name in self._supported_models
-        ]
+    def list_models(self) -> list[str]:
+        return list(self._supported_models)
 
     def current_model(self) -> str | None:
         return self._current_model
@@ -418,6 +415,37 @@ def test_gateway_service_current_session_tracks_active_model() -> None:
         assert await service.current_session() == created
 
         await store.close()
+
+    asyncio.run(run())
+
+
+def test_gateway_service_reports_trajectory_statuses() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+            runtime = _FakeRuntime()
+            service = Service(store=store, runtime=runtime)
+
+            session = await service.start_session(**_start_session_kwargs("model-a"))
+            trajectory = await service.start_trajectory(session_id=session.session_id)
+
+            active = await service.trajectory_statuses(
+                session_id=session.session_id,
+                trajectory_ids=[trajectory.trajectory_id],
+            )
+            assert active.trajectories[0].status == "active"
+
+            await service.end_trajectory(
+                session_id=session.session_id,
+                trajectory_id=trajectory.trajectory_id,
+                final_reward=1.0,
+            )
+            completed = await service.trajectory_statuses(
+                session_id=session.session_id,
+                trajectory_ids=[trajectory.trajectory_id],
+            )
+            assert completed.trajectories[0].status == "completed"
+            await store.close()
 
     asyncio.run(run())
 
@@ -725,6 +753,7 @@ def main() -> int:
         [
             test_gateway_service_start_generate_and_end,
             test_gateway_service_current_session_tracks_active_model,
+            test_gateway_service_reports_trajectory_statuses,
             test_gateway_service_start_session_rejects_second_active_session,
             test_gateway_service_releases_runtime_after_last_session_and_allows_switch,
             test_gateway_service_generate_unknown_session_raises,

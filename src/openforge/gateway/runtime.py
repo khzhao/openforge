@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,11 +25,6 @@ __all__ = [
 
 
 SUPPORTED_MODELS: list[str] = [
-    "Qwen/Qwen2.5-0.5B-Instruct",
-    "Qwen/Qwen2.5-3B-Instruct",
-]
-
-SUPPORTED_TOKENIZERS: list[str] = [
     "Qwen/Qwen2.5-0.5B-Instruct",
     "Qwen/Qwen2.5-3B-Instruct",
 ]
@@ -58,14 +54,14 @@ class Generation:
 class RuntimeSlot:
     """Active train+rollout runtime resources for the loaded model."""
 
-    train_manager: Any
+    train_runtime: Any
     rollout_manager: Any
 
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
         try:
             self.rollout_manager.shutdown()
         finally:
-            self.train_manager.shutdown()
+            await self.train_runtime.shutdown()
 
 
 class Runtime:
@@ -79,15 +75,8 @@ class Runtime:
         self._runtime_cfg: OpenForgeConfig | None = None
         self._slot: RuntimeSlot | None = None
 
-    def list_models(self) -> list[dict[str, str]]:
-        return [
-            {"id": model_id, "tokenizer": tokenizer}
-            for model_id, tokenizer in zip(
-                SUPPORTED_MODELS,
-                SUPPORTED_TOKENIZERS,
-                strict=True,
-            )
-        ]
+    def list_models(self) -> list[str]:
+        return list(SUPPORTED_MODELS)
 
     def current_model(self) -> str | None:
         return self._loaded_model
@@ -166,33 +155,29 @@ class Runtime:
             [int(token_id) for token_id in token_ids] for token_ids in token_batches
         ]
 
-    def generate(
-        self,
-        *,
-        input_ids: Sequence[int],
-        sampling_params: dict[str, Any] | None = None,
-    ) -> Generation:
-        payload = self._slot.rollout_manager.router.generate(
-            self._build_sampling_params(sampling_params),
-            return_logprob=True,
-            input_ids=[int(token_id) for token_id in input_ids],
-        )
-        return Generation(**self._parse_generation_info(payload))
-
     def generate_batch(
         self,
         *,
+        trajectory_ids: Sequence[str] | None = None,
         input_ids: Sequence[Sequence[int]],
         sampling_params: dict[str, Any] | None = None,
     ) -> list[Generation]:
         requests = [[int(token_id) for token_id in ids] for ids in input_ids]
         if not requests:
             return []
+        resolved_trajectory_ids = None
+        if trajectory_ids is not None:
+            resolved_trajectory_ids = [
+                str(trajectory_id) for trajectory_id in trajectory_ids
+            ]
+            if len(resolved_trajectory_ids) != len(requests):
+                raise ValueError("trajectory_ids must align with input_ids")
 
         sampling_payload = self._build_sampling_params(sampling_params)
         payload = self._slot.rollout_manager.router.generate(
             sampling_payload,
             return_logprob=True,
+            trajectory_ids=resolved_trajectory_ids,
             input_ids=requests,
         )
         if isinstance(payload, dict):
@@ -206,12 +191,21 @@ class Runtime:
             )
         return [Generation(**self._parse_generation_info(item)) for item in payloads]
 
-    def train_manager(self):
+    def train(self):
         slot = self._slot
         assert slot is not None
-        return slot.train_manager
+        return slot.train_runtime
 
-    def shutdown(self) -> None:
+    def release_trajectories(self, trajectory_ids: Sequence[str]) -> None:
+        if not trajectory_ids:
+            return
+        slot = self._slot
+        assert slot is not None
+        slot.rollout_manager.router.release_trajectories(
+            trajectory_ids=[str(trajectory_id) for trajectory_id in trajectory_ids]
+        )
+
+    async def shutdown(self) -> None:
         import ray
 
         from openforge.rollout.sglang.utils import stop_spawn_resource_tracker
@@ -224,7 +218,7 @@ class Runtime:
         self._tokenizer = None
         try:
             if slot is not None:
-                slot.shutdown()
+                await slot.shutdown()
         finally:
             if ray.is_initialized():
                 ray.shutdown()
@@ -235,13 +229,10 @@ class Runtime:
 
         from openforge.runtime import (
             create_rollout_manager,
-            create_train_manager,
-            register_rollout,
+            create_train_runtime,
         )
         from openforge.utils.networking import get_free_port, get_host_ip
         from openforge.utils.ray import create_placement_groups
-
-        os.environ.setdefault("NCCL_CUMEM_ENABLE", "0")
 
         started_ray = False
         if not ray.is_initialized():
@@ -252,10 +243,10 @@ class Runtime:
             started_ray = True
 
         placement_groups = create_placement_groups(cfg)
-        train_manager = None
+        train_runtime = None
         rollout_manager = None
         try:
-            train_manager = create_train_manager(
+            train_runtime = create_train_runtime(
                 cfg,
                 master_addr=get_host_ip(),
                 master_port=get_free_port(start=20000),
@@ -264,15 +255,15 @@ class Runtime:
             rollout_manager = create_rollout_manager(
                 cfg,
                 placement_groups,
-                log_level="warn",
+                log_level="warning",
             )
-            register_rollout(train_manager, rollout_manager)
+            train_runtime.register_rollout(rollout_manager.router_url)
         except Exception:
             try:
                 if rollout_manager is not None:
                     rollout_manager.shutdown()
-                if train_manager is not None:
-                    train_manager.shutdown()
+                if train_runtime is not None:
+                    asyncio.run(train_runtime.shutdown())
                 else:
                     ray.util.remove_placement_group(placement_groups["actor"][0])
             finally:
@@ -281,7 +272,7 @@ class Runtime:
             raise
 
         return RuntimeSlot(
-            train_manager=train_manager,
+            train_runtime=train_runtime,
             rollout_manager=rollout_manager,
         )
 

@@ -387,47 +387,6 @@ def test_runtime_tokenize_messages_propagates_chat_template_failure() -> None:
     assert tokenizer.encode_called is False
 
 
-def test_runtime_generate_forwards_input_ids() -> None:
-    runtime = Runtime(cfg=_server_config())
-    runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
-
-    captured: dict[str, object] = {}
-
-    class FakeRouter:
-        def generate(self, sampling_params, **kwargs):
-            captured["sampling_params"] = sampling_params
-            captured["kwargs"] = kwargs
-            return {
-                "text": "reply-3",
-                "output_ids": [11, 12],
-                "meta_info": {
-                    "output_token_logprobs": [[-0.1, 11, "a"], [-0.2, 12, "b"]],
-                    "finish_reason": "stop",
-                    "weight_version": 0,
-                },
-            }
-
-    class FakeRolloutManager:
-        def __init__(self) -> None:
-            self.router = FakeRouter()
-
-    class FakeSlot:
-        def __init__(self) -> None:
-            self.rollout_manager = FakeRolloutManager()
-
-    runtime._slot = FakeSlot()
-
-    generation = runtime.generate(input_ids=[1, 2, 3])
-
-    assert generation.token_ids == [11, 12]
-    assert generation.rollout_log_probs == [-0.1, -0.2]
-    assert generation.rollout_model_version == 0
-    assert captured["kwargs"] == {
-        "return_logprob": True,
-        "input_ids": [1, 2, 3],
-    }
-
-
 def test_runtime_generate_batch_forwards_trajectory_ids() -> None:
     runtime = Runtime(cfg=_server_config())
     runtime._runtime_cfg = runtime._build_config(runtime_config=_runtime_config())
@@ -490,7 +449,6 @@ def main() -> int:
             test_runtime_start_slot_uses_explicit_ray_address,
             test_runtime_shutdown_also_shuts_down_ray,
             test_runtime_tokenize_messages_propagates_chat_template_failure,
-            test_runtime_generate_forwards_input_ids,
             test_runtime_generate_batch_forwards_trajectory_ids,
         ]
     )

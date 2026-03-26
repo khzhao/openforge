@@ -12,6 +12,7 @@ from threading import Lock
 from typing import Iterator
 from unittest.mock import patch
 
+import httpx
 from openai.types.chat import ChatCompletion
 
 from _script_test_utils import expect_raises, install_test_stubs, run_tests
@@ -21,6 +22,7 @@ install_test_stubs()
 import openforge.ninja as ninja
 from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
+from openforge.gateway.types import RuntimeConfig, StartSessionRequest
 
 
 def _gateway_config() -> GatewayServerConfig:
@@ -29,6 +31,97 @@ def _gateway_config() -> GatewayServerConfig:
         gateway=GatewayConfig(host="127.0.0.1", port=8000),
         cluster=ClusterConfig(num_nodes=1, gpus_per_node=1, cpus_per_node=1),
     )
+
+
+def _runtime_config(*, global_batch_size: int) -> RuntimeConfig:
+    return StartSessionRequest.model_validate(
+        {
+            "runtime": {
+                "algo": {"name": "grpo", "kl_coef": 0.0},
+                "model": {
+                    "model_name_or_path": "model-a",
+                    "tokenizer_name_or_path": "model-a-tokenizer",
+                    "attn_implementation": "sdpa",
+                },
+                "train": {
+                    "backend": "fsdp2",
+                    "config": {
+                        "gradient_checkpointing": False,
+                        "reshard_after_forward": False,
+                        "mixed_precision": {
+                            "param_dtype": "bfloat16",
+                            "reduce_dtype": "float32",
+                        },
+                        "offload": {"mode": "none", "pin_memory": False},
+                        "amp": {
+                            "enabled": False,
+                            "precision": "float32",
+                            "use_grad_scaler": False,
+                        },
+                        "optim": {
+                            "lr": 1.0e-5,
+                            "adam_beta1": 0.9,
+                            "adam_beta2": 0.95,
+                            "adam_eps": 1.0e-8,
+                            "weight_decay": 0.0,
+                            "max_grad_norm": 1.0,
+                        },
+                        "scheduler": {
+                            "type": "constant",
+                            "warmup_steps": 1,
+                            "min_lr": 0.0,
+                            "num_cycles": 0.5,
+                        },
+                    },
+                    "global_batch_size": global_batch_size,
+                    "mini_batch_size": 1,
+                    "micro_batch_size": 1,
+                    "max_rollout_policy_lag": 0,
+                    "checkpoints": "/tmp/openforge-test-checkpoints",
+                    "cpus_per_worker": 1,
+                    "parallel": {
+                        "data_parallel_size": 1,
+                        "fsdp_parallel_size": 1,
+                        "pipeline_parallel_size": 1,
+                        "tensor_parallel_size": 1,
+                        "context_parallel_size": 1,
+                        "expert_parallel_size": 1,
+                    },
+                },
+                "rollout": {
+                    "backend": "sglang",
+                    "request": {
+                        "temperature": 0.0,
+                        "top_p": 1.0,
+                        "top_k": 1,
+                        "max_new_tokens": 8,
+                        "stop": [],
+                        "stop_token_ids": [],
+                        "skip_special_tokens": True,
+                        "no_stop_trim": False,
+                    },
+                    "engine_groups": [
+                        {
+                            "name": "regular",
+                            "worker_type": "regular",
+                            "replicas": 1,
+                            "num_gpus_per_replica": 1,
+                            "num_cpus_per_replica": 1,
+                            "parallelism": {
+                                "data_parallel_size": 1,
+                                "fsdp_parallel_size": 1,
+                                "pipeline_parallel_size": 1,
+                                "tensor_parallel_size": 1,
+                                "context_parallel_size": 1,
+                                "expert_parallel_size": 1,
+                            },
+                            "enable_memory_saver": False,
+                        }
+                    ],
+                },
+            },
+        }
+    ).runtime
 
 
 class _FakeResponse:
@@ -49,13 +142,19 @@ class _FakeGateway:
         self._lock = Lock()
         self.active_session_id = active_session_id
         self.active_trajectory_ids: set[str] = set()
+        self.trajectory_statuses: dict[str, str] = {}
         self.next_trajectory_index = 0
         self.generate_calls: list[dict[str, object]] = []
         self.finished: list[tuple[str, float]] = []
         self.failed: list[str] = []
+        self.policy_version = 0
         self.active_generates = 0
         self.max_active_generates = 0
         self.http_client_count = 0
+        self._read_errors: dict[tuple[str, str], int] = {}
+
+    def inject_read_error(self, method: str, path: str, *, count: int = 1) -> None:
+        self._read_errors[(method, path)] = count
 
     def handle(
         self,
@@ -63,6 +162,13 @@ class _FakeGateway:
         path: str,
         payload: dict[str, object] | None = None,
     ) -> _FakeResponse:
+        read_error_key = (method, path)
+        with self._lock:
+            remaining = self._read_errors.get(read_error_key, 0)
+            if remaining > 0:
+                self._read_errors[read_error_key] = remaining - 1
+                raise httpx.ReadError(f"transient read error for {method} {path}")
+
         if method == "GET" and path == "/current_session":
             if self.active_session_id is None:
                 return _FakeResponse(404, {"detail": "no active session"})
@@ -71,7 +177,7 @@ class _FakeGateway:
                 {
                     "session_id": self.active_session_id,
                     "model": "model-a",
-                    "policy_version": 0,
+                    "policy_version": self.policy_version,
                 },
             )
 
@@ -81,6 +187,7 @@ class _FakeGateway:
                 self.next_trajectory_index += 1
                 trajectory_id = f"traj_{self.next_trajectory_index}"
                 self.active_trajectory_ids.add(trajectory_id)
+                self.trajectory_statuses[trajectory_id] = "active"
             return _FakeResponse(
                 200,
                 {
@@ -102,6 +209,7 @@ class _FakeGateway:
                         self.next_trajectory_index += 1
                         trajectory_id = f"traj_{self.next_trajectory_index}"
                         self.active_trajectory_ids.add(trajectory_id)
+                        self.trajectory_statuses[trajectory_id] = "active"
                         group.append(trajectory_id)
                     trajectory_ids.append(group)
             return _FakeResponse(
@@ -126,6 +234,7 @@ class _FakeGateway:
                 sampling_params["max_new_tokens"] = payload["max_completion_tokens"]
             with self._lock:
                 self.active_trajectory_ids.add(trajectory_id)
+                self.trajectory_statuses[trajectory_id] = "active"
                 turn_index = sum(
                     1
                     for call in self.generate_calls
@@ -195,6 +304,7 @@ class _FakeGateway:
                     strict=True,
                 ):
                     self.active_trajectory_ids.remove(trajectory_id)
+                    self.trajectory_statuses[trajectory_id] = "completed"
                     self.finished.append((trajectory_id, reward))
             return _FakeResponse(
                 200,
@@ -211,6 +321,7 @@ class _FakeGateway:
             reward = float(payload["final_reward"])
             with self._lock:
                 self.active_trajectory_ids.remove(trajectory_id)
+                self.trajectory_statuses[trajectory_id] = "completed"
                 self.finished.append((trajectory_id, reward))
             return _FakeResponse(
                 200,
@@ -229,6 +340,7 @@ class _FakeGateway:
             with self._lock:
                 for trajectory_id in trajectory_ids:
                     self.active_trajectory_ids.remove(trajectory_id)
+                    self.trajectory_statuses[trajectory_id] = "failed"
                     self.failed.append(trajectory_id)
             return _FakeResponse(
                 200,
@@ -244,6 +356,7 @@ class _FakeGateway:
             trajectory_id = str(payload["trajectory_id"])
             with self._lock:
                 self.active_trajectory_ids.remove(trajectory_id)
+                self.trajectory_statuses[trajectory_id] = "failed"
                 self.failed.append(trajectory_id)
             return _FakeResponse(
                 200,
@@ -254,12 +367,42 @@ class _FakeGateway:
                 },
             )
 
+        if method == "POST" and path == "/trajectory_statuses":
+            assert payload is not None
+            trajectory_ids = [
+                str(trajectory_id) for trajectory_id in payload["trajectory_ids"]
+            ]
+            with self._lock:
+                trained_any = False
+                trajectories: list[dict[str, str]] = []
+                for trajectory_id in trajectory_ids:
+                    status = self.trajectory_statuses[trajectory_id]
+                    if status == "completed":
+                        status = "trained"
+                        self.trajectory_statuses[trajectory_id] = status
+                        trained_any = True
+                    trajectories.append(
+                        {
+                            "trajectory_id": trajectory_id,
+                            "status": status,
+                        }
+                    )
+                if trained_any:
+                    self.policy_version += 1
+            return _FakeResponse(
+                200,
+                {
+                    "session_id": self.active_session_id,
+                    "trajectories": trajectories,
+                },
+            )
+
         if method == "POST" and path == "/export_checkpoint":
             return _FakeResponse(
                 200,
                 {
                     "session_id": self.active_session_id,
-                    "policy_version": 0,
+                    "policy_version": self.policy_version,
                     "checkpoint_path": "/tmp/openforge-test-checkpoint",
                 },
             )
@@ -346,6 +489,15 @@ def test_register_requires_active_gateway_for_implicit_discovery() -> None:
                 agent(prompt="hello")
 
 
+def test_register_rejects_async_functions() -> None:
+    with expect_raises(TypeError, "does not support async functions"):
+
+        @ninja.agent(_gateway_config())
+        async def agent(prompt: str) -> float:
+            _ = prompt
+            return 1.0
+
+
 def test_register_discovers_active_gateway_from_shared_state() -> None:
     @ninja.agent()
     def agent(client, prompt: str) -> float:
@@ -373,6 +525,19 @@ def test_register_discovers_active_gateway_from_shared_state() -> None:
 
     assert reward == 1.0
     assert len(fake_gateway.generate_calls) == 1
+
+
+def test_register_validates_call_signature_before_connecting() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, *, prompt: str, ground_truth: str) -> float:
+        _ = (client, prompt, ground_truth)
+        return 1.0
+
+    with _patched_ninja() as fake_gateway:
+        with expect_raises(TypeError, "ground_truth"):
+            agent(prompt="hello")
+
+    assert fake_gateway.http_client_count == 0
 
 
 def test_register_routes_explicit_messages() -> None:
@@ -463,6 +628,23 @@ def test_register_marks_failed_trajectory_on_error() -> None:
     assert fake_gateway.finished == []
 
 
+def test_register_rejects_non_finite_reward_and_marks_trajectory_failed() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return float("nan")
+
+    with _patched_ninja() as fake_gateway:
+        with expect_raises(ValueError, "must be finite"):
+            agent(prompt="hello")
+
+    assert len(fake_gateway.failed) == 1
+    assert fake_gateway.finished == []
+
+
 def test_execute_runs_many_requests_by_default() -> None:
     @ninja.agent(_gateway_config())
     def agent(client, prompt: str) -> float:
@@ -495,7 +677,7 @@ def test_execute_uses_group_size_for_grouped_rollouts() -> None:
     with _patched_ninja() as fake_gateway:
         rewards = agent.sample(
             requests=[{"prompt": "hello"}, {"prompt": "goodbye"}],
-            num_rollouts=3,
+            group_size=3,
             concurrency=6,
         )
 
@@ -504,6 +686,25 @@ def test_execute_uses_group_size_for_grouped_rollouts() -> None:
     assert len({trajectory_id for trajectory_id, _ in fake_gateway.finished}) == 6
     assert fake_gateway.failed == []
     assert fake_gateway.max_active_generates > 1
+
+
+def test_execute_accepts_num_rollouts_alias() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return 1.0 if response.choices[0].message.content else -1.0
+
+    with _patched_ninja():
+        rewards = agent.sample(
+            requests=[{"prompt": "hello"}],
+            num_rollouts=2,
+            concurrency=2,
+        )
+
+    assert rewards == [[1.0, 1.0]]
 
 
 def test_execute_grouped_retries_only_failed_group() -> None:
@@ -527,7 +728,7 @@ def test_execute_grouped_retries_only_failed_group() -> None:
     with _patched_ninja() as fake_gateway:
         rewards = agent.sample(
             requests=[{"prompt": "hello"}, {"prompt": "goodbye"}],
-            num_rollouts=3,
+            group_size=3,
             concurrency=6,
             retries=1,
         )
@@ -542,6 +743,55 @@ def test_execute_grouped_retries_only_failed_group() -> None:
         if call["trajectory_id"] in set(fake_gateway.failed)
     }
     assert failed_prompts == {"hello"}
+
+
+def test_sample_validates_requests_before_connecting() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, *, prompt: str, ground_truth: str) -> float:
+        _ = (client, prompt, ground_truth)
+        return 1.0
+
+    with _patched_ninja() as fake_gateway:
+        with expect_raises(TypeError, r"request\[0\].*ground_truth"):
+            agent.sample(requests=[{"prompt": "hello"}])
+
+    assert fake_gateway.http_client_count == 0
+
+
+def test_register_retries_single_finish_on_read_error() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return 1.0
+
+    with _patched_ninja() as fake_gateway:
+        fake_gateway.inject_read_error("POST", "/end_trajectory")
+        reward = agent(prompt="hello")
+
+    assert reward == 1.0
+    assert len(fake_gateway.finished) == 1
+    assert fake_gateway.failed == []
+
+
+def test_register_retries_single_fail_on_read_error() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raise RuntimeError("boom")
+
+    with _patched_ninja() as fake_gateway:
+        fake_gateway.inject_read_error("POST", "/error_trajectory")
+        with expect_raises(RuntimeError, "boom"):
+            agent(prompt="hello")
+
+    assert len(fake_gateway.failed) == 1
+    assert fake_gateway.finished == []
 
 
 def test_agent_checkpoint_and_policy_accessors() -> None:
@@ -559,18 +809,139 @@ def test_agent_checkpoint_and_policy_accessors() -> None:
         }
 
 
+def test_module_train_runs_grouped_rollouts_and_waits_for_training() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return 1.0 if response.choices[0].message.content else -1.0
+
+    with _patched_ninja() as fake_gateway:
+        summary = ninja.train(
+            agent,
+            inputs=[{"prompt": "hello"}, {"prompt": "goodbye"}],
+            group_size=3,
+            concurrency=6,
+        )
+
+    assert summary == {
+        "group_size": 3,
+        "prompt_groups": 2,
+        "samples": 6,
+        "initial_policy_version": 0,
+        "final_policy_version": 1,
+        "max_group_reward": 1.0,
+        "mean_group_reward": 1.0,
+        "sample_mean_reward": 1.0,
+    }
+    assert len(fake_gateway.finished) == 6
+    assert all(
+        fake_gateway.trajectory_statuses[trajectory_id] == "trained"
+        for trajectory_id, _reward in fake_gateway.finished
+    )
+
+
+def test_module_train_validates_requests_before_connecting() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, *, prompt: str, ground_truth: str) -> float:
+        _ = (client, prompt, ground_truth)
+        return 1.0
+
+    with _patched_ninja() as fake_gateway:
+        with expect_raises(TypeError, r"request\[0\].*ground_truth"):
+            ninja.train(
+                agent,
+                inputs=[{"prompt": "hello"}],
+                group_size=2,
+            )
+
+    assert fake_gateway.http_client_count == 0
+
+
+def test_module_train_preflights_against_active_runtime_global_batch_size() -> None:
+    @ninja.agent()
+    def agent(client, prompt: str) -> float:
+        _ = (client, prompt)
+        return 1.0
+
+    runtime_config = _runtime_config(global_batch_size=2)
+
+    with _patched_ninja() as fake_gateway:
+        with patch.object(
+            ninja.active_state,
+            "load_active_gateway_target",
+            lambda: ("127.0.0.1", 8000),
+        ):
+            with patch.object(
+                ninja.active_state,
+                "load_active_runtime_config",
+                lambda: runtime_config,
+            ):
+                with expect_raises(ValueError, "active runtime global_batch_size"):
+                    ninja.train(
+                        agent,
+                        inputs=[{"prompt": "hello"}],
+                        group_size=3,
+                    )
+
+    assert fake_gateway.http_client_count == 0
+
+
+def test_module_train_skips_active_runtime_preflight_for_explicit_gateway() -> None:
+    explicit_gateway_config = GatewayServerConfig(
+        data=DataConfig(path=None),
+        gateway=GatewayConfig(host="127.0.0.1", port=8001),
+        cluster=ClusterConfig(num_nodes=1, gpus_per_node=1, cpus_per_node=1),
+    )
+
+    @ninja.agent(explicit_gateway_config)
+    def agent(client, prompt: str) -> float:
+        _ = (client, prompt)
+        return 1.0
+
+    runtime_config = _runtime_config(global_batch_size=2)
+
+    with _patched_ninja() as fake_gateway:
+        with patch.object(
+            ninja.active_state,
+            "load_active_runtime_config",
+            lambda: runtime_config,
+        ):
+            summary = ninja.train(
+                agent,
+                inputs=[{"prompt": "hello"}],
+                group_size=3,
+            )
+
+    assert summary["group_size"] == 3
+    assert fake_gateway.http_client_count == 1
+
+
 def main() -> int:
     return run_tests(
         [
             test_register_requires_active_session,
             test_register_requires_active_gateway_for_implicit_discovery,
+            test_register_rejects_async_functions,
             test_register_discovers_active_gateway_from_shared_state,
+            test_register_validates_call_signature_before_connecting,
             test_register_routes_explicit_messages,
             test_register_marks_failed_trajectory_on_error,
+            test_register_rejects_non_finite_reward_and_marks_trajectory_failed,
             test_execute_runs_many_requests_by_default,
             test_execute_uses_group_size_for_grouped_rollouts,
+            test_execute_accepts_num_rollouts_alias,
             test_execute_grouped_retries_only_failed_group,
+            test_sample_validates_requests_before_connecting,
+            test_register_retries_single_finish_on_read_error,
+            test_register_retries_single_fail_on_read_error,
             test_agent_checkpoint_and_policy_accessors,
+            test_module_train_runs_grouped_rollouts_and_waits_for_training,
+            test_module_train_validates_requests_before_connecting,
+            test_module_train_preflights_against_active_runtime_global_batch_size,
+            test_module_train_skips_active_runtime_preflight_for_explicit_gateway,
         ]
     )
 

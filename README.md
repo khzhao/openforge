@@ -36,7 +36,8 @@ contract:
 
 1. Start a gateway from YAML.
 2. Start a training session from YAML.
-3. Run a Python agent script with `@ninja.agent()`.
+3. Define a Python agent with `@ninja.agent()`.
+4. Run it directly or train it with `ninja.train(...)`.
 
 That is the catch phrase of the repo in practice: **train the agent, not the
 glue code.**
@@ -56,7 +57,23 @@ def agent(client, *, prompt: str, target: str) -> float:
     )
     reward = ...
     return reward
+
+summary = ninja.train(
+    agent,
+    inputs=[{"prompt": "2 + 2 = ?", "target": "4"}],
+    group_size=8,
+)
 ```
+
+The important API points are:
+
+- `agent(...)`
+  Runs one trajectory through the active gateway and returns one reward.
+- `agent.sample(requests=[...], group_size=N)`
+  Collects one or more stored trajectories without waiting for a train update.
+- `ninja.train(agent, inputs=[...], group_size=N)`
+  Runs grouped trajectories, stores them, and waits for those trajectories to be
+  trained before returning a summary.
 
 If a gateway and session are active, `@ninja.agent()` discovers them
 automatically. If you need to target a different gateway explicitly, you can
@@ -74,7 +91,8 @@ The active environment is recorded on the local machine at:
 - **One public CLI.** OpenForge installs a single user-facing command,
   `openforge`, for gateway and session lifecycle.
 - **Small Python surface.** If you can write a reward function around
-  `client.chat.completions.create(...)`, you can train with OpenForge.
+  `client.chat.completions.create(...)`, you can train with OpenForge through
+  `ninja.train(...)`.
 - **Shared local discovery.** Once a gateway and session are active, Ninja
   scripts attach automatically. You do not need to thread gateway/session flags
   through every example.
@@ -87,7 +105,7 @@ The active environment is recorded on the local machine at:
 | Layer | What it does |
 | --- | --- |
 | `gateway` | Runs the FastAPI control plane, owns the live runtime, exposes `/health`, `/info`, session lifecycle, generation, and checkpoint export. |
-| `ninja` | The user-facing Python API for agent code. It registers agents and routes `generate` calls through the active gateway/session. |
+| `ninja` | The user-facing Python API for agent code. It registers agents, routes OpenAI-style chat-completions calls through the active gateway/session, and exposes grouped training via `ninja.train(...)`. |
 | `active_state` | Stores the active gateway and active session on the local machine so scripts can auto-discover the current environment. |
 | `configs` | Pydantic-backed YAML models for gateway, cluster, model, rollout, and training setup. |
 | `data` | SQLite-backed storage for sessions and trajectories. |
@@ -115,7 +133,13 @@ uv pip install -r requirements.txt
 
 `uv pip install -r requirements.txt` is required for the runtime stack.
 
-OpenForge exposes one CLI module:
+OpenForge exposes one CLI:
+
+```bash
+openforge --help
+```
+
+The module entrypoint still works too:
 
 ```bash
 python -m openforge.cli.main --help
@@ -203,7 +227,7 @@ PYTHONUNBUFFERED=1 python examples/train_gsm8k_ninja.py \
 ```
 
 The training script attaches to the active gateway and active session
-automatically.
+automatically and uses `ninja.train(...)` under the hood.
 
 `session start` is the heavy step. It creates or attaches to Ray, allocates the
 runtime, and may take a few minutes on a cold start.
@@ -253,11 +277,15 @@ bash examples/run_search_r1_ninja_train.sh \
 - `src/openforge/gateway/runtime.py`
   Runtime ownership for the loaded model and rollout/train managers.
 - `src/openforge/ninja/__init__.py`
-  Agent registration, request execution, and active-gateway discovery.
+  Agent registration, request execution, grouped training, and active-gateway
+  discovery.
 - `src/openforge/active_state.py`
   Machine-local shared state for the active gateway/session.
 - `examples/train_gsm8k_ninja.py`
   Minimal end-to-end Ninja training example.
+- `examples/gsm8k_common.py`
+  Shared dataset preparation and the outer training schedule used by the GSM8K
+  and Search-R1 examples.
 - `examples/run_gsm8k_ninja_train.sh`
   Convenience wrapper for the full GSM8K flow.
 - `examples/train_search_r1_ninja.py`
@@ -274,6 +302,7 @@ ruff format src tests examples
 ruff check src tests examples
 python tests/test_active_state.py
 python tests/test_cli.py
+python tests/test_gateway_service.py
 python tests/test_ninja.py
 ```
 

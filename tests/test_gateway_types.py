@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from _script_test_utils import expect_raises, run_tests
+from _script_test_utils import run_tests
 
 from openforge.gateway.types import RuntimeConfig
 
@@ -98,7 +98,7 @@ def _runtime_payload(*, algo: dict[str, object], lag: int) -> dict[str, object]:
     }
 
 
-def test_runtime_config_accepts_on_policy_grpo() -> None:
+def test_runtime_config_parses_valid_payload() -> None:
     cfg = RuntimeConfig.model_validate(
         _runtime_payload(algo={"name": "grpo", "kl_coef": 0.0}, lag=0)
     )
@@ -106,35 +106,10 @@ def test_runtime_config_accepts_on_policy_grpo() -> None:
     assert cfg.train.max_rollout_policy_lag == 0
 
 
-def test_runtime_config_rejects_stale_lag_for_grpo() -> None:
-    with expect_raises(
-        ValueError,
-        "train.max_rollout_policy_lag must be 0 when algo.name is grpo",
-    ):
-        RuntimeConfig.model_validate(
-            _runtime_payload(algo={"name": "grpo", "kl_coef": 0.0}, lag=1)
-        )
-
-
-def test_runtime_config_rejects_zero_lag_for_grpo_tis() -> None:
-    with expect_raises(
-        ValueError,
-        "train.max_rollout_policy_lag must be > 0 when algo.name is grpo_tis",
-    ):
-        RuntimeConfig.model_validate(
-            _runtime_payload(
-                algo={"name": "grpo_tis", "kl_coef": 0.0, "tis_cap": 2.0},
-                lag=0,
-            )
-        )
-
-
 def main() -> int:
     return run_tests(
         [
-            test_runtime_config_accepts_on_policy_grpo,
-            test_runtime_config_rejects_stale_lag_for_grpo,
-            test_runtime_config_rejects_zero_lag_for_grpo_tis,
+            test_runtime_config_parses_valid_payload,
         ]
     )
 

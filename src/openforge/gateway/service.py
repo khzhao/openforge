@@ -7,12 +7,13 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from uuid import uuid4
 
 from openforge.data import OpenForgeStore, Session, Trajectory, Turn
 from openforge.gateway.runtime import Generation, Runtime
-from openforge.gateway.train_loop import TrainLoop
 from openforge.gateway.types import (
     AssistantMessage,
     AssistantToolCall,
@@ -32,6 +33,8 @@ from openforge.gateway.types import (
     StartSessionResponse,
     StartTrajectoryGroupsResponse,
     StartTrajectoryResponse,
+    TrajectoryStatusesResponse,
+    TrajectoryStatusInfo,
 )
 
 __all__ = ["Service"]
@@ -49,12 +52,6 @@ class _PendingGenerate:
     sampling_params: dict[str, object]
     future: asyncio.Future[ChatCompletionResponse]
     batch_key: tuple[str, str, str]
-
-
-@dataclass(slots=True)
-class _PendingFinish:
-    trajectory: Trajectory
-    turns: list[Turn]
 
 
 class Service:
@@ -78,30 +75,17 @@ class Service:
         self._active_session_id: str | None = None
         self._active_session_model_name: str | None = None
         self._active_trajectories: dict[str, Trajectory] = {}
-        self._active_turns: dict[str, list[Turn]] = {}
-        self._train_loop: TrainLoop | None = None
-        self._generate_parallelism = 1
+        self._active_turn_counts: dict[str, int] = {}
         self._generate_lock = asyncio.Lock()
-        self._generate_workers = 0
+        self._generate_task: asyncio.Task[None] | None = None
         self._pending_generates: list[_PendingGenerate] = []
-        self._finish_lock = asyncio.Lock()
-        self._finish_task: asyncio.Task[None] | None = None
-        self._pending_finishes: list[_PendingFinish] = []
-
-    async def list_models(self) -> dict[str, object]:
-        return {
-            "models": self.runtime.list_models(),
-            "active_model": self.runtime.current_model(),
-        }
 
     async def current_session(self) -> StartSessionResponse | None:
         session_id = self._active_session_id
         if session_id is None:
             return None
 
-        policy_version = (
-            0 if self._train_loop is None else self._train_loop.policy_version
-        )
+        policy_version = self.runtime.train().policy_version
         model_name = self._active_session_model_name
         if model_name is not None:
             return StartSessionResponse(
@@ -119,6 +103,38 @@ class Service:
             policy_version=policy_version,
         )
 
+    async def trajectory_statuses(
+        self,
+        *,
+        session_id: str,
+        trajectory_ids: list[str],
+    ) -> TrajectoryStatusesResponse:
+        await self._require_active_session(session_id)
+        if not trajectory_ids:
+            return TrajectoryStatusesResponse(session_id=session_id, trajectories=[])
+
+        stored = {
+            trajectory.trajectory_id: trajectory
+            for trajectory in await self.store.get_trajectories(trajectory_ids)
+        }
+        trajectories: list[TrajectoryStatusInfo] = []
+        for trajectory_id in trajectory_ids:
+            trajectory = self._active_trajectories.get(trajectory_id)
+            if trajectory is None:
+                trajectory = stored.get(trajectory_id)
+            if trajectory is None or trajectory.session_id != session_id:
+                raise Exception(f"unknown trajectory_id: {trajectory_id}")
+            trajectories.append(
+                TrajectoryStatusInfo(
+                    trajectory_id=trajectory_id,
+                    status=trajectory.status,
+                )
+            )
+        return TrajectoryStatusesResponse(
+            session_id=session_id,
+            trajectories=trajectories,
+        )
+
     async def start_session(
         self,
         *,
@@ -129,8 +145,8 @@ class Service:
 
         model_name = runtime_config.model.model_name_or_path
         if self.runtime.current_model() not in (None, model_name):
-            await asyncio.to_thread(self.runtime.shutdown)
-        resolved_model_name = await asyncio.to_thread(
+            await self.runtime.shutdown()
+        resolved_model_name = await self._run_blocking_call(
             self.runtime.start,
             runtime_config=runtime_config,
         )
@@ -142,16 +158,11 @@ class Service:
         self._active_session_id = session_id
         self._active_session_model_name = resolved_model_name
         self._active_trajectories = {}
-        self._active_turns = {}
-        self._generate_parallelism = runtime_config.rollout.num_engine_replicas
-        self._generate_workers = 0
-        assert self._train_loop is None
-        self._train_loop = TrainLoop(
+        self._active_turn_counts = {}
+        self.runtime.train().start_session(
             session_id=session_id,
             store=self.store,
-            train_manager=self.runtime.train_manager(),
         )
-        self._train_loop.start()
         return StartSessionResponse(
             session_id=session_id,
             model=resolved_model_name,
@@ -165,18 +176,17 @@ class Service:
         group_id: str | None = None,
     ) -> StartTrajectoryResponse:
         await self._require_active_session(session_id)
-        trajectory_id = self._new_id("traj")
-        self._active_trajectories[trajectory_id] = Trajectory(
-            trajectory_id=trajectory_id,
+        trajectory = Trajectory(
+            trajectory_id=self._new_id("traj"),
             session_id=session_id,
             group_id=group_id,
             status="active",
             expected_group_size=1,
         )
-        self._active_turns[trajectory_id] = []
+        await self._record_active_trajectories([trajectory])
         return StartTrajectoryResponse(
+            trajectory_id=trajectory.trajectory_id,
             session_id=session_id,
-            trajectory_id=trajectory_id,
             group_id=group_id,
         )
 
@@ -196,21 +206,23 @@ class Service:
             )
 
         trajectory_ids_per_group: list[list[str]] = []
+        trajectories_to_create: list[Trajectory] = []
         for count, group_id in zip(counts, group_ids, strict=True):
             if count <= 0:
                 raise Exception("count must be >= 1")
             trajectory_ids = [self._new_id("traj") for _ in range(count)]
             for trajectory_id in trajectory_ids:
-                trajectory = Trajectory(
-                    trajectory_id=trajectory_id,
-                    session_id=session_id,
-                    group_id=group_id,
-                    status="active",
-                    expected_group_size=count,
+                trajectories_to_create.append(
+                    Trajectory(
+                        trajectory_id=trajectory_id,
+                        session_id=session_id,
+                        group_id=group_id,
+                        status="active",
+                        expected_group_size=count,
+                    )
                 )
-                self._active_trajectories[trajectory_id] = trajectory
-                self._active_turns[trajectory_id] = []
             trajectory_ids_per_group.append(trajectory_ids)
+        await self._record_active_trajectories(trajectories_to_create)
         return StartTrajectoryGroupsResponse(
             session_id=session_id,
             trajectory_ids=trajectory_ids_per_group,
@@ -260,7 +272,7 @@ class Service:
         )
         async with self._generate_lock:
             self._pending_generates.append(pending)
-            self._ensure_generate_workers_locked()
+            self._ensure_generate_task_locked()
         return await future
 
     async def end_trajectory(
@@ -272,8 +284,8 @@ class Service:
     ) -> EndTrajectoryResponse:
         await self.end_trajectories(
             session_id=session_id,
-            trajectory_ids=[trajectory_id],
             final_rewards=[final_reward],
+            trajectory_ids=[trajectory_id],
         )
         return EndTrajectoryResponse(
             session_id=session_id,
@@ -435,16 +447,12 @@ class Service:
         session_id: str,
     ) -> ExportCheckpointResponse:
         await self._require_active_session(session_id)
-        await self._drain_finished_trajectories()
         if self._active_trajectories:
             raise Exception(
                 "all trajectories must be ended before exporting a checkpoint"
             )
-        assert self._train_loop is not None, "train loop must exist for active session"
-        policy_version = self._train_loop.policy_version
-        checkpoint_path = await asyncio.to_thread(
-            self.runtime.train_manager().export_checkpoint,
-            policy_version=policy_version,
+        policy_version, checkpoint_path = await self._run_blocking_call(
+            self.runtime.train().export_checkpoint,
         )
         return ExportCheckpointResponse(
             session_id=session_id,
@@ -458,7 +466,6 @@ class Service:
         session_id: str,
     ) -> EndSessionResponse:
         await self._require_active_session(session_id)
-        await self._drain_finished_trajectories()
         if any(
             trajectory.session_id == session_id
             for trajectory in self._active_trajectories.values()
@@ -468,47 +475,31 @@ class Service:
         self._active_session_id = None
         self._active_session_model_name = None
         self._active_trajectories = {}
-        self._active_turns = {}
-        if self._train_loop is not None:
-            await self._train_loop.stop()
-            while await self._train_loop.train_once():
-                pass
-            self._train_loop = None
-        await asyncio.to_thread(self.runtime.shutdown)
+        self._active_turn_counts = {}
+        await self.runtime.train().end_session()
+        await self.runtime.shutdown()
 
         return EndSessionResponse(session_id=session_id, status="completed")
 
     async def shutdown(self) -> None:
-        await self._drain_finished_trajectories()
-        if self._train_loop is not None:
-            await self._train_loop.stop()
-            self._train_loop = None
         self._active_session_id = None
         self._active_session_model_name = None
         self._active_trajectories = {}
-        self._active_turns = {}
-        await asyncio.to_thread(self.runtime.shutdown)
+        self._active_turn_counts = {}
+        await self.runtime.shutdown()
 
-    def _ensure_generate_workers_locked(self) -> None:
-        while (
-            self._pending_generates
-            and self._generate_workers < self._generate_parallelism
-        ):
-            self._generate_workers += 1
-            asyncio.create_task(self._flush_generate_queue())
-
-    def _ensure_finish_task_locked(self) -> None:
-        task = self._finish_task
+    def _ensure_generate_task_locked(self) -> None:
+        task = self._generate_task
         if task is not None and not task.done():
             return
-        self._finish_task = asyncio.create_task(self._flush_finish_queue())
+        self._generate_task = asyncio.create_task(self._flush_generate_queue())
 
     async def _flush_generate_queue(self) -> None:
         await asyncio.sleep(self.GENERATE_BATCH_MAX_WAIT_SECONDS)
         while True:
             async with self._generate_lock:
                 if not self._pending_generates:
-                    self._generate_workers -= 1
+                    self._generate_task = None
                     return
                 batch = self._take_generate_batch_locked()
             try:
@@ -532,20 +523,6 @@ class Service:
                 for request, output in zip(batch, outputs, strict=True):
                     if not request.future.done():
                         request.future.set_result(output)
-
-    async def _flush_finish_queue(self) -> None:
-        await asyncio.sleep(self.GENERATE_BATCH_MAX_WAIT_SECONDS)
-        while True:
-            async with self._finish_lock:
-                if not self._pending_finishes:
-                    self._finish_task = None
-                    return
-                batch = self._pending_finishes
-                self._pending_finishes = []
-            await self.store.create_trajectories([item.trajectory for item in batch])
-            await self.store.append_turns(
-                [turn for item in batch for turn in item.turns]
-            )
 
     def _take_generate_batch_locked(self) -> list[_PendingGenerate]:
         assert self._pending_generates
@@ -574,27 +551,45 @@ class Service:
         sampling_params: dict[str, object],
     ) -> list[ChatCompletionResponse]:
         session = await self._require_active_session(session_id)
+        new_trajectories: list[Trajectory] = []
+        missing_trajectory_ids = [
+            trajectory_id
+            for trajectory_id in trajectory_ids
+            if trajectory_id not in self._active_trajectories
+        ]
+        stored_trajectories = {
+            trajectory.trajectory_id: trajectory
+            for trajectory in await self.store.get_trajectories(missing_trajectory_ids)
+        }
         for trajectory_id, group_id in zip(trajectory_ids, group_ids, strict=True):
             trajectory = self._active_trajectories.get(trajectory_id)
             if trajectory is None:
-                self._active_trajectories[trajectory_id] = Trajectory(
-                    trajectory_id=trajectory_id,
-                    session_id=session_id,
-                    group_id=group_id,
-                    status="active",
-                    expected_group_size=1,
+                stored_trajectory = stored_trajectories.get(trajectory_id)
+                if stored_trajectory is not None:
+                    if stored_trajectory.session_id != session_id:
+                        raise Exception(f"unknown trajectory_id: {trajectory_id}")
+                    raise Exception(f"trajectory {trajectory_id} is not active")
+                new_trajectories.append(
+                    Trajectory(
+                        trajectory_id=trajectory_id,
+                        session_id=session_id,
+                        group_id=group_id,
+                        status="active",
+                        expected_group_size=1,
+                    )
                 )
-                self._active_turns[trajectory_id] = []
                 continue
             if trajectory.session_id != session_id:
                 raise Exception(f"unknown trajectory_id: {trajectory_id}")
             if trajectory.status != "active":
                 raise Exception(f"trajectory {trajectory_id} is not active")
+        await self._record_active_trajectories(new_trajectories)
         turn_indexes = [
-            len(self._active_turns[trajectory_id]) for trajectory_id in trajectory_ids
+            self._active_turn_counts[trajectory_id] for trajectory_id in trajectory_ids
         ]
-        input_ids_per_item, generations = await asyncio.to_thread(
+        input_ids_per_item, generations = await self._run_blocking_call(
             self._tokenize_and_generate_batch,
+            trajectory_ids,
             messages_per_item,
             tools,
             sampling_params,
@@ -627,8 +622,9 @@ class Service:
                     generation=generation,
                 )
             )
-        for trajectory_id, turn in zip(trajectory_ids, turns_to_append, strict=True):
-            self._active_turns[trajectory_id].append(turn)
+        await self.store.append_turns(turns_to_append)
+        for trajectory_id in trajectory_ids:
+            self._active_turn_counts[trajectory_id] += 1
         return outputs
 
     def _tokenize_messages_batch_deduped(
@@ -657,6 +653,7 @@ class Service:
 
     def _tokenize_and_generate_batch(
         self,
+        trajectory_ids: list[str],
         message_batches: list[list[ChatCompletionMessage]],
         tools: list[ChatCompletionTool] | None,
         sampling_params: dict[str, object],
@@ -666,10 +663,19 @@ class Service:
             tools,
         )
         generations = self.runtime.generate_batch(
+            trajectory_ids=trajectory_ids,
             input_ids=input_ids_per_item,
             sampling_params=sampling_params,
         )
         return input_ids_per_item, generations
+
+    async def _run_blocking_call(self, fn: object, /, *args: object, **kwargs: object):
+        loop = asyncio.get_running_loop()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return await loop.run_in_executor(
+                executor,
+                partial(fn, *args, **kwargs),
+            )
 
     @staticmethod
     def _messages_key(messages: list[ChatCompletionMessage]) -> str:
@@ -765,32 +771,29 @@ class Service:
         }
 
     async def _finish_trajectories(self, trajectories: list[Trajectory]) -> None:
-        pending: list[_PendingFinish] = []
+        if not trajectories:
+            return
         for trajectory in trajectories:
-            pending.append(
-                _PendingFinish(
-                    trajectory=trajectory,
-                    turns=self._active_turns.pop(trajectory.trajectory_id),
-                )
-            )
-            del self._active_trajectories[trajectory.trajectory_id]
-        async with self._finish_lock:
-            self._pending_finishes.extend(pending)
-            self._ensure_finish_task_locked()
+            await self.store.update_trajectory(trajectory)
+        # This is a short control-plane release call. Keeping it inline avoids
+        # executor hangs in short-lived async test runners.
+        self.runtime.release_trajectories(
+            [trajectory.trajectory_id for trajectory in trajectories],
+        )
+        for trajectory in trajectories:
+            self._active_turn_counts.pop(trajectory.trajectory_id, None)
+            self._active_trajectories.pop(trajectory.trajectory_id, None)
 
-    async def _drain_finished_trajectories(self) -> None:
-        while True:
-            async with self._finish_lock:
-                task = self._finish_task
-                pending = bool(self._pending_finishes)
-            if task is None:
-                if not pending:
-                    return
-                async with self._finish_lock:
-                    self._ensure_finish_task_locked()
-                    task = self._finish_task
-            assert task is not None
-            await task
+    async def _record_active_trajectories(
+        self,
+        trajectories: list[Trajectory],
+    ) -> None:
+        if not trajectories:
+            return
+        await self.store.create_trajectories(trajectories)
+        for trajectory in trajectories:
+            self._active_trajectories[trajectory.trajectory_id] = trajectory
+            self._active_turn_counts[trajectory.trajectory_id] = 0
 
     @staticmethod
     def _build_generate_response(

@@ -68,7 +68,6 @@ rollout:
     stop_token_ids: []
     skip_special_tokens: true
     no_stop_trim: false
-    spaces_between_words: true
   engine_groups:
     - name: regular
       worker_type: regular

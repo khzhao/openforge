@@ -25,7 +25,6 @@ class SGLangRequestConfig(OpenForgeBaseModel):
     stop_token_ids: list[int]
     skip_special_tokens: bool
     no_stop_trim: bool
-    spaces_between_words: bool
 
 
 class RolloutEngineGroupConfig(OpenForgeBaseModel):

@@ -36,6 +36,8 @@ from openforge.gateway.types import (
     StartTrajectoryGroupsResponse,
     StartTrajectoryRequest,
     StartTrajectoryResponse,
+    TrajectoryStatusesRequest,
+    TrajectoryStatusesResponse,
 )
 
 __all__ = ["create_app"]
@@ -91,9 +93,8 @@ def create_app(
 
     @app.get("/v1/models", response_model=ModelListResponse)
     async def list_models() -> ModelListResponse:
-        payload = await service.list_models()
         return ModelListResponse(
-            data=[ModelCard(id=str(model["id"])) for model in payload["models"]]
+            data=[ModelCard(id=model_id) for model_id in runtime.list_models()]
         )
 
     @app.get("/current_session", response_model=StartSessionResponse)
@@ -102,6 +103,17 @@ def create_app(
         if session is None:
             raise HTTPException(status_code=404, detail="no active session")
         return session
+
+    @app.post("/trajectory_statuses", response_model=TrajectoryStatusesResponse)
+    async def trajectory_statuses(
+        payload: TrajectoryStatusesRequest,
+    ) -> TrajectoryStatusesResponse:
+        return await _invoke(
+            service.trajectory_statuses(
+                session_id=payload.session_id,
+                trajectory_ids=payload.trajectory_ids,
+            )
+        )
 
     @app.post("/start_session", response_model=StartSessionResponse)
     async def start_session(payload: StartSessionRequest) -> StartSessionResponse:

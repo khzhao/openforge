@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from functools import update_wrapper
 from typing import Any, Callable
 from uuid import uuid4
@@ -20,10 +22,11 @@ from openforge.configs.models import GatewayServerConfig
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-__all__ = ["agent"]
+__all__ = ["agent", "train"]
 
 _AUTO_CONCURRENCY_CAP = 128
 _AUTO_CONCURRENCY_FLOOR = 32
+_TRAIN_STATUS_POLL_INTERVAL_SECONDS = 0.25
 
 
 def _sleep_before_retry(attempt: int) -> None:
@@ -91,6 +94,28 @@ def _function_expects_client(func: Callable[..., Any]) -> bool:
     return first.name == "client"
 
 
+def _validate_registered_function(func: Callable[..., Any]) -> None:
+    if inspect.iscoroutinefunction(func):
+        raise TypeError(
+            "ninja.agent does not support async functions; "
+            "define a synchronous agent function instead"
+        )
+
+
+def _coerce_reward(value: Any, *, context: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{context} must be a finite real number, got bool")
+    try:
+        reward = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"{context} must be a finite real number, got {type(value).__name__}"
+        ) from exc
+    if not math.isfinite(reward):
+        raise ValueError(f"{context} must be finite, got {reward!r}")
+    return reward
+
+
 def _normalize_requests(
     *,
     args: tuple[Any, ...],
@@ -108,6 +133,14 @@ def _normalize_requests(
             raise TypeError("each request must be a dict")
         normalized.append(((), dict(request)))
     return normalized, False
+
+
+def _try_active_global_batch_size() -> int | None:
+    try:
+        runtime_config = active_state.load_active_runtime_config()
+    except AssertionError:
+        return None
+    return int(runtime_config.train.global_batch_size)
 
 
 class _ActiveSession:
@@ -159,6 +192,7 @@ class _ActiveSession:
     ) -> _TrajectoryClient:
         return _TrajectoryClient(
             post=self.post,
+            retry_post=self._retry_post,
             session_id=self.session_id,
             trajectory_id=trajectory_id or f"traj_{uuid4().hex}",
             group_id=group_id,
@@ -252,6 +286,23 @@ class _ActiveSession:
         assert isinstance(payload, dict)
         return int(payload["policy_version"])
 
+    def trajectory_statuses(self, trajectory_ids: list[str]) -> dict[str, str]:
+        response = self._retry_post(
+            "/trajectory_statuses",
+            {
+                "session_id": self.session_id,
+                "trajectory_ids": trajectory_ids,
+            },
+        )
+        payload = response.json()
+        assert isinstance(payload, dict)
+        trajectories = payload["trajectories"]
+        assert isinstance(trajectories, list)
+        return {
+            str(trajectory["trajectory_id"]): str(trajectory["status"])
+            for trajectory in trajectories
+        }
+
     def agent_client(self, client: "_TrajectoryClient") -> _AgentClient:
         return _AgentClient(
             OpenAI(
@@ -299,11 +350,13 @@ class _TrajectoryClient:
         self,
         *,
         post: Callable[[str, dict[str, Any]], httpx.Response],
+        retry_post: Callable[[str, dict[str, Any]], httpx.Response],
         session_id: str,
         trajectory_id: str,
         group_id: str | None = None,
     ) -> None:
         self._post = post
+        self._retry_post = retry_post
         self._session_id = session_id
         self._trajectory_id = trajectory_id
         self._group_id = group_id
@@ -327,7 +380,7 @@ class _TrajectoryClient:
     def finish(self, reward: float) -> None:
         if not self._used:
             self._start()
-        response = self._post(
+        response = self._retry_post(
             "/end_trajectory",
             {
                 "session_id": self._session_id,
@@ -340,7 +393,7 @@ class _TrajectoryClient:
     def fail(self) -> None:
         if not self._used:
             return
-        response = self._post(
+        response = self._retry_post(
             "/error_trajectory",
             {
                 "session_id": self._session_id,
@@ -409,12 +462,15 @@ class _RegisteredAgent:
         func: Callable[..., Any],
         gateway_config: GatewayServerConfig | None,
     ) -> None:
+        _validate_registered_function(func)
         self._func = func
         self._gateway_config = gateway_config
         self._expects_client = _function_expects_client(func)
+        self._signature = inspect.signature(func)
         update_wrapper(self, func)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self._validate_call(args, kwargs)
         with self._session() as session:
             return self._invoke(session, args, kwargs)
 
@@ -423,12 +479,17 @@ class _RegisteredAgent:
         *args: Any,
         requests: list[dict[str, Any]] | None = None,
         concurrency: int | None = None,
-        num_rollouts: int = 1,
+        group_size: int = 1,
+        num_rollouts: int | None = None,
         retries: int = 0,
         **kwargs: Any,
     ) -> Any:
-        if num_rollouts <= 0:
-            raise ValueError("num_rollouts must be > 0")
+        if num_rollouts is not None:
+            if group_size != 1:
+                raise ValueError("group_size cannot be combined with num_rollouts")
+            group_size = num_rollouts
+        if group_size <= 0:
+            raise ValueError("group_size must be > 0")
         if retries < 0:
             raise ValueError("retries must be >= 0")
 
@@ -437,12 +498,18 @@ class _RegisteredAgent:
             kwargs=kwargs,
             requests=requests,
         )
+        for request_index, (call_args, call_kwargs) in enumerate(call_specs):
+            self._validate_call(
+                call_args,
+                call_kwargs,
+                request_index=request_index if not single_request else None,
+            )
         resolved_concurrency = _resolve_concurrency(
             concurrency=concurrency,
-            job_count=len(call_specs) * num_rollouts,
+            job_count=len(call_specs) * group_size,
         )
         with self._session() as session:
-            if num_rollouts == 1:
+            if group_size == 1:
                 results = _execute_many(
                     self,
                     session,
@@ -455,7 +522,7 @@ class _RegisteredAgent:
                     self,
                     session,
                     call_specs,
-                    num_rollouts=num_rollouts,
+                    group_size=group_size,
                     concurrency=resolved_concurrency,
                     retries=retries,
                 )
@@ -478,7 +545,10 @@ class _RegisteredAgent:
         call_args: tuple[Any, ...],
         call_kwargs: dict[str, Any],
     ) -> float:
-        return float(self._call_func(session, client, call_args, call_kwargs))
+        return _coerce_reward(
+            self._call_func(session, client, call_args, call_kwargs),
+            context=f"{self.__name__} return value",
+        )
 
     def _invoke(
         self,
@@ -488,12 +558,11 @@ class _RegisteredAgent:
     ) -> Any:
         client = session.client()
         try:
-            result = self._call_func(session, client, call_args, call_kwargs)
+            reward = self._call_body(session, client, call_args, call_kwargs)
         except Exception:
             client.fail()
             raise
 
-        reward = float(result)
         client.finish(reward)
         return reward
 
@@ -515,6 +584,32 @@ class _RegisteredAgent:
 
     def _session(self) -> _ActiveSession:
         return _ActiveSession(_resolve_gateway_target(self._gateway_config))
+
+    def _validate_call(
+        self,
+        call_args: tuple[Any, ...],
+        call_kwargs: dict[str, Any],
+        *,
+        request_index: int | None = None,
+    ) -> None:
+        bind_args = call_args
+        if self._expects_client:
+            bind_args = (object(), *call_args)
+        try:
+            self._signature.bind(*bind_args, **call_kwargs)
+        except TypeError as exc:
+            if request_index is None:
+                raise TypeError(f"{self.__name__} call is invalid: {exc}") from exc
+            raise TypeError(
+                f"{self.__name__} request[{request_index}] is invalid: {exc}"
+            ) from exc
+
+
+@dataclass(slots=True)
+class _GroupedExecutionResult:
+    request_index: int
+    trajectory_ids: list[str]
+    rewards: list[float]
 
 
 def _resolve_gateway_target(
@@ -558,16 +653,39 @@ def _execute_grouped(
     session: _ActiveSession,
     call_specs: list[tuple[tuple[Any, ...], dict[str, Any]]],
     *,
-    num_rollouts: int,
+    group_size: int,
     concurrency: int,
     retries: int,
 ) -> list[list[float]]:
-    rollout_concurrency = max(1, min(num_rollouts, concurrency))
+    grouped_results = _execute_grouped_results(
+        agent,
+        session,
+        call_specs,
+        group_size=group_size,
+        concurrency=concurrency,
+        retries=retries,
+    )
+    rewards_by_request = [[0.0 for _ in range(group_size)] for _ in call_specs]
+    for result in grouped_results:
+        rewards_by_request[result.request_index] = result.rewards
+    return rewards_by_request
+
+
+def _execute_grouped_results(
+    agent: _RegisteredAgent,
+    session: _ActiveSession,
+    call_specs: list[tuple[tuple[Any, ...], dict[str, Any]]],
+    *,
+    group_size: int,
+    concurrency: int,
+    retries: int,
+) -> list[_GroupedExecutionResult]:
+    rollout_concurrency = max(1, min(group_size, concurrency))
     group_concurrency = max(1, concurrency // rollout_concurrency)
 
     def run_group(
         group_job: tuple[int, tuple[tuple[Any, ...], dict[str, Any]]],
-    ) -> tuple[int, list[float]]:
+    ) -> _GroupedExecutionResult:
         request_index, (call_args, call_kwargs) = group_job
         last_error: Exception | None = None
 
@@ -575,7 +693,7 @@ def _execute_grouped(
             clients: list[_TrajectoryClient] = []
             try:
                 clients = session.trajectory_groups(
-                    counts=[num_rollouts],
+                    counts=[group_size],
                     group_ids=[f"group_{uuid4().hex}"],
                 )[0]
 
@@ -596,15 +714,22 @@ def _execute_grouped(
                     concurrency=rollout_concurrency,
                     fn=run_rollout,
                 )
+                ordered_results = sorted(results, key=lambda item: item[0])
+                ordered_clients = [
+                    client for _rollout_index, client, _reward in ordered_results
+                ]
+                ordered_rewards = [
+                    reward for _rollout_index, _client, reward in ordered_results
+                ]
                 session.end_clients(
-                    [client for _rollout_index, client, _reward in results],
-                    rewards=[reward for _rollout_index, _client, reward in results],
+                    ordered_clients,
+                    rewards=ordered_rewards,
                 )
-
-                rewards = [0.0 for _ in range(num_rollouts)]
-                for rollout_index, _client, reward in results:
-                    rewards[rollout_index] = reward
-                return request_index, rewards
+                return _GroupedExecutionResult(
+                    request_index=request_index,
+                    trajectory_ids=[client.trajectory_id for client in ordered_clients],
+                    rewards=ordered_rewards,
+                )
             except Exception as exc:
                 last_error = exc
                 _fail_clients_best_effort(session, clients)
@@ -617,15 +742,148 @@ def _execute_grouped(
         assert last_error is not None
         raise last_error
 
-    grouped_results = _map_parallel(
+    return _map_parallel(
         list(enumerate(call_specs)),
         concurrency=group_concurrency,
         fn=run_group,
     )
-    rewards_by_request = [[0.0 for _ in range(num_rollouts)] for _ in call_specs]
-    for request_index, rewards in grouped_results:
-        rewards_by_request[request_index] = rewards
-    return rewards_by_request
+
+
+def _wait_for_trained_trajectories(
+    session: _ActiveSession,
+    trajectory_ids: list[str],
+    *,
+    timeout: float,
+) -> None:
+    if timeout <= 0:
+        raise ValueError("wait_timeout must be > 0")
+
+    pending = set(trajectory_ids)
+    deadline = time.monotonic() + timeout
+    while pending:
+        statuses = session.trajectory_statuses(sorted(pending))
+        failed = {
+            trajectory_id: status
+            for trajectory_id, status in statuses.items()
+            if status in {"failed", "discarded"}
+        }
+        if failed:
+            details = ", ".join(
+                f"{trajectory_id}={status}"
+                for trajectory_id, status in sorted(failed.items())
+            )
+            raise RuntimeError(
+                f"training failed before trajectories completed: {details}"
+            )
+
+        pending = {
+            trajectory_id
+            for trajectory_id, status in statuses.items()
+            if status != "trained"
+        }
+        if not pending:
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(
+            min(
+                _TRAIN_STATUS_POLL_INTERVAL_SECONDS,
+                max(0.0, deadline - time.monotonic()),
+            )
+        )
+
+    raise TimeoutError(
+        f"{len(pending)} trajectories were not trained within {timeout} seconds"
+    )
+
+
+def train(
+    agent: _RegisteredAgent,
+    *,
+    inputs: list[dict[str, Any]],
+    group_size: int,
+    concurrency: int | None = None,
+    retries: int = 0,
+    wait_timeout: float = 1800.0,
+) -> dict[str, Any]:
+    """Run grouped trajectories through the gateway and wait until they are trained."""
+    if not isinstance(agent, _RegisteredAgent):
+        raise TypeError("agent must be a function registered with @ninja.agent")
+    if group_size <= 0:
+        raise ValueError("group_size must be > 0")
+    if retries < 0:
+        raise ValueError("retries must be >= 0")
+
+    call_specs, _single_request = _normalize_requests(
+        args=(),
+        kwargs={},
+        requests=inputs,
+    )
+    if not call_specs:
+        raise ValueError("inputs must not be empty")
+    for request_index, (call_args, call_kwargs) in enumerate(call_specs):
+        agent._validate_call(
+            call_args,
+            call_kwargs,
+            request_index=request_index,
+        )
+
+    resolved_concurrency = _resolve_concurrency(
+        concurrency=concurrency,
+        job_count=len(call_specs) * group_size,
+    )
+    global_batch_size: int | None = None
+    if agent._gateway_config is None:
+        global_batch_size = _try_active_global_batch_size()
+        if global_batch_size is not None and group_size > global_batch_size:
+            raise ValueError(
+                "group_size must be <= active runtime global_batch_size: "
+                f"{group_size} > {global_batch_size}"
+            )
+    with agent._session() as session:
+        initial_policy_version = session.current_policy_version()
+        grouped_results = _execute_grouped_results(
+            agent,
+            session,
+            call_specs,
+            group_size=group_size,
+            concurrency=resolved_concurrency,
+            retries=retries,
+        )
+        trajectory_ids = [
+            trajectory_id
+            for result in grouped_results
+            for trajectory_id in result.trajectory_ids
+        ]
+        try:
+            _wait_for_trained_trajectories(
+                session,
+                trajectory_ids,
+                timeout=wait_timeout,
+            )
+        except TimeoutError as exc:
+            if global_batch_size is None:
+                raise
+            raise TimeoutError(
+                f"{exc} (call produced {len(trajectory_ids)} trajectories; "
+                f"active runtime global_batch_size={global_batch_size})"
+            ) from exc
+        final_policy_version = session.current_policy_version()
+
+    rewards = [reward for result in grouped_results for reward in result.rewards]
+    group_mean_rewards = [
+        sum(result.rewards) / len(result.rewards) for result in grouped_results
+    ]
+    return {
+        "group_size": group_size,
+        "prompt_groups": len(grouped_results),
+        "samples": len(rewards),
+        "initial_policy_version": initial_policy_version,
+        "final_policy_version": final_policy_version,
+        "max_group_reward": max(max(result.rewards) for result in grouped_results),
+        "mean_group_reward": sum(group_mean_rewards) / len(group_mean_rewards),
+        "sample_mean_reward": sum(rewards) / len(rewards),
+    }
 
 
 def agent(
