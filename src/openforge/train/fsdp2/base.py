@@ -26,23 +26,6 @@ from .memory import offload_optimizer, offload_params, onload_optimizer, onload_
 from .utils import apply_fsdp2, create_device_mesh
 
 
-def _selected_token_log_probs(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-) -> torch.Tensor:
-    """Return log-probs for the selected next-token targets only."""
-    if logits.ndim != 2:
-        raise ValueError(f"logits must be rank-2, got shape {tuple(logits.shape)}")
-    if targets.ndim != 1:
-        raise ValueError(f"targets must be rank-1, got shape {tuple(targets.shape)}")
-    if logits.shape[0] != targets.shape[0]:
-        raise ValueError(
-            "logits and targets must align on sequence length: "
-            f"{logits.shape[0]} != {targets.shape[0]}"
-        )
-    return -F.cross_entropy(logits, targets, reduction="none")
-
-
 class FSDP2Engine(TrainBackend):
     """FSDP2Engine for training. Essentially a wrapper around PyTorch FSDP2."""
 
@@ -273,7 +256,7 @@ class FSDP2Engine(TrainBackend):
             position_ids=position_ids,
         )
         targets = tokens[1:]
-        return _selected_token_log_probs(logits, targets)
+        return -F.cross_entropy(logits, targets, reduction="none")
 
     def _compute_logits(
         self,
