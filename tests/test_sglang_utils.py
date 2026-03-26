@@ -32,7 +32,7 @@ from openforge.configs.train import (
 )
 from openforge.configs.topology import ParallelismConfig
 from openforge.rollout.sglang.utils import generate_sglang_server_args
-from openforge.rollout.types import EngineAddr, EngineSpec
+from openforge.rollout.sglang.types import EngineAddr, EngineSpec
 
 
 def _cfg() -> OpenForgeConfig:

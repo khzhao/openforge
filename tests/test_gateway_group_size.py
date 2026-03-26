@@ -27,7 +27,7 @@ runtime_module.create_algorithm = _create_algorithm
 sys.modules["openforge.runtime"] = runtime_module
 
 from openforge.data import Session, SQLiteOpenForgeStore, Trajectory, Turn
-from openforge.gateway.train_loop import TrainLoop
+from openforge.train.loop import TrainLoop
 
 
 class _FakeTrainConfig:
@@ -65,7 +65,7 @@ class _FakeTrainManager:
             ),
         )
         self.step_calls: list[int] = []
-        self.sync_calls: list[int] = []
+        self.publish_calls: list[int] = []
 
     def step_update(
         self,
@@ -75,14 +75,8 @@ class _FakeTrainManager:
     ) -> None:
         self.step_calls.append(global_step)
 
-    def sync_rollout_weights(
-        self,
-        *,
-        policy_version: int,
-        mode: str | None = None,
-        bucket_bytes: int | None = None,
-    ) -> None:
-        self.sync_calls.append(policy_version)
+    def publish_rollout_policy_version(self, policy_version: int) -> None:
+        self.publish_calls.append(policy_version)
 
 
 def _turn(trajectory_id: str) -> Turn:

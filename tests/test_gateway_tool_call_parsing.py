@@ -27,13 +27,13 @@ def _install_service_import_stubs() -> None:
     runtime.Runtime = Runtime
     sys.modules["openforge.gateway.runtime"] = runtime
 
-    train_loop = ModuleType("openforge.gateway.train_loop")
+    train_loop = ModuleType("openforge.train.loop")
 
     class TrainLoop:
         pass
 
     train_loop.TrainLoop = TrainLoop
-    sys.modules["openforge.gateway.train_loop"] = train_loop
+    sys.modules["openforge.train.loop"] = train_loop
 
 
 _install_service_import_stubs()

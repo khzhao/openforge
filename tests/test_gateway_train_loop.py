@@ -13,7 +13,7 @@ install_test_stubs()
 
 from openforge.configs.algo import GRPOConfig
 from openforge.data import Session, SQLiteOpenForgeStore, Trajectory, Turn
-from openforge.gateway.train_loop import TrainLoop
+from openforge.train.loop import TrainLoop
 from openforge.train.types import TrainStepResult
 
 
@@ -57,7 +57,7 @@ class _FakeTrainManager:
             ),
         )
         self.step_calls: list[tuple[int, list[object]]] = []
-        self.sync_calls: list[tuple[int, str | None, int | None]] = []
+        self.publish_calls: list[int] = []
 
     def step_update(
         self,
@@ -73,14 +73,8 @@ class _FakeTrainManager:
             for rank in range(self.world_size)
         ]
 
-    def sync_rollout_weights(
-        self,
-        *,
-        policy_version: int,
-        mode: str | None = None,
-        bucket_bytes: int | None = None,
-    ) -> None:
-        self.sync_calls.append((policy_version, mode, bucket_bytes))
+    def publish_rollout_policy_version(self, policy_version: int) -> None:
+        self.publish_calls.append(policy_version)
 
 
 def _turn(
@@ -218,7 +212,7 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
         assert trained is True
         assert loop.global_step == 1
         assert loop.policy_version == 1
-        assert train_manager.sync_calls == [(1, "distributed", None)]
+        assert train_manager.publish_calls == [1]
         assert len(train_manager.step_calls) == 1
         global_step, rank_minibatches = train_manager.step_calls[0]
         assert global_step == 1
@@ -814,7 +808,7 @@ def test_train_loop_run_polls_until_batch_is_ready() -> None:
         await loop.stop()
 
         assert len(train_manager.step_calls) == 1
-        assert train_manager.sync_calls == [(1, "distributed", None)]
+        assert train_manager.publish_calls == [1]
         t0 = await store.get_trajectory("t0")
         t1 = await store.get_trajectory("t1")
         assert t0 is not None

@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sync-modes",
         default=",".join(SYNC_MODES),
-        help="Comma-separated subset of disk,distributed",
+        help="Comma-separated subset of distributed",
     )
     return parser.parse_args()
 

@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack
 import types
+from contextlib import ExitStack
 from unittest.mock import patch
 
 from _script_test_utils import expect_raises, install_test_stubs, run_tests
@@ -24,6 +24,14 @@ from openforge.gateway.types import (
     RuntimeConfig,
     StartSessionRequest,
 )
+
+
+class _FakeTrainRuntime:
+    async def shutdown(self) -> None:
+        return
+
+    def register_rollout(self, rollout_router_url: str) -> None:
+        return
 
 
 def _server_config() -> GatewayServerConfig:
@@ -195,7 +203,7 @@ def test_runtime_start_slot_shuts_down_ray_when_startup_fails() -> None:
         stack.enter_context(
             patch.object(
                 runtime_api,
-                "create_train_manager",
+                "create_train_runtime",
                 lambda *args, **kwargs: (_ for _ in ()).throw(
                     RuntimeError("train boom")
                 ),
@@ -207,9 +215,6 @@ def test_runtime_start_slot_shuts_down_ray_when_startup_fails() -> None:
                 "create_rollout_manager",
                 lambda *args, **kwargs: None,
             )
-        )
-        stack.enter_context(
-            patch.object(runtime_api, "register_rollout", lambda *args, **kwargs: None)
         )
         with expect_raises(RuntimeError, match="train boom"):
             runtime._start_slot(runtime._build_config(runtime_config=_runtime_config()))
@@ -249,11 +254,8 @@ def test_runtime_start_slot_uses_explicit_ray_address() -> None:
         stack.enter_context(
             patch.object(
                 runtime_api,
-                "create_train_manager",
-                lambda *args, **kwargs: types.SimpleNamespace(
-                    shutdown=lambda: None,
-                    register_rollout=lambda engine_workers: None,
-                ),
+                "create_train_runtime",
+                lambda *args, **kwargs: _FakeTrainRuntime(),
             )
         )
         stack.enter_context(
@@ -263,11 +265,9 @@ def test_runtime_start_slot_uses_explicit_ray_address() -> None:
                 lambda *args, **kwargs: types.SimpleNamespace(
                     shutdown=lambda: None,
                     engine_workers=[],
+                    router_url="http://127.0.0.1:31000",
                 ),
             )
-        )
-        stack.enter_context(
-            patch.object(runtime_api, "register_rollout", lambda *args, **kwargs: None)
         )
         stack.enter_context(patch.dict("os.environ", {"RAY_ADDRESS": "ray://cluster"}))
         runtime._start_slot(runtime._build_config(runtime_config=_runtime_config()))

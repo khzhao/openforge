@@ -5,16 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
-from unittest.mock import patch
+from typing import Any
 
 from _script_test_utils import expect_raises, install_test_stubs, run_tests
 
 install_test_stubs()
 
-import openforge.gateway.service as gateway_service
 from openforge.data import SQLiteOpenForgeStore
 from openforge.gateway.runtime import (
     Generation,
@@ -48,11 +45,37 @@ class _FakeTrainLoop:
         return False
 
 
-@contextmanager
-def _patched_train_loop() -> Iterator[None]:
-    _FakeTrainLoop.instances.clear()
-    with patch.object(gateway_service, "TrainLoop", _FakeTrainLoop):
-        yield
+class _FakeTrainRuntime:
+    def __init__(self) -> None:
+        _FakeTrainLoop.instances.clear()
+        self._train_loop: _FakeTrainLoop | None = None
+        self.policy_version = 0
+
+    def start_session(self, *, session_id: str, store) -> None:
+        assert self._train_loop is None
+        train_loop = _FakeTrainLoop(
+            session_id=session_id,
+            store=store,
+            train_manager=object(),
+        )
+        train_loop.start()
+        self._train_loop = train_loop
+
+    async def end_session(self) -> None:
+        train_loop = self._train_loop
+        if train_loop is None:
+            return
+        await train_loop.stop()
+        self._train_loop = None
+        self.policy_version = 0
+
+    def export_checkpoint(self) -> tuple[int, str]:
+        train_loop = self._train_loop
+        assert train_loop is not None
+        return train_loop.policy_version, f"/tmp/checkpoint-{train_loop.policy_version}"
+
+    async def shutdown(self) -> None:
+        await self.end_session()
 
 
 def _start_session_kwargs(model_name: str = "model-a") -> dict[str, object]:
@@ -152,6 +175,7 @@ class _FakeRuntime:
     def __init__(self, supported_models: tuple[str, ...] = ("model-a",)) -> None:
         self._supported_models = supported_models
         self._current_model: str | None = None
+        self._train = _FakeTrainRuntime()
         self.last_sampling_params: dict[str, object] | None = None
         self.shutdown_count = 0
 
@@ -221,12 +245,13 @@ class _FakeRuntime:
             for item in input_ids
         ]
 
-    def train_manager(self):
-        return object()
+    def train(self) -> _FakeTrainRuntime:
+        return self._train
 
     def shutdown(self) -> None:
         self.shutdown_count += 1
         self._current_model = None
+        asyncio.run(self._train.shutdown())
 
 
 class _FailingTokenizeRuntime(_FakeRuntime):
@@ -367,8 +392,7 @@ def test_gateway_service_start_generate_and_end() -> None:
             )
             await store.close()
 
-    with _patched_train_loop():
-        asyncio.run(run())
+    asyncio.run(run())
 
 
 def test_gateway_service_list_models_and_start_session_tracks_active_model() -> None:
@@ -394,8 +418,7 @@ def test_gateway_service_list_models_and_start_session_tracks_active_model() -> 
 
         await store.close()
 
-    with _patched_train_loop():
-        asyncio.run(run())
+    asyncio.run(run())
 
 
 def test_gateway_service_start_session_rejects_second_active_session() -> None:
@@ -419,8 +442,7 @@ def test_gateway_service_start_session_rejects_second_active_session() -> None:
 
         await store.close()
 
-    with _patched_train_loop():
-        asyncio.run(run())
+    asyncio.run(run())
 
 
 def test_gateway_service_releases_runtime_after_last_session_and_allows_switch() -> (
@@ -458,8 +480,7 @@ def test_gateway_service_releases_runtime_after_last_session_and_allows_switch()
 
         await store.close()
 
-    with _patched_train_loop():
-        asyncio.run(run())
+    asyncio.run(run())
 
 
 def test_gateway_service_generate_unknown_session_raises() -> None:
@@ -478,8 +499,7 @@ def test_gateway_service_generate_unknown_session_raises() -> None:
 
         await store.close()
 
-    with _patched_train_loop():
-        asyncio.run(run())
+    asyncio.run(run())
 
 
 def test_gateway_service_generate_wraps_tokenization_failure() -> None:
@@ -503,8 +523,7 @@ def test_gateway_service_generate_wraps_tokenization_failure() -> None:
 
         await store.close()
 
-    with _patched_train_loop():
-        asyncio.run(run())
+    asyncio.run(run())
 
 
 def test_gateway_service_trajectory_lifecycle_errors() -> None:
@@ -546,8 +565,7 @@ def test_gateway_service_trajectory_lifecycle_errors() -> None:
         assert generated_again.metadata["trajectory_id"] == root.trajectory_id
         await store.close()
 
-    with _patched_train_loop():
-        asyncio.run(run())
+    asyncio.run(run())
 
 
 def test_gateway_service_end_session_requires_all_trajectories_completed() -> None:
@@ -590,8 +608,7 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
 
         await store.close()
 
-    with _patched_train_loop():
-        asyncio.run(run())
+    asyncio.run(run())
 
 
 def test_parse_generation_payload_parses_numeric_weight_version() -> None:

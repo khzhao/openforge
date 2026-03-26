@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -14,21 +15,24 @@ os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
 
 import ray
 import torch
+from _script_test_utils import require_free_gpu_ids, start_test_ray_cluster
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
-from _script_test_utils import require_free_gpu_ids, start_test_ray_cluster
 from openforge.configs.models import OpenForgeConfig
 from openforge.runtime import (
     create_rollout_manager,
-    create_train_manager,
-    register_rollout,
+    create_train_runtime,
 )
 from openforge.utils.networking import get_free_port
 from openforge.utils.ray import create_placement_groups
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-SYNC_MODES = ("disk", "distributed")
+SYNC_MODES = ("distributed",)
+ROUTER_SYNC_WAIT_TIMEOUT_SECONDS = 300.0
+ROUTER_SYNC_POLL_INTERVAL_SECONDS = 0.1
+
+
 def resolve_local_model_path(model_path_or_id: str) -> str:
     candidate = Path(model_path_or_id)
     if candidate.exists():
@@ -226,6 +230,29 @@ def assert_trainer_weights_changed(
     raise RuntimeError("trainer weights did not change after the training steps")
 
 
+def wait_for_rollout_policy_version(
+    rollout_manager,
+    *,
+    expected_version: int,
+) -> None:
+    deadline = time.monotonic() + ROUTER_SYNC_WAIT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        status = rollout_manager.status()
+        workers = status.get("workers")
+        if not isinstance(workers, dict):
+            raise RuntimeError("rollout router status missing workers")
+        if all(
+            isinstance(worker_payload, dict)
+            and int(worker_payload.get("weight_version", -1)) == expected_version
+            for worker_payload in workers.values()
+        ):
+            return
+        time.sleep(ROUTER_SYNC_POLL_INTERVAL_SECONDS)
+    raise TimeoutError(
+        f"rollout workers did not all reach policy_version={expected_version}"
+    )
+
+
 def run_weight_sync_e2e(
     *,
     model_path: str,
@@ -259,15 +286,17 @@ def run_weight_sync_e2e(
     )
 
     placement_groups = create_placement_groups(cfg)
+    train_runtime = None
     train_manager = None
     rollout_manager = None
     try:
-        train_manager = create_train_manager(
+        train_runtime = create_train_runtime(
             cfg,
             master_addr="127.0.0.1",
             master_port=get_free_port(start=20000),
             placement_groups=placement_groups,
         )
+        train_manager = train_runtime.manager
 
         rollout_manager = create_rollout_manager(
             cfg,
@@ -275,7 +304,7 @@ def run_weight_sync_e2e(
             router_ip="127.0.0.1",
             router_port=get_free_port(start=30000),
         )
-        register_rollout(train_manager, rollout_manager)
+        train_runtime.register_rollout(rollout_manager.router_url)
         rollout_workers = rollout_manager.engine_workers
         if len(rollout_workers) != rollout_replicas:
             raise RuntimeError(
@@ -299,8 +328,8 @@ def run_weight_sync_e2e(
             step_results = []
             for _ in range(3):
                 global_step += 1
-                step_results = train_manager.step(
-                    rank_minibatches,
+                step_results = train_manager.step_update(
+                    [rank_minibatches],
                     global_step=global_step,
                 )
             post_step_weights = train_manager.build_tensor_buckets(
@@ -309,10 +338,10 @@ def run_weight_sync_e2e(
             assert_trainer_weights_changed(pre_step_weights, post_step_weights)
 
             policy_version = base_policy_version + mode_index
-            train_manager.sync_rollout_weights(
-                policy_version=policy_version,
-                bucket_bytes=(4 << 20) if mode == "distributed" else (256 << 20),
-                mode=mode,
+            train_manager.publish_rollout_policy_version(policy_version)
+            wait_for_rollout_policy_version(
+                rollout_manager,
+                expected_version=policy_version,
             )
 
             assert_policy_versions(
@@ -325,7 +354,7 @@ def run_weight_sync_e2e(
             assert_weights_changed(compare_responses, context=f"{mode}/compare")
             print(
                 f"[{mode}] SUCCESS engines={len(rollout_workers)} "
-                f"train_metrics={step_results[0].metrics}"
+                f"train_metrics={step_results[0][0].metrics}"
             )
 
         print(
@@ -343,8 +372,10 @@ def run_weight_sync_e2e(
             except Exception:
                 pass
         try:
-            if train_manager is not None:
-                train_manager.shutdown()
+            if train_runtime is not None:
+                import asyncio
+
+                asyncio.run(train_runtime.shutdown())
         except Exception:
             pass
         if ray.is_initialized():

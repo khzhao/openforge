@@ -16,7 +16,6 @@ from fastapi.testclient import TestClient
 install_test_stubs()
 
 import openforge.gateway.server as gateway_server
-import openforge.gateway.service as gateway_service
 from openforge.configs.cluster import ClusterConfig
 from openforge.configs.models import DataConfig, GatewayConfig, GatewayServerConfig
 from openforge.data import SQLiteOpenForgeStore
@@ -46,6 +45,39 @@ class _FakeTrainLoop:
     async def train_once(self) -> bool:
         self.train_once_calls += 1
         return False
+
+
+class _FakeTrainRuntime:
+    def __init__(self) -> None:
+        _FakeTrainLoop.instances.clear()
+        self._train_loop: _FakeTrainLoop | None = None
+        self.policy_version = 0
+
+    def start_session(self, *, session_id: str, store) -> None:
+        assert self._train_loop is None
+        train_loop = _FakeTrainLoop(
+            session_id=session_id,
+            store=store,
+            train_manager=object(),
+        )
+        train_loop.start()
+        self._train_loop = train_loop
+
+    async def end_session(self) -> None:
+        train_loop = self._train_loop
+        if train_loop is None:
+            return
+        await train_loop.stop()
+        self._train_loop = None
+        self.policy_version = 0
+
+    def export_checkpoint(self) -> tuple[int, str]:
+        train_loop = self._train_loop
+        assert train_loop is not None
+        return train_loop.policy_version, f"/tmp/checkpoint-{train_loop.policy_version}"
+
+    async def shutdown(self) -> None:
+        await self.end_session()
 
 
 def _start_session_payload(model_name: str = "model-a") -> dict[str, object]:
@@ -153,6 +185,7 @@ class _FakeRuntime:
     def __init__(self, supported_models: tuple[str, ...] = ("model-a",)) -> None:
         self._supported_models = supported_models
         self._current_model: str | None = None
+        self._train = _FakeTrainRuntime()
         self.last_sampling_params: dict[str, object] | None = None
         self.shutdown_count = 0
 
@@ -222,12 +255,15 @@ class _FakeRuntime:
             for item in input_ids
         ]
 
-    def train_manager(self):
-        return object()
+    def train(self) -> _FakeTrainRuntime:
+        return self._train
 
     def shutdown(self) -> None:
         self.shutdown_count += 1
         self._current_model = None
+        import asyncio
+
+        asyncio.run(self._train.shutdown())
 
 
 class _FailingTokenizeRuntime(_FakeRuntime):
@@ -282,11 +318,9 @@ def _patched_app(
     store: SQLiteOpenForgeStore,
     runtime: object,
 ) -> Iterator[object]:
-    _FakeTrainLoop.instances.clear()
     with ExitStack() as stack:
         state_tmpdir = stack.enter_context(tempfile.TemporaryDirectory())
         state_path = Path(state_tmpdir) / "active_gateway.json"
-        stack.enter_context(patch.object(gateway_service, "TrainLoop", _FakeTrainLoop))
         stack.enter_context(
             patch.object(gateway_server, "_build_store", lambda cfg: store)
         )
@@ -431,11 +465,7 @@ def test_gateway_http_updates_shared_state_for_gateway_and_session() -> None:
         state_path = Path(tmpdir) / "active_gateway.json"
         store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
         runtime = _FakeRuntime()
-        _FakeTrainLoop.instances.clear()
         with ExitStack() as stack:
-            stack.enter_context(
-                patch.object(gateway_service, "TrainLoop", _FakeTrainLoop)
-            )
             stack.enter_context(
                 patch.object(gateway_server, "_build_store", lambda cfg: store)
             )
