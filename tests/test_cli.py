@@ -171,7 +171,7 @@ def test_openforge_gateway_start_runs_server() -> None:
                         "gateway",
                         "start",
                         "--config",
-                        "examples/gsm8k_gateway.yaml",
+                        "examples/gsm8k/gateway.yaml",
                     ]
                 )
                 == 0
@@ -216,7 +216,7 @@ def test_openforge_session_start_rejects_existing_session() -> None:
                             "session",
                             "start",
                             "--runtime-config",
-                            "examples/gsm8k_runtime.yaml",
+                            "examples/gsm8k/runtime.yaml",
                         ]
                     )
 

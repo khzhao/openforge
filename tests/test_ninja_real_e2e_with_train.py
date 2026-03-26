@@ -156,7 +156,6 @@ def main() -> int:
         text=True,
         bufsize=1,
     )
-    events: list[dict[str, Any]] = []
     session_id: str | None = None
 
     try:
@@ -186,10 +185,10 @@ def main() -> int:
             start_payload,
             timeout=args.request_timeout,
         )
-        record_event(response_log_path, events, "start_session", started)
+        record_event(response_log_path, "start_session", started)
         session_id = str(started["session_id"])
 
-        train_rollout_records: list[dict[str, Any]] = []
+        train_trajectory_ids: list[str] = []
         train_reward_lock = threading.Lock()
         prompt_variant_counts: dict[str, int] = {}
         follow_ups = [
@@ -216,19 +215,16 @@ def main() -> int:
                 top_p=1.0,
                 max_completion_tokens=8,
             )
-            train_rollout_records.append(
-                {
-                    "reward": reward,
-                    "follow_up": follow_up,
-                    "response": response.model_dump(mode="json"),
-                }
+            train_trajectory_ids.append(
+                str(response.model_dump(mode="json")["metadata"]["trajectory_id"])
             )
             return reward
 
-        probe_responses: list[dict[str, Any]] = []
+        probe_response: dict[str, Any] | None = None
 
         @ninja.agent()
         def probe_agent(client, *, prompt: str) -> float:
+            nonlocal probe_response
             response = client.chat.completions.create(
                 model=model_path,
                 messages=[{"role": "user", "content": prompt}],
@@ -236,14 +232,13 @@ def main() -> int:
                 top_p=1.0,
                 max_completion_tokens=8,
             )
-            probe_responses.append(response.model_dump(mode="json"))
+            probe_response = response.model_dump(mode="json")
             return 0.0
 
         initial_policy_version = probe_agent.policy_version()
         assert initial_policy_version == 0
         record_event(
             response_log_path,
-            events,
             "initial_policy_version",
             {"policy_version": initial_policy_version},
         )
@@ -258,19 +253,14 @@ def main() -> int:
             group_size=args.group_size,
             wait_timeout=args.request_timeout,
         )
-        record_event(response_log_path, events, "ninja_train", train_summary)
+        record_event(response_log_path, "ninja_train", train_summary)
         assert train_summary["group_size"] == args.group_size
         assert train_summary["prompt_groups"] == len(train_inputs)
         assert train_summary["samples"] == len(train_inputs) * args.group_size
         assert int(train_summary["final_policy_version"]) > int(
             train_summary["initial_policy_version"]
         )
-        assert len(train_rollout_records) == len(train_inputs) * args.group_size
-
-        train_trajectory_ids = [
-            str(record["response"]["metadata"]["trajectory_id"])
-            for record in train_rollout_records
-        ]
+        assert len(train_trajectory_ids) == len(train_inputs) * args.group_size
         train_statuses = wait_for_trajectory_statuses(
             base_url=base_url,
             session_id=session_id,
@@ -279,19 +269,18 @@ def main() -> int:
         )
         record_event(
             response_log_path,
-            events,
             "train_trajectory_statuses",
             train_statuses,
         )
 
         probe_reward = probe_agent(prompt="Say hello in four words.")
         assert probe_reward == 0.0
-        probe_response = probe_responses[-1]
-        record_event(response_log_path, events, "probe_after_train", probe_response)
+        assert probe_response is not None
+        record_event(response_log_path, "probe_after_train", probe_response)
         assert int(probe_response["metadata"]["rollout_model_version"]) > 0
 
         exported = train_agent.save()
-        record_event(response_log_path, events, "export_checkpoint", exported)
+        record_event(response_log_path, "export_checkpoint", exported)
         checkpoint_dir = Path(str(exported["checkpoint_path"]))
         changed_name, max_abs_diff = changed_parameter(
             model_path=model_path,
@@ -313,7 +302,7 @@ def main() -> int:
             {"session_id": session_id},
             timeout=args.request_timeout,
         )
-        record_event(response_log_path, events, "end_session", ended)
+        record_event(response_log_path, "end_session", ended)
         session_id = None
 
         summary = {

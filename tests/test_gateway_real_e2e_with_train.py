@@ -154,12 +154,14 @@ def build_start_session_payload(
 
 def record_event(
     path: Path,
-    events: list[dict[str, Any]],
     step: str,
     payload: dict[str, Any],
+    *,
+    events: list[dict[str, Any]] | None = None,
 ) -> None:
     event = {"step": step, "payload": payload}
-    events.append(event)
+    if events is not None:
+        events.append(event)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
 
@@ -270,8 +272,6 @@ def main() -> int:
         text=True,
         bufsize=1,
     )
-    events: list[dict[str, Any]] = []
-
     try:
         base_url = f"http://{args.gateway_host}:{gateway_port}"
         wait_for_http(f"{base_url}/health", timeout=args.server_start_timeout)
@@ -288,7 +288,7 @@ def main() -> int:
             ),
             timeout=args.request_timeout,
         )
-        record_event(response_log_path, events, "start_session", started)
+        record_event(response_log_path, "start_session", started)
         session_id = str(started["session_id"])
         model_name = str(started["model"])
 
@@ -298,7 +298,7 @@ def main() -> int:
             {"session_id": session_id},
             timeout=60.0,
         )
-        record_event(response_log_path, events, "start_parent", parent)
+        record_event(response_log_path, "start_parent", parent)
         parent_id = str(parent["trajectory_id"])
 
         parent_turn = request_json(
@@ -312,7 +312,7 @@ def main() -> int:
             ),
             timeout=args.request_timeout,
         )
-        record_event(response_log_path, events, "generate_parent", parent_turn)
+        record_event(response_log_path, "generate_parent", parent_turn)
 
         child_group_id = "group-0"
         child_group = request_json(
@@ -325,7 +325,7 @@ def main() -> int:
             },
             timeout=60.0,
         )
-        record_event(response_log_path, events, "start_child_group", child_group)
+        record_event(response_log_path, "start_child_group", child_group)
         child_ids = child_group["trajectory_ids"][0]
         child_a_id = str(child_ids[0])
         child_b_id = str(child_ids[1])
@@ -341,7 +341,7 @@ def main() -> int:
             ),
             timeout=args.request_timeout,
         )
-        record_event(response_log_path, events, "generate_child_a", child_a_turn)
+        record_event(response_log_path, "generate_child_a", child_a_turn)
 
         child_b_turn = request_json(
             "POST",
@@ -354,7 +354,7 @@ def main() -> int:
             ),
             timeout=args.request_timeout,
         )
-        record_event(response_log_path, events, "generate_child_b", child_b_turn)
+        record_event(response_log_path, "generate_child_b", child_b_turn)
 
         for trajectory_id, reward, step in (
             (parent_id, 0.0, "end_parent"),
@@ -371,7 +371,7 @@ def main() -> int:
                 },
                 timeout=60.0,
             )
-            record_event(response_log_path, events, step, ended)
+            record_event(response_log_path, step, ended)
 
         sqlite_path = config_path.parent / "gateway.sqlite3"
         rows = wait_for_group_rows(
@@ -386,7 +386,7 @@ def main() -> int:
             {"session_id": session_id},
             timeout=60.0,
         )
-        record_event(response_log_path, events, "start_post_train", post_train)
+        record_event(response_log_path, "start_post_train", post_train)
         post_train_id = str(post_train["trajectory_id"])
 
         post_train_turn = request_json(
@@ -400,7 +400,7 @@ def main() -> int:
             ),
             timeout=args.request_timeout,
         )
-        record_event(response_log_path, events, "generate_post_train", post_train_turn)
+        record_event(response_log_path, "generate_post_train", post_train_turn)
         rollout_model_version = post_train_turn["metadata"]["rollout_model_version"]
         assert int(rollout_model_version) > 0
 
@@ -414,7 +414,7 @@ def main() -> int:
             },
             timeout=60.0,
         )
-        record_event(response_log_path, events, "end_post_train", ended_post_train)
+        record_event(response_log_path, "end_post_train", ended_post_train)
 
         ended_session = request_json(
             "POST",
@@ -422,7 +422,7 @@ def main() -> int:
             {"session_id": session_id},
             timeout=args.request_timeout,
         )
-        record_event(response_log_path, events, "end_session", ended_session)
+        record_event(response_log_path, "end_session", ended_session)
 
         rows = trajectory_rows(sqlite_path)
         child_rows = [row for row in rows if row[1] == child_group_id]

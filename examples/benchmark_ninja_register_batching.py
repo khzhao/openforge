@@ -38,8 +38,6 @@ def main() -> None:
     sampling_params = {
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
-        "repetition_penalty": 1.0,
         "max_new_tokens": args.max_new_tokens,
     }
     prompt = build_gsm8k_prompt(

@@ -14,10 +14,14 @@ import datasets
 import httpx
 
 import openforge.ninja as ninja
-from openforge import active_state
-from openforge.gateway.types import RuntimeConfig
-
-from gsm8k_common import make_artifact_dir, run_train, save_summary
+from examples.shared import (
+    add_train_cli_args,
+    load_runtime_config,
+    make_artifact_dir,
+    print_train_update,
+    run_train,
+    save_summary,
+)
 
 _SEARCH_TOOL = {
     "type": "function",
@@ -57,20 +61,13 @@ _DEFAULT_PROMPT_DATA = "/home/guo/kzhao/data/kzhao/search_r1_train.parquet"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = add_train_cli_args(
+        argparse.ArgumentParser(description=__doc__),
+        default_group_size=8,
+    )
     parser.add_argument("--prompt-data", default=_DEFAULT_PROMPT_DATA)
     parser.add_argument("--input-key", default="prompt")
     parser.add_argument("--label-key", default="reward_model")
-    parser.add_argument("--artifact-dir", default=None)
-    parser.add_argument("--runtime-config", default=None)
-    parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--group-size", type=int, default=8)
-    parser.add_argument("--total-epochs", type=int, default=15)
-    parser.add_argument("--max-train-examples", type=int, default=None)
-    parser.add_argument("--wait-timeout", type=float, default=1800.0)
-    parser.add_argument("--train-group-parallelism", type=int, default=None)
-    parser.add_argument("--train-group-retries", type=int, default=2)
-    parser.add_argument("--max-updates", type=int, default=None)
     parser.add_argument("--max-turns", type=int, default=2)
     parser.add_argument("--search-top-k", type=int, default=3)
     parser.add_argument("--search-timeout", type=float, default=30.0)
@@ -303,11 +300,7 @@ def main() -> int:
         raise ValueError("search-top-k must be > 0")
 
     artifact_dir = make_artifact_dir(args.artifact_dir, prefix="search-r1-ninja-")
-    runtime_config = (
-        active_state.load_active_runtime_config()
-        if args.runtime_config is None
-        else RuntimeConfig.from_yaml(args.runtime_config)
-    )
+    runtime_config = load_runtime_config(args.runtime_config)
     sampling_params = {
         "temperature": runtime_config.rollout.request.temperature,
         "top_p": runtime_config.rollout.request.top_p,
@@ -320,13 +313,6 @@ def main() -> int:
         seed=args.seed,
         max_examples=args.max_train_examples,
     )
-
-    def report_progress(update: dict[str, object]) -> None:
-        print(
-            "TRAIN_UPDATE",
-            json.dumps(update, sort_keys=True),
-            flush=True,
-        )
 
     @ninja.agent()
     def search_agent(client, *, prompt: Any, reward_model: Any) -> float:
@@ -396,7 +382,7 @@ def main() -> int:
             retries=args.train_group_retries,
             wait_timeout=args.wait_timeout,
             max_updates=args.max_updates,
-            progress_callback=report_progress,
+            progress_callback=print_train_update,
         )
     )
     save_summary(artifact_dir / "summary.json", summary)

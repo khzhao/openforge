@@ -149,8 +149,8 @@ python -m openforge.cli.main --help
 
 Start from the bundled example files:
 
-- `examples/gsm8k_gateway.yaml`
-- `examples/gsm8k_runtime.yaml`
+- `examples/gsm8k/gateway.yaml`
+- `examples/gsm8k/runtime.yaml`
 
 The gateway config controls:
 
@@ -198,7 +198,7 @@ export RAY_ADDRESS="ray://<head-node>:10001"
 ### Fastest Path
 
 ```bash
-bash examples/run_gsm8k_ninja_train.sh
+bash examples/gsm8k/run_ninja_train.sh
 ```
 
 This wrapper starts the gateway, starts a session, runs the GSM8K Ninja
@@ -209,19 +209,19 @@ training example, and cleans up on exit.
 Shell 1:
 
 ```bash
-python -m openforge.cli.main gateway start --config examples/gsm8k_gateway.yaml
+openforge gateway start --config examples/gsm8k/gateway.yaml
 ```
 
 Shell 2:
 
 ```bash
-python -m openforge.cli.main session start --runtime-config examples/gsm8k_runtime.yaml
+openforge session start --runtime-config examples/gsm8k/runtime.yaml
 ```
 
 Shell 3:
 
 ```bash
-PYTHONUNBUFFERED=1 python examples/train_gsm8k_ninja.py \
+PYTHONUNBUFFERED=1 python -m examples.gsm8k.train_ninja \
   --artifact-dir /tmp/openforge-gsm8k-train \
   --total-epochs 15
 ```
@@ -238,8 +238,8 @@ If you want to use an existing Ray cluster instead of the local default, export
 When you are done:
 
 ```bash
-python -m openforge.cli.main session stop
-python -m openforge.cli.main gateway stop
+openforge session stop
+openforge gateway stop
 ```
 
 ### Search-R1-Style Example
@@ -248,15 +248,15 @@ The Search-R1 example keeps the same gateway/session flow, but the agent body is
 multi-turn and uses an explicit search tool:
 
 ```bash
-bash examples/run_search_r1_ninja_train.sh
+bash examples/search_r1/run_ninja_train.sh
 ```
 
 Important details:
 
-- the runtime config is `examples/search_r1_runtime.yaml`
+- the runtime config is `examples/search_r1/runtime.yaml`
 - the example runtime uses 4 GPUs as `2` train workers plus `2` rollout replicas
-- the agent script is `examples/train_search_r1_ninja.py`
-- the wrapper uses `examples/search_r1_gateway.yaml` for an isolated gateway DB
+- the agent script is `python -m examples.search_r1.train_ninja`
+- the wrapper uses `examples/search_r1/gateway.yaml` for an isolated gateway DB
 - the built-in prompt-data default is `/home/guo/kzhao/data/kzhao/search_r1_train.parquet`
 - the built-in field defaults are `input-key=prompt` and `label-key=reward_model`
 - `session start` is the slow step on a cold `Qwen/Qwen2.5-3B-Instruct` run
@@ -264,7 +264,7 @@ Important details:
 If your Search-R1 parquet lives somewhere else, you can still override it:
 
 ```bash
-bash examples/run_search_r1_ninja_train.sh \
+bash examples/search_r1/run_ninja_train.sh \
   --prompt-data /path/to/train.parquet
 ```
 
@@ -281,16 +281,18 @@ bash examples/run_search_r1_ninja_train.sh \
   discovery.
 - `src/openforge/active_state.py`
   Machine-local shared state for the active gateway/session.
-- `examples/train_gsm8k_ninja.py`
+- `examples/gsm8k/train_ninja.py`
   Minimal end-to-end Ninja training example.
-- `examples/gsm8k_common.py`
-  Shared dataset preparation and the outer training schedule used by the GSM8K
-  and Search-R1 examples.
-- `examples/run_gsm8k_ninja_train.sh`
+- `examples/gsm8k/common.py`
+  GSM8K-specific dataset preparation and CLI setup.
+- `examples/shared.py`
+  Shared artifact helpers and the outer `ninja.train(...)` scheduling loop used
+  by the bundled examples.
+- `examples/gsm8k/run_ninja_train.sh`
   Convenience wrapper for the full GSM8K flow.
-- `examples/train_search_r1_ninja.py`
+- `examples/search_r1/train_ninja.py`
   Search-R1-style multi-turn Ninja example with a Python search tool.
-- `examples/run_search_r1_ninja_train.sh`
+- `examples/search_r1/run_ninja_train.sh`
   Convenience wrapper for the Search-R1-style flow.
 - `tests`
   CLI, Ninja, active-state, and gateway coverage.

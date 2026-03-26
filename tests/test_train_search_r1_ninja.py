@@ -8,9 +8,9 @@ from pathlib import Path
 
 from _script_test_utils import run_tests
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import train_search_r1_ninja as search_r1
+from examples.search_r1 import train_ninja as search_r1
 
 
 def _reset_search_state() -> None:

@@ -113,10 +113,11 @@ def main() -> int:
         )
         session_id = str(started["session_id"])
 
-        responses: list[Any] = []
+        response_payload: dict[str, Any] | None = None
 
         @ninja.agent()
         def agent(client, *, prompt: str, reward: float) -> float:
+            nonlocal response_payload
             response = client.chat.completions.create(
                 model=model_path,
                 messages=[{"role": "user", "content": prompt}],
@@ -124,16 +125,17 @@ def main() -> int:
                 top_p=1.0,
                 max_completion_tokens=8,
             )
-            responses.append(response)
+            response_payload = response.model_dump(mode="json")
             return reward
 
         reward = agent(prompt="Say hello in four words.", reward=0.0)
         assert reward == 0.0
-        response = responses[-1]
-        assert response.metadata["session_id"] == session_id
-        assert response.metadata["rollout_model_version"] == 0
-        assert response.choices[0].message.role == "assistant"
-        assert isinstance(response.choices[0].message.content, str)
+        assert response_payload is not None
+        response = response_payload
+        assert response["metadata"]["session_id"] == session_id
+        assert response["metadata"]["rollout_model_version"] == 0
+        assert response["choices"][0]["message"]["role"] == "assistant"
+        assert isinstance(response["choices"][0]["message"]["content"], str)
 
         policy_version = agent.policy_version()
         assert policy_version == 0
