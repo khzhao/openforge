@@ -10,20 +10,11 @@ from openforge.configs.models import OpenForgeConfig
 from openforge.rollout.router import RolloutRouter
 from openforge.rollout.router.types import RouterSpec
 from openforge.rollout.sglang.engine import Engine
-from openforge.rollout.sglang.engine_group import (
-    EngineGroup,
-    allocate_engine_addrs,
-    start_sglang_engines,
-)
+from openforge.rollout.sglang.engine_group import EngineGroup
 from openforge.rollout.sglang.types import EngineAddr, EngineSpec
 from openforge.utils.networking import get_free_port, get_host_ip
 
-__all__ = [
-    "RolloutManager",
-    "EngineGroup",
-    "allocate_engine_addrs",
-    "start_sglang_engines",
-]
+__all__ = ["RolloutManager"]
 
 
 class RolloutManager:
@@ -36,6 +27,8 @@ class RolloutManager:
     ) -> None:
         self.cfg = cfg
         self.placement_groups = placement_groups
+        self.router: RolloutRouter | None = None
+        self.router_spec: RouterSpec | None = None
 
     def initialize(
         self,
@@ -48,14 +41,10 @@ class RolloutManager:
         self.engine_group = EngineGroup(self.cfg, self.placement_groups)
         self.engine_group.initialize(engine_addrs=engine_addrs)
 
-        main_router_kwargs = {
+        mainrouter_kwargs = {
             "router_name": "openforge-router",
             "router_ip": router_ip or get_host_ip(),
             "router_port": router_port or get_free_port(start=30000),
-            "policy": router_kwargs.pop("policy", "round_robin"),
-            "worker_urls": [
-                addr.url for addr in self.engine_group.engine_addrs.values()
-            ],
             "request_timeout_secs": router_kwargs.pop("request_timeout_secs", 300),
             "worker_startup_timeout_secs": router_kwargs.pop(
                 "worker_startup_timeout_secs",
@@ -75,37 +64,38 @@ class RolloutManager:
             ),
             "log_level": router_kwargs.pop("log_level", None),
         }
-        main_router_kwargs.update(router_kwargs)
-        self.router_spec = RouterSpec(**main_router_kwargs)
-        self._router = RolloutRouter()
-        self._router.initialize(
-            spec=self.router_spec,
-            engine_workers=self.engine_group.engine_workers,
-            engine_specs=self.engine_group.engine_specs,
-            engine_addrs=self.engine_group.engine_addrs,
-        )
+        mainrouter_kwargs.update(router_kwargs)
+        self.router_spec = RouterSpec(**mainrouter_kwargs)
+        self.router = RolloutRouter(self.router_spec.url)
         try:
-            self._router.launch()
+            self.router.initialize(
+                spec=self.router_spec,
+                engine_specs=self.engine_group.engine_specs,
+                engine_addrs=self.engine_group.engine_addrs,
+            )
         except Exception:
+            self.router.shutdown()
             self.engine_group.shutdown()
-            self._router.shutdown()
             raise
 
     def shutdown(self) -> None:
-        router = getattr(self, "_router", None)
         try:
-            if router is not None:
-                router.shutdown()
+            if self.router is not None:
+                self.router.shutdown()
         finally:
             self.engine_group.shutdown()
 
     @property
     def router(self) -> RolloutRouter:
-        return self._router
+        return self.router
+
+    @property
+    def router_spec(self) -> RouterSpec:
+        return self.router_spec
 
     @property
     def router_url(self) -> str:
-        return self._router.url
+        return self.router.url
 
     @property
     def engine_workers(self) -> list[Engine]:
@@ -119,14 +109,5 @@ class RolloutManager:
     def engine_specs(self) -> list[EngineSpec]:
         return self.engine_group.engine_specs
 
-    def worker_names(self) -> list[str]:
-        return self.router.worker_names()
-
-    def worker_for_name(self, worker_name: str) -> Engine:
-        return self.router.worker_for_name(worker_name)
-
-    def health_status(self) -> dict[str, bool]:
-        return self.router.health_status()
-
-    def current_policy_version(self) -> int:
-        return self.router.current_policy_version()
+    def status(self) -> dict[str, Any]:
+        return self.router.status()
