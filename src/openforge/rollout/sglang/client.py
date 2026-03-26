@@ -41,8 +41,9 @@ class SGLangClient:
         sampling_params: dict[str, Any],
         timeout: float = 30.0,
         **kwargs: Any,
-    ) -> dict[str, Any]:
-        return self._post_json(
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        response = self._request(
+            "POST",
             "/generate",
             payload={
                 **kwargs,
@@ -51,6 +52,10 @@ class SGLangClient:
             },
             timeout=timeout,
         )
+        body = self._decode_body(response.text)
+        if not isinstance(body, (dict, list)):
+            raise RuntimeError("sglang /generate did not return JSON")
+        return body
 
     def pause_generation(
         self,

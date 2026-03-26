@@ -25,13 +25,25 @@ class RolloutRouterClient(SGLangClient):
     def generate(
         self,
         sampling_params: dict[str, Any],
+        *,
+        timeout: float = 30.0,
         **kwargs: Any,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         """Route one generate request through the router."""
-        return super().generate(
-            sampling_params=sampling_params,
-            **kwargs,
+        response = self._request(
+            "POST",
+            "/generate",
+            payload={
+                **kwargs,
+                "sampling_params": sampling_params,
+                "stream": False,
+            },
+            timeout=timeout,
         )
+        body = self._decode_body(response.text)
+        if not isinstance(body, (dict, list)):
+            raise RuntimeError("router /generate did not return JSON")
+        return body
 
     def health(self, *, timeout: float = 1.0) -> bool:
         return self._ok("GET", "/health", timeout=timeout)
