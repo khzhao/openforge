@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal, Sequence
@@ -130,7 +131,7 @@ class WeightUpdater:
         trainer_slept = True
         num_buckets = len(named_buckets)
         bucket_metas = [build_tensor_bucket_meta(bucket) for bucket in named_buckets]
-        source_device = torch.device("cuda", 0)
+        source_device = torch.device("cuda", self._source_device_index())
         torch.cuda.empty_cache()
         torch.cuda.set_device(source_device)
 
@@ -274,3 +275,13 @@ class WeightUpdater:
             offsets.append(start)
             start += int(world_size)
         return offsets
+
+    def _source_device_index(self) -> int:
+        physical_gpu_id = int(self.train_group.reordered_gpu_ids[0])
+        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if not cuda_visible_devices:
+            return physical_gpu_id
+        visible_gpu_ids = [
+            int(device.strip()) for device in cuda_visible_devices.split(",") if device
+        ]
+        return visible_gpu_ids.index(physical_gpu_id)
