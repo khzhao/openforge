@@ -1,13 +1,25 @@
 <p align="center">
-  <img src="./assets/openforge-logo.svg" alt="OpenForge" width="720" />
+  <img src="./assets/openforge-ninja.png" alt="OpenForge banner" width="960" />
+</p>
+
+<h1 align="center"><code>openforge</code></h1>
+
+<p align="center">
+  <strong>Gateway-first post-training for LLM agents.</strong>
 </p>
 
 <p align="center">
-  <strong>Train the agent, not the glue code.</strong>
+  Train the agent, not the glue code.
 </p>
 
 <p align="center">
-  OpenForge is a gateway-first framework for post-training LLM agents.
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#openforge-ninja-api">Ninja API</a> •
+  <a href="#configuration">Configuration</a> •
+  <a href="#why-it-feels-different">Why OpenForge</a>
+</p>
+
+<p align="center">
   Bring up one live runtime, attach a small Python agent through <code>ninja</code>,
   and keep rollout, training, checkpoints, and session lifecycle behind one surface.
 </p>
