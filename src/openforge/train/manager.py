@@ -1,6 +1,7 @@
 # Copyright 2026 openforge
 
-from typing import Sequence
+import threading
+from typing import Any, Sequence
 
 import ray
 import torch
@@ -8,6 +9,7 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from openforge.configs.models import OpenForgeConfig
+from openforge.rollout.router.client import RolloutRouterClient
 from openforge.train.fsdp2.weight_updater import WeightUpdater
 from openforge.train.types import TrainStepResult, TrainWorkerSpec, TrainWorkerState
 from openforge.train.worker import RayTrainWorker
@@ -20,7 +22,9 @@ class TrainManager:
 
     def __init__(self) -> None:
         self.workers = []
-        self.rollout_workers: Sequence[object] | None = None
+        self.rollout_router_client: RolloutRouterClient | None = None
+        self._sync_lock = threading.RLock()
+        self._latest_stable_policy_version = 0
 
     def initialize(
         self,
@@ -71,36 +75,20 @@ class TrainManager:
             ).remote()
             for bundle_index in self.reordered_bundle_indices
         ]
-        states = ray.get(
-            [
-                worker.initialize.remote(spec)
-                for worker, spec in zip(self.workers, specs, strict=True)
-            ]
-        )
-        return states
+        try:
+            states = ray.get(
+                [
+                    worker.initialize.remote(spec)
+                    for worker, spec in zip(self.workers, specs, strict=True)
+                ]
+            )
+            return states
+        except Exception:
+            self.shutdown()
+            raise
 
     def states(self) -> list[TrainWorkerState]:
         return ray.get([worker.status.remote() for worker in self.workers])
-
-    def step(
-        self,
-        rank_minibatches: Sequence[dict[str, torch.Tensor]],
-        *,
-        global_step: int | None = None,
-    ) -> list[TrainStepResult]:
-        assert len(rank_minibatches) == self.world_size, (
-            "Expected one mini-batch per training rank: "
-            f"{self.world_size} != {len(rank_minibatches)}"
-        )
-        return ray.get(
-            [
-                worker.step.remote(
-                    rank_minibatches[rank],
-                    global_step=global_step,
-                )
-                for rank, worker in enumerate(self.workers)
-            ]
-        )
 
     def step_update(
         self,
@@ -108,74 +96,178 @@ class TrainManager:
         *,
         global_step: int | None = None,
     ) -> list[list[TrainStepResult]]:
-        rank_updates = [[] for _ in range(self.world_size)]
-        for rank_minibatches in rank_minibatches_per_update:
-            assert len(rank_minibatches) == self.world_size, (
-                "Expected one mini-batch per training rank: "
-                f"{self.world_size} != {len(rank_minibatches)}"
+        rank_updates = self._build_rank_updates(rank_minibatches_per_update)
+        with self._sync_lock:
+            return self._step_update_locked(
+                rank_updates,
+                global_step=global_step,
             )
-            for rank, mini_batch in enumerate(rank_minibatches):
-                rank_updates[rank].append(mini_batch)
-        return ray.get(
-            [
-                worker.step_update.remote(
-                    rank_updates[rank],
-                    global_step=global_step,
-                )
-                for rank, worker in enumerate(self.workers)
-            ]
+
+    def step_update_and_publish(
+        self,
+        rank_minibatches_per_update: Sequence[Sequence[dict[str, torch.Tensor]]],
+        *,
+        global_step: int | None = None,
+        policy_version: int,
+    ) -> list[list[TrainStepResult]]:
+        rank_updates = self._build_rank_updates(rank_minibatches_per_update)
+        with self._sync_lock:
+            results = self._step_update_locked(
+                rank_updates,
+                global_step=global_step,
+            )
+            rollout_router_client = self._publish_rollout_policy_version_locked(
+                policy_version
+            )
+        if rollout_router_client is None:
+            return results
+        rollout_router_client.receive_policy_version(
+            policy_version=policy_version,
         )
+        return results
 
     def sleep(self) -> None:
-        ray.get([worker.sleep.remote() for worker in self.workers])
+        with self._sync_lock:
+            ray.get([worker.sleep.remote() for worker in self.workers])
 
     def wakeup(self) -> None:
-        ray.get([worker.wakeup.remote() for worker in self.workers])
+        with self._sync_lock:
+            ray.get([worker.wakeup.remote() for worker in self.workers])
 
     def build_tensor_buckets(
         self,
         *,
         bucket_bytes: int,
     ) -> list[list[tuple[str, torch.Tensor]]]:
-        results = ray.get(
-            [
-                worker.build_tensor_buckets.remote(bucket_bytes=bucket_bytes)
-                for worker in self.workers
-            ]
-        )
+        with self._sync_lock:
+            results = ray.get(
+                [
+                    worker.build_tensor_buckets.remote(bucket_bytes=bucket_bytes)
+                    for worker in self.workers
+                ]
+            )
         result = results[0]
         assert result is not None, "publisher rank returned no tensor buckets"
         return result
 
     def export_checkpoint(self, *, policy_version: int) -> str:
-        results = ray.get(
-            [
-                worker.export_checkpoint.remote(policy_version=policy_version)
-                for worker in self.workers
-            ]
-        )
+        with self._sync_lock:
+            results = ray.get(
+                [
+                    worker.export_checkpoint.remote(policy_version=policy_version)
+                    for worker in self.workers
+                ]
+            )
         result = results[0]
         assert result is not None, "publisher rank returned no checkpoint path"
         return result
 
-    def register_rollout(self, rollout_workers: Sequence[object]) -> None:
-        self.rollout_workers = list(rollout_workers)
+    def register_rollout(
+        self,
+        rollout_router_url: str,
+        *,
+        train_server_url: str,
+    ) -> None:
+        self.rollout_router_client = RolloutRouterClient(rollout_router_url)
+        self.rollout_router_client.register_train_server(
+            train_server_url=train_server_url,
+        )
 
-    def sync_rollout_weights(
+    def publish_rollout_policy_version(self, policy_version: int) -> None:
+        with self._sync_lock:
+            rollout_router_client = self._publish_rollout_policy_version_locked(
+                policy_version
+            )
+        if rollout_router_client is None:
+            return
+        rollout_router_client.receive_policy_version(policy_version=policy_version)
+
+    @property
+    def latest_stable_policy_version(self) -> int:
+        return self._latest_stable_policy_version
+
+    def respond_to_weight_sync_request(
         self,
         *,
-        policy_version: int,
-        mode: str = "auto",
-        bucket_bytes: int = 256 << 20,
-    ) -> None:
-        if self.rollout_workers is None:
-            raise RuntimeError("rollout must be registered before syncing weights")
+        workers: Sequence[tuple[str, int]],
+        target_version: int,
+        mode: str = "distributed",
+    ) -> dict[str, Any]:
+        normalized_workers = [
+            (str(worker_url).rstrip("/"), int(world_size))
+            for worker_url, world_size in workers
+        ]
+        if not normalized_workers:
+            return {
+                "target_version": target_version,
+                "latest_stable_policy_version": self._latest_stable_policy_version,
+                "results": [],
+            }
 
-        WeightUpdater(self, bucket_bytes=bucket_bytes).sync(
-            self.rollout_workers,
-            policy_version=policy_version,
-            mode=mode,
-        )
+        if not self._sync_lock.acquire(blocking=False):
+            return {
+                "target_version": target_version,
+                "latest_stable_policy_version": self._latest_stable_policy_version,
+                "results": [
+                    {
+                        "worker_url": worker_url,
+                        "ok": False,
+                        "error": "training_in_progress",
+                    }
+                    for worker_url, _ in normalized_workers
+                ],
+            }
+
+        try:
+            latest_stable_version = self._latest_stable_policy_version
+            if target_version != latest_stable_version:
+                return {
+                    "target_version": target_version,
+                    "latest_stable_policy_version": latest_stable_version,
+                    "results": [
+                        {
+                            "worker_url": worker_url,
+                            "ok": False,
+                            "error": (
+                                "target_version does not match the latest stable "
+                                f"version: {target_version} != {latest_stable_version}"
+                            ),
+                        }
+                        for worker_url, _ in normalized_workers
+                    ],
+                }
+
+            try:
+                WeightUpdater(self).sync(
+                    normalized_workers,
+                    policy_version=target_version,
+                    mode=mode,
+                )
+            except Exception as exc:
+                results = [
+                    {
+                        "worker_url": worker_url,
+                        "ok": False,
+                        "error": str(exc),
+                    }
+                    for worker_url, _ in normalized_workers
+                ]
+            else:
+                results = [
+                    {
+                        "worker_url": worker_url,
+                        "ok": True,
+                    }
+                    for worker_url, _ in normalized_workers
+                ]
+
+            return {
+                "target_version": target_version,
+                "latest_stable_policy_version": latest_stable_version,
+                "results": results,
+            }
+        finally:
+            self._sync_lock.release()
 
     def shutdown(self) -> None:
         workers = list(self.workers)
@@ -187,3 +279,42 @@ class TrainManager:
                 ray.kill(worker)
             self.workers.clear()
             ray.util.remove_placement_group(self.pg)
+
+    def _build_rank_updates(
+        self,
+        rank_minibatches_per_update: Sequence[Sequence[dict[str, torch.Tensor]]],
+    ) -> list[list[dict[str, torch.Tensor]]]:
+        rank_updates = [[] for _ in range(self.world_size)]
+        for rank_minibatches in rank_minibatches_per_update:
+            assert len(rank_minibatches) == self.world_size, (
+                "Expected one mini-batch per training rank: "
+                f"{self.world_size} != {len(rank_minibatches)}"
+            )
+            for rank, mini_batch in enumerate(rank_minibatches):
+                rank_updates[rank].append(mini_batch)
+        return rank_updates
+
+    def _step_update_locked(
+        self,
+        rank_updates: Sequence[Sequence[dict[str, torch.Tensor]]],
+        *,
+        global_step: int | None = None,
+    ) -> list[list[TrainStepResult]]:
+        return ray.get(
+            [
+                worker.step_update.remote(
+                    rank_updates[rank],
+                    global_step=global_step,
+                )
+                for rank, worker in enumerate(self.workers)
+            ]
+        )
+
+    def _publish_rollout_policy_version_locked(
+        self,
+        policy_version: int,
+    ) -> RolloutRouterClient | None:
+        assert policy_version >= 0
+        assert policy_version >= self._latest_stable_policy_version
+        self._latest_stable_policy_version = policy_version
+        return self.rollout_router_client

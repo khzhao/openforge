@@ -9,13 +9,12 @@ from openforge.configs.models import OpenForgeConfig
 
 if TYPE_CHECKING:
     from openforge.rollout.manager import RolloutManager
-    from openforge.train.manager import TrainManager
+    from openforge.train.runtime import TrainRuntime
 
 __all__ = [
     "create_algorithm",
     "create_rollout_manager",
-    "create_train_manager",
-    "register_rollout",
+    "create_train_runtime",
 ]
 
 
@@ -39,15 +38,16 @@ def create_rollout_manager(
     return manager
 
 
-def create_train_manager(
+def create_train_runtime(
     cfg: OpenForgeConfig,
     *,
     master_addr: str,
     master_port: int,
     placement_groups,
-) -> TrainManager:
-    """Create a train manager."""
+) -> TrainRuntime:
+    """Create a train runtime."""
     from openforge.train.manager import TrainManager
+    from openforge.train.runtime import TrainRuntime
 
     manager = TrainManager()
     manager.initialize(
@@ -56,12 +56,8 @@ def create_train_manager(
         master_port=master_port,
         placement_group=placement_groups,
     )
-    return manager
-
-
-def register_rollout(
-    train_manager: TrainManager,
-    rollout_manager: RolloutManager,
-) -> None:
-    """Register a rollout manager with a train manager."""
-    train_manager.register_rollout(rollout_manager.engine_workers)
+    try:
+        return TrainRuntime(manager)
+    except Exception:
+        manager.shutdown()
+        raise
