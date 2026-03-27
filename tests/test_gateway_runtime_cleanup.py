@@ -45,6 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--artifact-dir", default=None)
     return parser.parse_args()
+
+
 def resolve_model_path(model_path_or_id: str) -> str:
     """Resolve a local model path or download/cache a Hub model snapshot."""
     candidate = Path(model_path_or_id)
@@ -137,7 +139,7 @@ def build_start_session_payload(
             "model": {
                 "model_name_or_path": model_path,
                 "tokenizer_name_or_path": model_path,
-                "attn_implementation": "sdpa",
+                "attn_implementation": "flash_attention_2",
             },
             "train": {
                 "backend": "fsdp2",

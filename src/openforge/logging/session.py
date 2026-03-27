@@ -240,28 +240,47 @@ class SessionLogger:
         }
         self._run.log(runtime_payload)
 
+        status_payload = {
+            "wall_time_s": wall_time_seconds,
+        }
         rollout_status = self._latest_rollout_status
         if rollout_status:
-            status_payload = {
-                "wall_time_s": wall_time_seconds,
-                "status/min_weight_version": float(
-                    rollout_status.get("min_weight_version", 0)
-                ),
-                "status/max_weight_version": float(
-                    rollout_status.get("max_weight_version", 0)
-                ),
-                "status/stale_worker_count": float(
-                    rollout_status.get("stale_worker_count", 0)
-                ),
-                "status/rollout_heartbeat_age_s": float(
-                    rollout_status.get("heartbeat_age_s", 0.0)
-                ),
-            }
-            latest_train_update = self._latest_train_update
-            if latest_train_update is not None:
-                status_payload["status/train_policy_version"] = float(
-                    latest_train_update["policy_version"]
-                )
+            status_payload.update(
+                {
+                    "status/min_weight_version": float(
+                        rollout_status.get("min_weight_version", 0)
+                    ),
+                    "status/max_weight_version": float(
+                        rollout_status.get("max_weight_version", 0)
+                    ),
+                    "status/stale_worker_count": float(
+                        rollout_status.get("stale_worker_count", 0)
+                    ),
+                    "status/rollout_heartbeat_age_s": float(
+                        rollout_status.get("heartbeat_age_s", 0.0)
+                    ),
+                }
+            )
+        latest_train_update = self._latest_train_update
+        if latest_train_update is not None:
+            status_payload.update(
+                {
+                    "status/train_policy_version": float(
+                        latest_train_update["policy_version"]
+                    ),
+                    "status/train_global_step": float(
+                        latest_train_update["global_step"]
+                    ),
+                    "status/train_reward_mean": float(
+                        latest_train_update["reward_mean"]
+                    ),
+                    "status/train_grad_norm": float(
+                        latest_train_update.get("grad_norm", 0.0)
+                    ),
+                    "status/train_lr": float(latest_train_update.get("lr", 0.0)),
+                }
+            )
+        if len(status_payload) > 1:
             self._run.log(status_payload)
 
         cluster_status = self._latest_cluster_status

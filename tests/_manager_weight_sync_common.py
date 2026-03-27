@@ -57,7 +57,7 @@ def build_cfg(
             "model": {
                 "model_name_or_path": model_path,
                 "tokenizer_name_or_path": model_path,
-                "attn_implementation": "sdpa",
+                "attn_implementation": "flash_attention_2",
             },
             "cluster": {
                 "num_nodes": 1,
@@ -200,7 +200,9 @@ def assert_policy_versions(
     *,
     expected_version: int,
 ) -> None:
-    versions = ray.get([worker.get_weight_version.remote() for worker in rollout_workers])
+    versions = ray.get(
+        [worker.get_weight_version.remote() for worker in rollout_workers]
+    )
     expected = str(expected_version)
     for index, version in enumerate(versions):
         if version != expected:
@@ -319,7 +321,10 @@ def run_weight_sync_e2e(
         global_step = 0
         for mode_index, mode in enumerate(normalized_sync_modes, start=1):
             snapshot_responses = ray.get(
-                [worker.check_weights.remote(action="snapshot") for worker in rollout_workers]
+                [
+                    worker.check_weights.remote(action="snapshot")
+                    for worker in rollout_workers
+                ]
             )
             assert_snapshot_success(snapshot_responses, context=f"{mode}/snapshot")
 
@@ -348,7 +353,10 @@ def run_weight_sync_e2e(
                 expected_version=policy_version,
             )
             compare_responses = ray.get(
-                [worker.check_weights.remote(action="compare") for worker in rollout_workers]
+                [
+                    worker.check_weights.remote(action="compare")
+                    for worker in rollout_workers
+                ]
             )
             assert_weights_changed(compare_responses, context=f"{mode}/compare")
             print(

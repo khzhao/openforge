@@ -15,7 +15,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-gpus", type=int, default=1)
     parser.add_argument("--rollout-gpus", type=int, default=1)
     return parser.parse_args()
-def build_cfg(*, visible_gpus: int, train_gpus: int, rollout_gpus: int) -> OpenForgeConfig:
+
+
+def build_cfg(
+    *, visible_gpus: int, train_gpus: int, rollout_gpus: int
+) -> OpenForgeConfig:
     return OpenForgeConfig.model_validate(
         {
             "data": {},
@@ -23,7 +27,7 @@ def build_cfg(*, visible_gpus: int, train_gpus: int, rollout_gpus: int) -> OpenF
             "model": {
                 "model_name_or_path": "unused",
                 "tokenizer_name_or_path": "unused",
-                "attn_implementation": "sdpa",
+                "attn_implementation": "flash_attention_2",
             },
             "cluster": {
                 "num_nodes": 1,
@@ -110,7 +114,9 @@ def build_cfg(*, visible_gpus: int, train_gpus: int, rollout_gpus: int) -> OpenF
     )
 
 
-def verify_mapping(name: str, pg, bundle_indices: list[int], expected_gpu_ids: list[int]) -> None:
+def verify_mapping(
+    name: str, pg, bundle_indices: list[int], expected_gpu_ids: list[int]
+) -> None:
     workers = []
     try:
         for bundle_index in bundle_indices:
@@ -156,10 +162,14 @@ def main() -> int:
     try:
         placement_groups = create_placement_groups(cfg)
         actor_pg, actor_bundle_indices, actor_gpu_ids = placement_groups["actor"]
-        rollout_pg, rollout_bundle_indices, rollout_gpu_ids = placement_groups["rollout"]
+        rollout_pg, rollout_bundle_indices, rollout_gpu_ids = placement_groups[
+            "rollout"
+        ]
 
         if actor_pg != rollout_pg:
-            raise RuntimeError("actor and rollout slices should share one placement group")
+            raise RuntimeError(
+                "actor and rollout slices should share one placement group"
+            )
         if len(actor_bundle_indices) != args.train_gpus:
             raise RuntimeError("actor bundle count does not match requested train GPUs")
         if len(rollout_bundle_indices) != args.rollout_gpus:
@@ -169,14 +179,14 @@ def main() -> int:
         if set(actor_bundle_indices) & set(rollout_bundle_indices):
             raise RuntimeError("actor and rollout bundle indices overlap")
         if len(set(actor_gpu_ids + rollout_gpu_ids)) != total_requested:
-            raise RuntimeError("physical GPU ids are not unique across the placement group")
+            raise RuntimeError(
+                "physical GPU ids are not unique across the placement group"
+            )
 
         verify_mapping("actor", actor_pg, actor_bundle_indices, actor_gpu_ids)
         verify_mapping("rollout", rollout_pg, rollout_bundle_indices, rollout_gpu_ids)
 
-        print(
-            f"SUCCESS train_gpus={args.train_gpus} rollout_gpus={args.rollout_gpus}"
-        )
+        print(f"SUCCESS train_gpus={args.train_gpus} rollout_gpus={args.rollout_gpus}")
         return 0
     finally:
         if actor_pg is not None:

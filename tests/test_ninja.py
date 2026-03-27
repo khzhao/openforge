@@ -40,7 +40,7 @@ def _runtime_config(*, global_batch_size: int) -> RuntimeConfig:
                 "model": {
                     "model_name_or_path": "model-a",
                     "tokenizer_name_or_path": "model-a-tokenizer",
-                    "attn_implementation": "sdpa",
+                    "attn_implementation": "flash_attention_2",
                 },
                 "train": {
                     "backend": "fsdp2",
@@ -534,7 +534,9 @@ def test_register_routes_explicit_messages() -> None:
             top_k=-1,
             repetition_penalty=1.1,
         )
-        messages.append({"role": "assistant", "content": first.choices[0].message.content})
+        messages.append(
+            {"role": "assistant", "content": first.choices[0].message.content}
+        )
         messages.append({"role": "user", "content": "follow up"})
         second = client.chat.completions.create(
             model="model-a",

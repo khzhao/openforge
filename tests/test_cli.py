@@ -54,7 +54,7 @@ def _runtime_config() -> RuntimeConfig:
                     "model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
                     "tokenizer_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
                     "reference_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
-                    "attn_implementation": "sdpa",
+                    "attn_implementation": "flash_attention_2",
                 },
                 "train": {
                     "backend": "fsdp2",

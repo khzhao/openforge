@@ -100,7 +100,7 @@ def _start_session_payload(model_name: str = "model-a") -> dict[str, object]:
                 "model": {
                     "model_name_or_path": model_name,
                     "tokenizer_name_or_path": f"{model_name}-tokenizer",
-                    "attn_implementation": "sdpa",
+                    "attn_implementation": "flash_attention_2",
                 },
                 "train": {
                     "backend": "fsdp2",

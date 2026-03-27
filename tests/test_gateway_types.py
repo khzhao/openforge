@@ -15,7 +15,7 @@ def _runtime_payload(*, algo: dict[str, object], lag: int) -> dict[str, object]:
             "model_name_or_path": "Qwen/Qwen2.5-3B-Instruct",
             "tokenizer_name_or_path": "Qwen/Qwen2.5-3B-Instruct",
             "reference_model_name_or_path": "Qwen/Qwen2.5-3B-Instruct",
-            "attn_implementation": "sdpa",
+            "attn_implementation": "flash_attention_2",
         },
         "train": {
             "backend": "fsdp2",

@@ -55,7 +55,7 @@ def _runtime_config(
                 "model": {
                     "model_name_or_path": model_name,
                     "tokenizer_name_or_path": model_name,
-                    "attn_implementation": "sdpa",
+                    "attn_implementation": "flash_attention_2",
                 },
                 "train": {
                     "backend": "fsdp2",

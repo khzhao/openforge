@@ -54,7 +54,7 @@ def build_cfg(
             "model": {
                 "model_name_or_path": model_path,
                 "tokenizer_name_or_path": model_path,
-                "attn_implementation": "sdpa",
+                "attn_implementation": "flash_attention_2",
             },
             "algo": {"name": "grpo", "kl_coef": 0.0},
             "cluster": {

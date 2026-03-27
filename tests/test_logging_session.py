@@ -3,17 +3,35 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from _script_test_utils import expect_raises, run_tests
+from _script_test_utils import expect_raises, install_test_stubs, run_tests
 
-import openforge.active_state as active_state
-from openforge.gateway.types import RuntimeConfig, StartSessionRequest
+install_test_stubs()
+
+from openforge.gateway.types import StartSessionRequest
+from openforge.logging import SessionLogger
 
 
-def _runtime_config() -> RuntimeConfig:
+class _FakeRun:
+    def __init__(self) -> None:
+        self.logged: list[dict[str, object]] = []
+        self.defined: list[tuple[str, str | None]] = []
+        self.finished = False
+
+    def log(self, payload: dict[str, object]) -> None:
+        self.logged.append(dict(payload))
+
+    def define_metric(self, name: str, *, step_metric: str | None = None) -> None:
+        self.defined.append((name, step_metric))
+
+    def finish(self) -> None:
+        self.finished = True
+
+
+def _runtime_config(*, wandb: dict[str, object] | None):
     request = StartSessionRequest.model_validate(
         {
             "runtime": {
@@ -21,7 +39,6 @@ def _runtime_config() -> RuntimeConfig:
                 "model": {
                     "model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
                     "tokenizer_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
-                    "reference_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
                     "attn_implementation": "flash_attention_2",
                 },
                 "train": {
@@ -54,8 +71,8 @@ def _runtime_config() -> RuntimeConfig:
                             "num_cycles": 0.5,
                         },
                     },
-                    "global_batch_size": 8,
-                    "mini_batch_size": 4,
+                    "global_batch_size": 1,
+                    "mini_batch_size": 1,
                     "micro_batch_size": 1,
                     "max_rollout_policy_lag": 0,
                     "checkpoints": "./checkpoints",
@@ -100,71 +117,110 @@ def _runtime_config() -> RuntimeConfig:
                         }
                     ],
                 },
+                "wandb": wandb,
             }
         }
     )
     return request.runtime
 
 
-def test_active_state_path_uses_openforge_cache_home() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with patch.dict(active_state.os.environ, {"OPENFORGE_CACHE_HOME": tmpdir}):
-            assert active_state.active_state_path() == (
-                Path(tmpdir) / "openforge" / "active_gateway.json"
-            )
+def test_session_logger_uses_runtime_wandb_config() -> None:
+    logger = SessionLogger()
+    fake_run = _FakeRun()
+    fake_wandb = SimpleNamespace(init=lambda **kwargs: fake_run)
+
+    with patch.dict(sys.modules, {"wandb": fake_wandb}):
+        logger.start(
+            session_id="sess-12345678",
+            runtime_config=_runtime_config(
+                wandb={
+                    "enabled": True,
+                    "project": "proj-a",
+                    "entity": "team-a",
+                    "name": "run-a",
+                    "tags": ["alpha", "beta"],
+                    "log_interval_seconds": 3.0,
+                }
+            ),
+        )
+
+    assert logger._run is fake_run
+    assert logger._log_interval_seconds == 3.0
+    logger.finish()
 
 
-def test_active_state_round_trip_gateway_and_session() -> None:
-    runtime = _runtime_config()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state_path = Path(tmpdir) / "active_gateway.json"
-        with patch.object(active_state, "active_state_path", lambda: state_path):
-            active_state.save_active_gateway(host="127.0.0.1", port=8000, pid=4321)
-            assert active_state.load_active_gateway_target() == ("127.0.0.1", 8000)
-            assert active_state.load_active_gateway_pid() == 4321
+def test_session_logger_does_not_use_env_to_enable_wandb() -> None:
+    logger = SessionLogger()
 
-            active_state.save_active_session(session_id="sess_123", runtime=runtime)
-            assert active_state.load_active_runtime_config().model_dump(
-                mode="json"
-            ) == runtime.model_dump(mode="json")
+    with patch.dict("os.environ", {"WANDB_PROJECT": "env-project"}, clear=True):
+        logger.start(
+            session_id="sess-12345678",
+            runtime_config=_runtime_config(wandb=None),
+        )
 
-            active_state.clear_active_session()
-            assert active_state.load_active_state().session is None
-
-            active_state.clear_active_gateway(expected_pid=4321)
-            assert state_path.exists() is False
+    assert logger._run is None
 
 
-def test_load_active_runtime_config_requires_active_session() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state_path = Path(tmpdir) / "active_gateway.json"
-        with patch.object(active_state, "active_state_path", lambda: state_path):
-            active_state.save_active_gateway(host="127.0.0.1", port=8000, pid=4321)
-            with expect_raises(
-                AssertionError,
-                "python -m openforge.cli.main session start",
-            ):
-                active_state.load_active_runtime_config()
+def test_session_logger_runtime_wandb_requires_project() -> None:
+    logger = SessionLogger()
+
+    with expect_raises(
+        Exception,
+        match="runtime.wandb.project is required",
+    ):
+        logger.start(
+            session_id="sess-12345678",
+            runtime_config=_runtime_config(wandb={"enabled": True}),
+        )
 
 
-def test_clear_active_gateway_respects_expected_pid() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state_path = Path(tmpdir) / "active_gateway.json"
-        with patch.object(active_state, "active_state_path", lambda: state_path):
-            active_state.save_active_gateway(host="127.0.0.1", port=8000, pid=4321)
-            active_state.clear_active_gateway(expected_pid=9999)
-            assert state_path.exists() is True
-            active_state.clear_active_gateway(expected_pid=4321)
-            assert state_path.exists() is False
+def test_session_logger_logs_train_metrics_on_wall_time_axis() -> None:
+    logger = SessionLogger()
+    fake_run = _FakeRun()
+    fake_wandb = SimpleNamespace(init=lambda **kwargs: fake_run)
+
+    with patch.dict(sys.modules, {"wandb": fake_wandb}):
+        logger.start(
+            session_id="sess-12345678",
+            runtime_config=_runtime_config(
+                wandb={
+                    "enabled": True,
+                    "project": "proj-a",
+                    "log_interval_seconds": 0.0,
+                }
+            ),
+        )
+
+    logger.record_train_update(
+        {
+            "policy_version": 7,
+            "global_step": 3,
+            "reward_mean": 1.25,
+            "grad_norm": 2.5,
+            "lr": 1.0e-5,
+        }
+    )
+    logger.flush(force=True)
+
+    assert any(
+        payload.get("status/train_policy_version") == 7.0
+        and payload.get("status/train_global_step") == 3.0
+        and payload.get("status/train_reward_mean") == 1.25
+        and payload.get("status/train_grad_norm") == 2.5
+        and payload.get("status/train_lr") == 1.0e-5
+        and "wall_time_s" in payload
+        for payload in fake_run.logged
+    )
+    logger.finish()
 
 
 def main() -> int:
     return run_tests(
         [
-            test_active_state_path_uses_openforge_cache_home,
-            test_active_state_round_trip_gateway_and_session,
-            test_load_active_runtime_config_requires_active_session,
-            test_clear_active_gateway_respects_expected_pid,
+            test_session_logger_uses_runtime_wandb_config,
+            test_session_logger_does_not_use_env_to_enable_wandb,
+            test_session_logger_runtime_wandb_requires_project,
+            test_session_logger_logs_train_metrics_on_wall_time_axis,
         ]
     )
 

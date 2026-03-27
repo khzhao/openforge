@@ -71,7 +71,7 @@ def build_runtime_config(checkpoint_dir: Path) -> RuntimeConfig:
             "model": {
                 "model_name_or_path": MODEL_NAME,
                 "tokenizer_name_or_path": MODEL_NAME,
-                "attn_implementation": "sdpa",
+                "attn_implementation": "flash_attention_2",
             },
             "train": {
                 "backend": "fsdp2",
@@ -424,8 +424,7 @@ async def main() -> None:
 
     os.environ.setdefault("NCCL_CUMEM_ENABLE", "0")
     assert torch.cuda.device_count() == VISIBLE_GPUS_REQUIRED, (
-        f"torch sees {torch.cuda.device_count()} GPUs, expected "
-        f"{VISIBLE_GPUS_REQUIRED}"
+        f"torch sees {torch.cuda.device_count()} GPUs, expected {VISIBLE_GPUS_REQUIRED}"
     )
 
     temp_dir = Path(tempfile.mkdtemp(prefix="openforge-e2e-async-live-"))
