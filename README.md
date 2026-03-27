@@ -282,13 +282,13 @@ bash examples/search_r1/run_ninja_train.sh \
 ├── assets/
 │   └── openforge-ninja.png
 ├── examples/
-│   ├── benchmark_ninja_register_batching.py
 │   ├── shared.py
 │   ├── gsm8k/
 │   │   ├── common.py
 │   │   ├── gateway.yaml
 │   │   ├── run_ninja_train.sh
 │   │   ├── runtime.yaml
+│   │   ├── task.py
 │   │   └── train_ninja.py
 │   └── search_r1/
 │       ├── gateway.yaml
@@ -298,7 +298,6 @@ bash examples/search_r1/run_ninja_train.sh \
 ├── src/openforge/
 │   ├── active_state.py
 │   ├── algo/
-│   ├── benchmarks/
 │   ├── cli/
 │   ├── configs/
 │   ├── data/
@@ -331,8 +330,6 @@ Key paths:
   Rollout orchestration plus router and SGLang integrations.
 - `src/openforge/train/`
   Training manager/runtime code, the FSDP2 backend, and the train-side server.
-- `src/openforge/benchmarks/gsm8k.py`
-  GSM8K prompt building and scoring helpers used by the examples.
 - `examples/shared.py`
   Shared artifact helpers and the outer `ninja.train(...)` scheduling loop used
   by the bundled examples.

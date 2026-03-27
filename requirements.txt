@@ -1,8 +1,8 @@
-datasets
-huggingface_hub
-httpx
-requests
-safetensors
-setuptools
-sglang[all]==0.5.9
-sglang_router==0.3.2
+datasets>=4.8.4,<5
+huggingface_hub>=0.36.2,<0.37
+httpx>=0.28.1,<0.29
+requests>=2.32.5,<3
+safetensors>=0.7.0,<0.8
+setuptools>=82.0.0,<83
+sglang[all]>=0.5.9,<0.6
+sglang_router>=0.3.2,<0.4
