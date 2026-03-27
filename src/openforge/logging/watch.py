@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["render_status"]
+__all__ = ["render_status", "render_watch_error"]
 
 
 def render_status(payload: dict[str, Any]) -> str:
@@ -68,6 +68,17 @@ def render_status(payload: dict[str, Any]) -> str:
             )
 
     return "\n".join(lines)
+
+
+def render_watch_error(message: str) -> str:
+    """Render an errored watch state."""
+    return "\n".join(
+        [
+            "watch state=errored",
+            f"error  {message}",
+            "waiting for next refresh attempt...",
+        ]
+    )
 
 
 def _format_float(value: object) -> str:

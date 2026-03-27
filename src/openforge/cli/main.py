@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from openforge import active_state
 from openforge.configs.models import GatewayServerConfig
 from openforge.gateway.types import RuntimeConfig
-from openforge.logging import render_status
+from openforge.logging import render_status, render_watch_error
 
 DEFAULT_GATEWAY_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_START_TIMEOUT_SECONDS = 600.0
@@ -230,20 +230,27 @@ def _run_watch(args: argparse.Namespace) -> int:
     base_url = f"http://{host}:{port}"
     _wait_for_gateway(base_url=base_url, timeout=args.timeout)
     while True:
-        status, response = _request_json(
-            method="GET",
-            url=f"{base_url}/status",
-            payload=None,
-            timeout=args.timeout,
-        )
-        if status != 200:
-            raise SystemExit(
-                f"gateway status failed with status {status}: "
-                f"{json.dumps(response, sort_keys=True)}"
+        output = None
+        try:
+            status, response = _request_json(
+                method="GET",
+                url=f"{base_url}/status",
+                payload=None,
+                timeout=args.timeout,
             )
+        except SystemExit as exc:
+            output = render_watch_error(str(exc))
+        else:
+            if status != 200:
+                output = render_watch_error(
+                    f"gateway status failed with status {status}: "
+                    f"{json.dumps(response, sort_keys=True)}"
+                )
+            else:
+                output = render_status(response)
         if sys.stdout.isatty():
             print("\033[2J\033[H", end="")
-        print(render_status(response), flush=True)
+        print(output, flush=True)
         if args.once:
             return 0
         time.sleep(args.interval)

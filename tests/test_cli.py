@@ -421,6 +421,36 @@ def test_openforge_watch_prints_status_once() -> None:
     ]
 
 
+def test_openforge_watch_prints_error_state_once_on_status_failure() -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_urlopen(request, timeout: float):
+        requests.append((request.method, request.full_url))
+        if request.full_url.endswith("/health"):
+            return _FakeHTTPResponse(status=200, payload={"ok": True})
+        if request.full_url.endswith("/status"):
+            raise openforge_cli.urllib_error.URLError("timed out")
+        raise AssertionError(request.full_url)
+
+    with patch.object(
+        openforge_cli.active_state,
+        "load_active_gateway_target",
+        lambda: ("127.0.0.1", 8000),
+    ):
+        with patch.object(openforge_cli.urllib_request, "urlopen", fake_urlopen):
+            with patch.object(openforge_cli.sys.stdout, "isatty", lambda: False):
+                with patch("builtins.print") as print_mock:
+                    assert openforge_cli.main(["watch", "--once"]) == 0
+
+    printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list)
+    assert "watch state=errored" in printed
+    assert "waiting for next refresh attempt..." in printed
+    assert requests == [
+        ("GET", "http://127.0.0.1:8000/health"),
+        ("GET", "http://127.0.0.1:8000/status"),
+    ]
+
+
 def main() -> int:
     return run_tests(
         [
@@ -430,6 +460,7 @@ def main() -> int:
             test_openforge_gateway_stop_terminates_recorded_process,
             test_openforge_gateway_stop_escalates_to_sigkill,
             test_openforge_watch_prints_status_once,
+            test_openforge_watch_prints_error_state_once_on_status_failure,
         ]
     )
 
