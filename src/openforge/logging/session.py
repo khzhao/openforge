@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -41,6 +40,7 @@ def build_train_update(
 
     rewards = [float(trajectory.final_reward) for trajectory in trajectories]
     reward_tensor = torch.tensor(rewards, dtype=torch.float32)
+    trajectory_count = len(trajectories)
     turns = [
         turn
         for trajectory in trajectories
@@ -48,6 +48,7 @@ def build_train_update(
     ]
     prompt_tokens = sum(turn.prompt_length for turn in turns)
     completion_tokens = sum(len(turn.token_ids) - turn.prompt_length for turn in turns)
+    total_tokens = prompt_tokens + completion_tokens
     payload: dict[str, object] = {
         "policy_version": policy_version,
         "global_step": global_step,
@@ -56,16 +57,20 @@ def build_train_update(
         "reward_std": float(reward_tensor.std(unbiased=False)),
         "reward_min": float(reward_tensor.min()),
         "reward_max": float(reward_tensor.max()),
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
+        "prompt_tokens": (
+            prompt_tokens / trajectory_count if trajectory_count > 0 else 0.0
+        ),
+        "completion_tokens": (
+            completion_tokens / trajectory_count if trajectory_count > 0 else 0.0
+        ),
+        "total_tokens": total_tokens / trajectory_count
+        if trajectory_count > 0
+        else 0.0,
         "samples_per_second": (
-            len(trajectories) / step_time_seconds if step_time_seconds > 0.0 else 0.0
+            trajectory_count / step_time_seconds if step_time_seconds > 0.0 else 0.0
         ),
         "tokens_per_second": (
-            (prompt_tokens + completion_tokens) / step_time_seconds
-            if step_time_seconds > 0.0
-            else 0.0
+            total_tokens / step_time_seconds if step_time_seconds > 0.0 else 0.0
         ),
     }
     payload.update(aggregated_metrics)
@@ -90,9 +95,6 @@ class SessionLogger:
         self._window_started_monotonic = 0.0
         self._last_flush_monotonic = 0.0
         self._rollout_window = self._new_rollout_bucket()
-        self._rollout_by_policy: dict[int, dict[str, float]] = defaultdict(
-            self._new_rollout_bucket
-        )
 
     def start(self, *, session_id: str, runtime_config: RuntimeConfig) -> None:
         self.finish()
@@ -107,7 +109,6 @@ class SessionLogger:
         self._latest_cluster_status = {}
         self._pending_generate_count = 0
         self._rollout_window = self._new_rollout_bucket()
-        self._rollout_by_policy = defaultdict(self._new_rollout_bucket)
         self._log_interval_seconds = self._resolve_log_interval_seconds(
             runtime_config=runtime_config
         )
@@ -121,7 +122,6 @@ class SessionLogger:
         *,
         prompt_token_counts: list[int],
         completion_token_counts: list[int],
-        policy_versions: list[int],
         latency_seconds: float,
         pending_generate_count: int,
         tokenize_dedupe_hits: int,
@@ -139,22 +139,15 @@ class SessionLogger:
         window["tokenize_requests"] += float(batch_size)
         window["tokenize_dedupe_hits"] += float(max(0, tokenize_dedupe_hits))
 
-        for prompt_tokens, completion_tokens, policy_version in zip(
+        for prompt_tokens, completion_tokens in zip(
             prompt_token_counts,
             completion_token_counts,
-            policy_versions,
             strict=True,
         ):
             total_tokens = int(prompt_tokens) + int(completion_tokens)
             window["prompt_tokens"] += float(prompt_tokens)
             window["completion_tokens"] += float(completion_tokens)
             window["total_tokens"] += float(total_tokens)
-            bucket = self._rollout_by_policy[int(policy_version)]
-            bucket["trajectories"] += 1.0
-            bucket["prompt_tokens"] += float(prompt_tokens)
-            bucket["completion_tokens"] += float(completion_tokens)
-            bucket["total_tokens"] += float(total_tokens)
-            bucket["latency_seconds"] += float(latency_seconds) / batch_size
 
     def record_generations(
         self,
@@ -169,9 +162,6 @@ class SessionLogger:
             prompt_token_counts=[len(input_ids) for input_ids in input_ids_per_item],
             completion_token_counts=[
                 len(generation.token_ids) for generation in generations
-            ],
-            policy_versions=[
-                generation.rollout_model_version for generation in generations
             ],
             latency_seconds=latency_seconds,
             pending_generate_count=pending_generate_count,
@@ -216,27 +206,19 @@ class SessionLogger:
         window = self._rollout_window
         runtime_payload = {
             "wall_time_s": wall_time_seconds,
-            "rollout_runtime/trajectories_per_sec": (
-                window["trajectories"] / window_elapsed
-            ),
-            "rollout_runtime/prompt_tokens_per_sec": (
-                window["prompt_tokens"] / window_elapsed
-            ),
-            "rollout_runtime/completion_tokens_per_sec": (
+            "rollout/trajectories_per_sec": (window["trajectories"] / window_elapsed),
+            "rollout/prompt_tokens_per_sec": (window["prompt_tokens"] / window_elapsed),
+            "rollout/completion_tokens_per_sec": (
                 window["completion_tokens"] / window_elapsed
             ),
-            "rollout_runtime/total_tokens_per_sec": (
-                window["total_tokens"] / window_elapsed
-            ),
-            "rollout_runtime/batch_latency_ms_mean": (
+            "rollout/total_tokens_per_sec": (window["total_tokens"] / window_elapsed),
+            "rollout/batch_latency_ms_mean": (
                 1000.0 * window["latency_seconds"] / max(window["batches"], 1.0)
             ),
-            "rollout_runtime/tokenize_dedupe_hit_rate": (
+            "rollout/tokenize_dedupe_hit_rate": (
                 window["tokenize_dedupe_hits"] / max(window["tokenize_requests"], 1.0)
             ),
-            "rollout_runtime/pending_generate_count": float(
-                self._pending_generate_count
-            ),
+            "rollout/pending_generate_count": float(self._pending_generate_count),
         }
         self._run.log(runtime_payload)
 
@@ -244,6 +226,12 @@ class SessionLogger:
             "wall_time_s": wall_time_seconds,
         }
         rollout_status = self._latest_rollout_status
+        latest_train_update = self._latest_train_update
+        train_policy_version = (
+            None
+            if latest_train_update is None
+            else latest_train_update["policy_version"]
+        )
         if rollout_status:
             status_payload.update(
                 {
@@ -259,9 +247,12 @@ class SessionLogger:
                     "status/rollout_heartbeat_age_s": float(
                         rollout_status.get("heartbeat_age_s", 0.0)
                     ),
+                    "status/rollout_max_version_skew": self._rollout_max_version_skew(
+                        rollout_status=rollout_status,
+                        train_policy_version=train_policy_version,
+                    ),
                 }
             )
-        latest_train_update = self._latest_train_update
         if latest_train_update is not None:
             status_payload.update(
                 {
@@ -304,22 +295,6 @@ class SessionLogger:
                 }
             )
 
-        for policy_version, bucket in sorted(self._rollout_by_policy.items()):
-            self._run.log(
-                {
-                    "policy_version": int(policy_version),
-                    "rollout_by_policy/trajectories": bucket["trajectories"],
-                    "rollout_by_policy/prompt_tokens": bucket["prompt_tokens"],
-                    "rollout_by_policy/completion_tokens": bucket["completion_tokens"],
-                    "rollout_by_policy/total_tokens": bucket["total_tokens"],
-                    "rollout_by_policy/batch_latency_ms_mean": (
-                        1000.0
-                        * bucket["latency_seconds"]
-                        / max(bucket["trajectories"], 1.0)
-                    ),
-                }
-            )
-
         self._last_flush_monotonic = now
         self._reset_rollout_window(now=now)
 
@@ -342,7 +317,13 @@ class SessionLogger:
                 **train_status,
                 "latest_update": self._latest_train_update,
             },
-            "rollout": rollout_status,
+            "rollout": {
+                **rollout_status,
+                "max_version_skew": self._rollout_max_version_skew(
+                    rollout_status=rollout_status,
+                    train_policy_version=train_status.get("policy_version"),
+                ),
+            },
             "cluster": cluster_status,
         }
 
@@ -374,6 +355,20 @@ class SessionLogger:
         return max(0.0, now - self._last_gateway_heartbeat_monotonic)
 
     @staticmethod
+    def _rollout_max_version_skew(
+        *,
+        rollout_status: dict[str, Any],
+        train_policy_version: object | None,
+    ) -> float:
+        reference_policy_version = (
+            int(train_policy_version)
+            if train_policy_version is not None
+            else int(rollout_status.get("latest_published_train_version", 0))
+        )
+        min_weight_version = int(rollout_status.get("min_weight_version", 0))
+        return float(max(0, reference_policy_version - min_weight_version))
+
+    @staticmethod
     def _new_rollout_bucket() -> dict[str, float]:
         return {
             "batches": 0.0,
@@ -390,7 +385,6 @@ class SessionLogger:
         resolved_now = time.monotonic() if now is None else now
         self._window_started_monotonic = resolved_now
         self._rollout_window = self._new_rollout_bucket()
-        self._rollout_by_policy = defaultdict(self._new_rollout_bucket)
 
     def _resolve_log_interval_seconds(self, *, runtime_config: RuntimeConfig) -> float:
         wandb_config = runtime_config.wandb
@@ -432,8 +426,7 @@ class SessionLogger:
         )
         run.define_metric("policy_version")
         run.define_metric("train/*", step_metric="policy_version")
-        run.define_metric("rollout_by_policy/*", step_metric="policy_version")
         run.define_metric("wall_time_s")
-        run.define_metric("rollout_runtime/*", step_metric="wall_time_s")
+        run.define_metric("rollout/*", step_metric="wall_time_s")
         run.define_metric("status/*", step_metric="wall_time_s")
         return run

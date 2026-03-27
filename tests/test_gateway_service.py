@@ -500,6 +500,7 @@ def test_gateway_service_status_includes_gateway_train_and_rollout() -> None:
         assert status["gateway"]["pending_generate_count"] == 0
         assert status["train"]["active"] is True
         assert status["rollout"]["max_weight_version"] == 0
+        assert status["rollout"]["max_version_skew"] == 0.0
         await store.close()
 
     asyncio.run(run())

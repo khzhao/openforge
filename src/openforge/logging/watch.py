@@ -40,6 +40,7 @@ def render_status(payload: dict[str, Any]) -> str:
             f"  published_version={_format_int(rollout.get('latest_published_train_version'))}"
             f"  min_weight_version={_format_int(rollout.get('min_weight_version'))}"
             f"  max_weight_version={_format_int(rollout.get('max_weight_version'))}"
+            f"  max_version_skew={_format_int(rollout.get('max_version_skew'))}"
             f"  stale_workers={_format_int(rollout.get('stale_worker_count'))}"
         ),
     ]

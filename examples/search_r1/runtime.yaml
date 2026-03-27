@@ -84,3 +84,9 @@ rollout:
         expert_parallel_size: 1
       enable_memory_saver: false
       sglang_server_overrides: {}
+
+wandb:
+  enabled: true
+  project: openforge-project
+  tags:
+    - search_r1

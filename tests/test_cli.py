@@ -394,6 +394,7 @@ def test_openforge_watch_prints_status_once() -> None:
                         "latest_published_train_version": 4,
                         "min_weight_version": 3,
                         "max_weight_version": 4,
+                        "max_version_skew": 1,
                         "stale_worker_count": 1,
                         "workers": {},
                     },
@@ -415,6 +416,7 @@ def test_openforge_watch_prints_status_once() -> None:
     printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list)
     assert "session sess-123" in printed
     assert "min_weight_version=3" in printed
+    assert "max_version_skew=1" in printed
     assert requests == [
         ("GET", "http://127.0.0.1:8000/health"),
         ("GET", "http://127.0.0.1:8000/status"),
