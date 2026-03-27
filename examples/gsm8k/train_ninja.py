@@ -9,10 +9,10 @@ from examples.gsm8k.common import (
     prepare_train_setup,
     response_text,
 )
+from examples.gsm8k.task import compute_gsm8k_score
 from examples.shared import print_train_update, run_train, save_summary
 
 import openforge.ninja as ninja
-from openforge.benchmarks.gsm8k import compute_gsm8k_score
 
 
 def main() -> int:

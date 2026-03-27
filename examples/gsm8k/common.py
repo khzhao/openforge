@@ -10,8 +10,8 @@ from typing import Any
 
 import datasets
 
+from examples.gsm8k.task import build_gsm8k_prompt, extract_gsm8k_ground_truth
 from examples.shared import add_train_cli_args, load_runtime_config, make_artifact_dir
-from openforge.benchmarks.gsm8k import build_gsm8k_prompt, extract_gsm8k_ground_truth
 from openforge.gateway.types import RuntimeConfig
 
 

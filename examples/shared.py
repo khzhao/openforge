@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import openforge.ninja as ninja
+from loguru import logger
 from openforge import active_state
 from openforge.gateway.types import RuntimeConfig
 
@@ -73,11 +74,7 @@ def load_runtime_config(path: str | None) -> RuntimeConfig:
 
 def print_train_update(update: dict[str, object]) -> None:
     """Emit one machine-readable train progress event."""
-    print(
-        "TRAIN_UPDATE",
-        json.dumps(update, sort_keys=True),
-        flush=True,
-    )
+    logger.info("TRAIN_UPDATE {}", json.dumps(update, sort_keys=True))
 
 
 def run_train(
