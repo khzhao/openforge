@@ -39,7 +39,7 @@ class SGLangClient:
         self,
         *,
         sampling_params: dict[str, Any],
-        timeout: float = 30.0,
+        timeout: float = 300.0,
         **kwargs: Any,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         response = self._request(

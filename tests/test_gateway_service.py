@@ -50,6 +50,10 @@ class _FakeTrainRuntime:
         _FakeTrainLoop.instances.clear()
         self._train_loop: _FakeTrainLoop | None = None
         self.policy_version = 0
+        self._update_callback = None
+
+    def set_update_callback(self, callback) -> None:
+        self._update_callback = callback
 
     def start_session(self, *, session_id: str, store) -> None:
         assert self._train_loop is None
@@ -73,6 +77,14 @@ class _FakeTrainRuntime:
         train_loop = self._train_loop
         assert train_loop is not None
         return train_loop.policy_version, f"/tmp/checkpoint-{train_loop.policy_version}"
+
+    def status(self) -> dict[str, object]:
+        return {
+            "active": self._train_loop is not None,
+            "policy_version": self.policy_version,
+            "heartbeat_age_s": 0.0,
+            "last_update_age_s": None,
+        }
 
     async def shutdown(self) -> None:
         await self.end_session()
@@ -247,6 +259,21 @@ class _FakeRuntime:
 
     def train(self) -> _FakeTrainRuntime:
         return self._train
+
+    def status(self) -> dict[str, object]:
+        return {
+            "current_model": self._current_model,
+            "train": self._train.status(),
+            "rollout": {
+                "heartbeat_age_s": 0.0,
+                "latest_published_train_version": 0,
+                "min_weight_version": 0,
+                "max_weight_version": 0,
+                "stale_worker_count": 0,
+                "workers": {},
+            },
+            "cluster": {},
+        }
 
     def release_trajectories(self, trajectory_ids: list[str]) -> None:
         self.released_trajectory_ids.append(list(trajectory_ids))
@@ -456,6 +483,24 @@ def test_gateway_service_reports_trajectory_statuses() -> None:
             )
             assert completed.trajectories[0].status == "completed"
             await store.close()
+
+    asyncio.run(run())
+
+
+def test_gateway_service_status_includes_gateway_train_and_rollout() -> None:
+    async def run() -> None:
+        store = SQLiteOpenForgeStore(":memory:")
+        runtime = _FakeRuntime()
+        service = Service(store=store, runtime=runtime)
+
+        session = await service.start_session(**_start_session_kwargs("model-a"))
+        status = await service.status()
+
+        assert status["session_id"] == session.session_id
+        assert status["gateway"]["pending_generate_count"] == 0
+        assert status["train"]["active"] is True
+        assert status["rollout"]["max_weight_version"] == 0
+        await store.close()
 
     asyncio.run(run())
 
@@ -764,6 +809,7 @@ def main() -> int:
             test_gateway_service_start_generate_and_end,
             test_gateway_service_current_session_tracks_active_model,
             test_gateway_service_reports_trajectory_statuses,
+            test_gateway_service_status_includes_gateway_train_and_rollout,
             test_gateway_service_start_session_rejects_second_active_session,
             test_gateway_service_releases_runtime_after_last_session_and_allows_switch,
             test_gateway_service_generate_unknown_session_raises,

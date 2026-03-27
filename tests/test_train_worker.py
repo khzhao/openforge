@@ -5,13 +5,14 @@ from __future__ import annotations
 import copy
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from transformers import LlamaConfig, LlamaForCausalLM
 
-from openforge.train.fsdp2.base import _selected_token_log_probs
+from openforge.train.fsdp2.base import FSDP2Engine, _selected_token_log_probs
 from openforge.train.worker import TrainWorker
 from openforge.utils.packed import pack_micro_batch
 
@@ -139,6 +140,85 @@ def test_train_worker_step_chunks_and_packs_local_minibatch() -> None:
     assert second["cu_seqlens"].tolist() == [0, 5, 8]
 
 
+def test_train_worker_only_aggregates_scalar_forward_metrics() -> None:
+    worker = TrainWorker()
+    worker.spec = SimpleNamespace(
+        rank=0,
+        cfg=SimpleNamespace(
+            train=SimpleNamespace(
+                micro_batch_size=2,
+            )
+        ),
+    )
+    worker.engine = _FakeEngine()
+    worker.engine.forward = lambda batch: {
+        "loss": torch.tensor(1.0),
+        "pg_loss": torch.tensor(2.0),
+        "curr_log_probs": torch.tensor([0.1, 0.2]),
+    }
+
+    result = worker.step(
+        _mini_batch(
+            [
+                _sample([1, 2, 3], 1.0),
+                _sample([4, 5, 6], 2.0),
+            ]
+        )
+    )
+
+    assert result.metrics == {"pg_loss": 2.0, "lr": 0.1, "global_step": -1.0}
+
+
+def test_fsdp2_full_grad_norm_uses_full_tensor_for_metric_and_clipping() -> None:
+    engine = object.__new__(FSDP2Engine)
+    engine.device = torch.device("cpu")
+    engine.use_grad_scaler = False
+    engine.cfg = SimpleNamespace(
+        train=SimpleNamespace(
+            gradient_accumulation_steps=1,
+            config=SimpleNamespace(
+                optim=SimpleNamespace(max_grad_norm=1.0),
+            ),
+        )
+    )
+    optimizer_step_calls = 0
+    scheduler_step_calls = 0
+
+    def optimizer_step() -> None:
+        nonlocal optimizer_step_calls
+        optimizer_step_calls += 1
+
+    def scheduler_step() -> None:
+        nonlocal scheduler_step_calls
+        scheduler_step_calls += 1
+
+    engine.optimizer = SimpleNamespace(
+        step=optimizer_step,
+        param_groups=[{"lr": 0.25}],
+    )
+    engine.scheduler = SimpleNamespace(step=scheduler_step)
+    engine.main_model = SimpleNamespace(
+        parameters=lambda: [
+            torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))
+        ]
+    )
+
+    class _FakeGradNorm:
+        def full_tensor(self) -> torch.Tensor:
+            return torch.tensor([5.0], dtype=torch.float64)
+
+    with patch(
+        "torch.nn.utils.clip_grad_norm_",
+        lambda params, max_grad_norm: _FakeGradNorm(),
+    ):
+        metrics = engine.step_optimizer()
+
+    assert metrics["grad_norm"] == 5.0
+    assert metrics["lr"] == 0.25
+    assert optimizer_step_calls == 1
+    assert scheduler_step_calls == 1
+
+
 def test_pack_micro_batch_tracks_cu_seqlens_and_advantages() -> None:
     packed = pack_micro_batch(
         _mini_batch(
@@ -177,7 +257,9 @@ def _loss(model: LlamaForCausalLM, batch: dict[str, torch.Tensor]) -> torch.Tens
     log_probs = F.log_softmax(logits, dim=-1)
     targets = batch["tokens"][1:]
     token_log_probs = log_probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
-    numerator = (-(batch["advantages"][1:] * token_log_probs) * batch["loss_mask"]).sum()
+    numerator = (
+        -(batch["advantages"][1:] * token_log_probs) * batch["loss_mask"]
+    ).sum()
     denominator = batch["loss_mask"].sum().clamp_min(1.0)
     return numerator / denominator
 

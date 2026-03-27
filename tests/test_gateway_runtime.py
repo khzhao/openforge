@@ -26,6 +26,7 @@ from openforge.gateway.types import (
     RuntimeConfig,
     StartSessionRequest,
 )
+from openforge.utils.models import validate_supported_model
 
 
 class _FakeTrainRuntime:
@@ -165,7 +166,7 @@ def test_runtime_start_slot_shuts_down_ray_when_startup_fails() -> None:
     def is_initialized() -> bool:
         return bool(state["initialized"])
 
-    def init(*, address: str, log_to_driver: bool) -> None:
+    def init(*, address: str, log_to_driver: bool, **kwargs) -> None:
         state["address"] = address
         state["initialized"] = True
 
@@ -229,7 +230,7 @@ def test_runtime_start_slot_uses_explicit_ray_address() -> None:
     runtime = Runtime(cfg=_server_config())
     state = {"address": None}
 
-    def init(*, address: str, log_to_driver: bool) -> None:
+    def init(*, address: str, log_to_driver: bool, **kwargs) -> None:
         state["address"] = address
 
     with ExitStack() as stack:
@@ -283,7 +284,7 @@ def test_runtime_start_slot_leaves_nccl_defaults_to_train_and_rollout() -> None:
         "nvls": None,
     }
 
-    def init(*, address: str, log_to_driver: bool) -> None:
+    def init(*, address: str, log_to_driver: bool, **kwargs) -> None:
         return
 
     def create_train_runtime(*args, **kwargs):
@@ -441,6 +442,52 @@ def test_runtime_generate_batch_forwards_trajectory_ids() -> None:
     }
 
 
+def test_runtime_model_config_validation_accepts_full_attention() -> None:
+    class FakeConfig:
+        use_sliding_window = False
+        layer_types = ["full_attention", "full_attention"]
+
+    with patch(
+        "transformers.AutoConfig.from_pretrained", lambda *args, **kwargs: FakeConfig()
+    ):
+        validate_supported_model("Qwen/Qwen3-8B")
+
+
+def test_runtime_model_config_validation_rejects_sliding_attention() -> None:
+    class FakeConfig:
+        use_sliding_window = True
+        layer_types = ["full_attention", "sliding_attention"]
+
+    with patch(
+        "transformers.AutoConfig.from_pretrained", lambda *args, **kwargs: FakeConfig()
+    ):
+        with expect_raises(
+            Exception,
+            match="use_sliding_window must be false",
+        ):
+            validate_supported_model("Qwen/Qwen3-8B")
+
+
+def test_runtime_model_config_validation_rejects_linear_attention_fields() -> None:
+    class FakeConfig:
+        use_sliding_window = False
+        layer_types = ["full_attention"]
+        linear_num_value_heads = 4
+        linear_num_key_heads = 2
+        linear_key_head_dim = 8
+        linear_value_head_dim = 8
+        linear_conv_kernel_dim = 4
+
+    with patch(
+        "transformers.AutoConfig.from_pretrained", lambda *args, **kwargs: FakeConfig()
+    ):
+        with expect_raises(
+            Exception,
+            match="linear-attention fields are not supported",
+        ):
+            validate_supported_model("Qwen/Qwen3-8B")
+
+
 def main() -> int:
     return run_tests(
         [
@@ -450,6 +497,9 @@ def main() -> int:
             test_runtime_shutdown_also_shuts_down_ray,
             test_runtime_tokenize_messages_propagates_chat_template_failure,
             test_runtime_generate_batch_forwards_trajectory_ids,
+            test_runtime_model_config_validation_accepts_full_attention,
+            test_runtime_model_config_validation_rejects_sliding_attention,
+            test_runtime_model_config_validation_rejects_linear_attention_fields,
         ]
     )
 

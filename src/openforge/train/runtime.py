@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import uvicorn
@@ -29,6 +30,7 @@ class TrainRuntime:
         self._manager = manager
         self._session_id: str | None = None
         self._train_loop: TrainLoop | None = None
+        self._update_callback = None
         self._server_name = "openforge-train-server"
         self._server: uvicorn.Server | None = None
         self._server_thread: threading.Thread | None = None
@@ -72,6 +74,9 @@ class TrainRuntime:
             train_server_url=self.server_url,
         )
 
+    def set_update_callback(self, callback) -> None:
+        self._update_callback = callback
+
     def start_session(
         self,
         *,
@@ -84,6 +89,7 @@ class TrainRuntime:
             session_id=session_id,
             store=store,
             train_manager=self._manager,
+            update_callback=self._update_callback,
         )
         self._train_loop.start()
 
@@ -101,6 +107,30 @@ class TrainRuntime:
             policy_version=policy_version,
         )
         return policy_version, checkpoint_path
+
+    def status(self) -> dict[str, object]:
+        train_loop = self._train_loop
+        if train_loop is None:
+            return {
+                "active": False,
+                "policy_version": self.policy_version,
+                "server_url": self.server_url,
+            }
+
+        now = time.monotonic()
+        last_update_monotonic = train_loop.last_update_monotonic
+        return {
+            "active": True,
+            "global_step": train_loop.global_step,
+            "policy_version": train_loop.policy_version,
+            "server_url": self.server_url,
+            "heartbeat_age_s": max(0.0, now - train_loop.last_heartbeat_monotonic),
+            "last_update_age_s": (
+                None
+                if last_update_monotonic is None
+                else max(0.0, now - last_update_monotonic)
+            ),
+        }
 
     async def shutdown(self) -> None:
         await self.end_session()

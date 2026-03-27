@@ -36,6 +36,7 @@ from openforge.gateway.types import (
     TrajectoryStatusesResponse,
     TrajectoryStatusInfo,
 )
+from openforge.logging import SessionLogger
 
 __all__ = ["Service"]
 
@@ -83,6 +84,7 @@ class Service:
             max_workers=1,
             thread_name_prefix="openforge-gateway-runtime",
         )
+        self._session_logger = SessionLogger()
 
     async def current_session(self) -> StartSessionResponse | None:
         session_id = self._active_session_id
@@ -163,7 +165,13 @@ class Service:
         self._active_session_model_name = resolved_model_name
         self._active_trajectories = {}
         self._active_turn_counts = {}
-        self.runtime.train().start_session(
+        train_runtime = self.runtime.train()
+        self._session_logger.start(
+            session_id=session_id,
+            runtime_config=runtime_config,
+        )
+        train_runtime.set_update_callback(self._session_logger.record_train_update)
+        train_runtime.start_session(
             session_id=session_id,
             store=self.store,
         )
@@ -480,6 +488,8 @@ class Service:
         self._active_session_model_name = None
         self._active_trajectories = {}
         self._active_turn_counts = {}
+        self._session_logger.flush(force=True)
+        self._session_logger.finish()
         await self.runtime.train().end_session()
         await self.runtime.shutdown()
 
@@ -490,10 +500,33 @@ class Service:
         self._active_session_model_name = None
         self._active_trajectories = {}
         self._active_turn_counts = {}
+        self._session_logger.finish()
         try:
             await self.runtime.shutdown()
         finally:
             self._runtime_executor.shutdown(wait=False, cancel_futures=True)
+
+    async def status(self) -> dict[str, object]:
+        runtime_status = {
+            "train": {},
+            "rollout": {},
+            "cluster": {},
+        }
+        if self._active_session_id is not None:
+            runtime_status = await self._run_blocking_call(self.runtime.status)
+        train_status = runtime_status["train"]
+        rollout_status = runtime_status["rollout"]
+        cluster_status = runtime_status["cluster"]
+        self._session_logger.record_runtime_status(
+            rollout_status=rollout_status,
+            cluster_status=cluster_status,
+        )
+        self._session_logger.flush()
+        return self._session_logger.snapshot(
+            train_status=train_status,
+            rollout_status=rollout_status,
+            cluster_status=cluster_status,
+        )
 
     def _ensure_generate_task_locked(self) -> None:
         task = self._generate_task
@@ -557,6 +590,7 @@ class Service:
         tools: list[ChatCompletionTool] | None,
         sampling_params: dict[str, object],
     ) -> list[ChatCompletionResponse]:
+        batch_started_monotonic = time.monotonic()
         session = await self._require_active_session(session_id)
         new_trajectories: list[Trajectory] = []
         missing_trajectory_ids = [
@@ -594,7 +628,11 @@ class Service:
         turn_indexes = [
             self._active_turn_counts[trajectory_id] for trajectory_id in trajectory_ids
         ]
-        input_ids_per_item, generations = await self._run_blocking_call(
+        (
+            input_ids_per_item,
+            generations,
+            tokenize_dedupe_hits,
+        ) = await self._run_blocking_call(
             self._tokenize_and_generate_batch,
             trajectory_ids,
             messages_per_item,
@@ -632,15 +670,25 @@ class Service:
         await self.store.append_turns(turns_to_append)
         for trajectory_id in trajectory_ids:
             self._active_turn_counts[trajectory_id] += 1
+        async with self._generate_lock:
+            pending_generate_count = len(self._pending_generates)
+        self._session_logger.record_generations(
+            input_ids_per_item=input_ids_per_item,
+            generations=generations,
+            latency_seconds=time.monotonic() - batch_started_monotonic,
+            pending_generate_count=pending_generate_count,
+            tokenize_dedupe_hits=tokenize_dedupe_hits,
+        )
+        self._session_logger.flush()
         return outputs
 
     def _tokenize_messages_batch_deduped(
         self,
         message_batches: list[list[ChatCompletionMessage]],
         tools: list[ChatCompletionTool] | None,
-    ) -> list[list[int]]:
+    ) -> tuple[list[list[int]], int]:
         if not message_batches:
-            return []
+            return [], 0
         unique_batches: list[list[ChatCompletionMessage]] = []
         unique_keys: dict[str, int] = {}
         key_indexes: list[int] = []
@@ -656,7 +704,9 @@ class Service:
             unique_batches,
             tools=tools,
         )
-        return [list(unique_input_ids[index]) for index in key_indexes]
+        return [list(unique_input_ids[index]) for index in key_indexes], (
+            len(message_batches) - len(unique_batches)
+        )
 
     def _tokenize_and_generate_batch(
         self,
@@ -664,17 +714,19 @@ class Service:
         message_batches: list[list[ChatCompletionMessage]],
         tools: list[ChatCompletionTool] | None,
         sampling_params: dict[str, object],
-    ) -> tuple[list[list[int]], list[Generation]]:
-        input_ids_per_item = self._tokenize_messages_batch_deduped(
-            message_batches,
-            tools,
+    ) -> tuple[list[list[int]], list[Generation], int]:
+        input_ids_per_item, tokenize_dedupe_hits = (
+            self._tokenize_messages_batch_deduped(
+                message_batches,
+                tools,
+            )
         )
         generations = self.runtime.generate_batch(
             trajectory_ids=trajectory_ids,
             input_ids=input_ids_per_item,
             sampling_params=sampling_params,
         )
-        return input_ids_per_item, generations
+        return input_ids_per_item, generations, tokenize_dedupe_hits
 
     async def _run_blocking_call(self, fn: object, /, *args: object, **kwargs: object):
         loop = asyncio.get_running_loop()

@@ -149,6 +149,7 @@ def _try_active_global_batch_size() -> int | None:
 
 class _ActiveSession:
     REQUEST_TIMEOUT_SECONDS = 300.0
+    EXPORT_TIMEOUT_SECONDS = 1800.0
     END_RETRIES = 3
     END_RETRY_DELAY_SECONDS = 0.02
 
@@ -280,6 +281,7 @@ class _ActiveSession:
         response = self.post(
             "/export_checkpoint",
             {"session_id": self.session_id},
+            timeout=self.EXPORT_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         payload = response.json()
@@ -313,9 +315,17 @@ class _ActiveSession:
     def agent_client(self, client: "_TrajectoryClient") -> _AgentClient:
         return _AgentClient(self, client)
 
-    def post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
+    def post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> httpx.Response:
         client = self._http_client()
-        return client.post(path, json=payload)
+        if timeout is None:
+            return client.post(path, json=payload)
+        return client.post(path, json=payload, timeout=timeout)
 
     def get(self, path: str) -> httpx.Response:
         client = self._http_client()

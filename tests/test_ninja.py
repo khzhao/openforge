@@ -427,7 +427,13 @@ def _patched_ninja(
         def get(self, path: str) -> _FakeResponse:
             return gateway.handle("GET", path)
 
-        def post(self, path: str, json: dict[str, object]) -> _FakeResponse:
+        def post(
+            self,
+            path: str,
+            json: dict[str, object],
+            *,
+            timeout: float | None = None,
+        ) -> _FakeResponse:
             return gateway.handle("POST", path, json)
 
         def close(self) -> None:

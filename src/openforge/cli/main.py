@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import signal
+import sys
 import time
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -15,6 +16,7 @@ from pydantic import ValidationError
 from openforge import active_state
 from openforge.configs.models import GatewayServerConfig
 from openforge.gateway.types import RuntimeConfig
+from openforge.logging import render_status
 
 DEFAULT_GATEWAY_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_START_TIMEOUT_SECONDS = 600.0
@@ -223,6 +225,30 @@ def _run_session_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_watch(args: argparse.Namespace) -> int:
+    host, port = _wait_for_active_gateway_target(timeout=args.timeout)
+    base_url = f"http://{host}:{port}"
+    _wait_for_gateway(base_url=base_url, timeout=args.timeout)
+    while True:
+        status, response = _request_json(
+            method="GET",
+            url=f"{base_url}/status",
+            payload=None,
+            timeout=args.timeout,
+        )
+        if status != 200:
+            raise SystemExit(
+                f"gateway status failed with status {status}: "
+                f"{json.dumps(response, sort_keys=True)}"
+            )
+        if sys.stdout.isatty():
+            print("\033[2J\033[H", end="")
+        print(render_status(response), flush=True)
+        if args.once:
+            return 0
+        time.sleep(args.interval)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level OpenForge CLI parser."""
     parser = argparse.ArgumentParser(prog="openforge")
@@ -269,6 +295,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_session_stop_arguments(session_stop_parser)
     session_stop_parser.set_defaults(handler=_run_session_stop)
+
+    watch_parser = subparsers.add_parser(
+        "watch",
+        help="Poll the gateway status endpoint and print a live session view.",
+    )
+    watch_parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Seconds to wait between status refreshes.",
+    )
+    watch_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_GATEWAY_TIMEOUT_SECONDS,
+        help="Timeout in seconds for talking to the gateway.",
+    )
+    watch_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Fetch and print one status snapshot.",
+    )
+    watch_parser.set_defaults(handler=_run_watch)
 
     return parser
 

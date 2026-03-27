@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from typing import Callable
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from openforge.data import OpenForgeStore, Trajectory, Turn
+from openforge.logging import build_train_update
 from openforge.runtime import create_algorithm
 
 __all__ = ["TrainLoop"]
@@ -31,10 +34,12 @@ class TrainLoop:
         session_id: str,
         store: OpenForgeStore,
         train_manager: object,
+        update_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self.session_id = session_id
         self.store = store
         self.train_manager = train_manager
+        self.update_callback = update_callback
         self.train = train_manager.cfg.train
         self.algorithm = create_algorithm(train_manager.cfg)
         self.world_size = train_manager.world_size
@@ -46,6 +51,8 @@ class TrainLoop:
         assert self.train.mini_batch_size % self.train.micro_batch_size == 0
         self.global_step = 0
         self.policy_version = 0
+        self.last_heartbeat_monotonic = time.monotonic()
+        self.last_update_monotonic: float | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop = False
 
@@ -64,6 +71,7 @@ class TrainLoop:
 
     async def run(self) -> None:
         while not self._stop:
+            self.last_heartbeat_monotonic = time.monotonic()
             trained = await self.train_once()
             if trained:
                 continue
@@ -106,11 +114,11 @@ class TrainLoop:
         selected_group_indexes = self._select_group_indexes(group_trajectory_counts)
         if selected_group_indexes is None:
             return False
+        selected_groups = [eligible_groups[index] for index in selected_group_indexes]
 
         trajectories: list[Trajectory] = []
         trajectory_samples: list[list[dict[str, torch.Tensor]]] = []
-        for index in selected_group_indexes:
-            group = eligible_groups[index]
+        for group in selected_groups:
             rewards = torch.tensor(
                 [float(trajectory.final_reward) for trajectory in group],
                 dtype=torch.float32,
@@ -158,12 +166,14 @@ class TrainLoop:
 
         next_global_step = self.global_step + 1
         next_policy_version = self.policy_version + 1
-        await asyncio.to_thread(
+        step_started_monotonic = time.monotonic()
+        train_results = await asyncio.to_thread(
             self._step_and_publish,
             rank_minibatches_per_update,
             global_step=next_global_step,
             policy_version=next_policy_version,
         )
+        step_time_seconds = time.monotonic() - step_started_monotonic
 
         for trajectory in trajectories:
             await self.store.update_trajectory(
@@ -179,6 +189,13 @@ class TrainLoop:
 
         self.global_step = next_global_step
         self.policy_version = next_policy_version
+        self.last_update_monotonic = time.monotonic()
+        self._emit_update(
+            train_results=train_results,
+            trajectories=trajectories,
+            turns_by_trajectory_id=turns_by_trajectory_id,
+            step_time_seconds=step_time_seconds,
+        )
         return True
 
     async def _list_ready_groups(self) -> list[list[Trajectory]]:
@@ -244,11 +261,33 @@ class TrainLoop:
         *,
         global_step: int,
         policy_version: int,
-    ) -> None:
-        self.train_manager.step_update_and_publish(
+    ) -> list[list[object]]:
+        return self.train_manager.step_update_and_publish(
             rank_minibatches_per_update,
             global_step=global_step,
             policy_version=policy_version,
+        )
+
+    def _emit_update(
+        self,
+        *,
+        train_results: list[list[object]],
+        trajectories: list[Trajectory],
+        turns_by_trajectory_id: dict[str, list[Turn]],
+        step_time_seconds: float,
+    ) -> None:
+        callback = self.update_callback
+        if callback is None:
+            return
+        callback(
+            build_train_update(
+                train_results=train_results,
+                trajectories=trajectories,
+                turns_by_trajectory_id=turns_by_trajectory_id,
+                step_time_seconds=step_time_seconds,
+                global_step=self.global_step,
+                policy_version=self.policy_version,
+            )
         )
 
     def _build_samples(

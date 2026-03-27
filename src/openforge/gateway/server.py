@@ -104,6 +104,10 @@ def create_app(
             raise HTTPException(status_code=404, detail="no active session")
         return session
 
+    @app.get("/status")
+    async def status() -> dict[str, object]:
+        return await _invoke(service.status())
+
     @app.post("/trajectory_statuses", response_model=TrajectoryStatusesResponse)
     async def trajectory_statuses(
         payload: TrajectoryStatusesRequest,

@@ -91,17 +91,28 @@ class TrainWorker:
     ) -> TrainStepResult:
         self.engine.zero_grad()
         last_index = len(microbatches) - 1
+        forward_metrics: dict[str, float] = {}
         for index, batch in enumerate(microbatches):
             context = self.engine.no_sync() if index < last_index else nullcontext()
             with context:
                 outputs = self.engine.forward(batch)
                 self.engine.backward(outputs)
+            for key, value in outputs.items():
+                if key == "loss" or value is None or value.ndim != 0:
+                    continue
+                forward_metrics[key] = forward_metrics.get(key, 0.0) + float(value)
+
+        if microbatches:
+            scale = 1.0 / len(microbatches)
+            for key in list(forward_metrics):
+                forward_metrics[key] *= scale
 
         metrics = self.engine.step_optimizer()
         return TrainStepResult(
             rank=self.spec.rank,
             global_step=global_step,
             metrics={
+                **forward_metrics,
                 **metrics,
                 "global_step": -1.0 if global_step is None else float(global_step),
             },

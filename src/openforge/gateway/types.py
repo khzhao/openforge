@@ -51,9 +51,21 @@ __all__ = [
     "TrajectoryStatusInfo",
     "TrajectoryStatusesRequest",
     "TrajectoryStatusesResponse",
+    "WandbConfig",
     "chat_message_payload",
     "tool_payloads",
 ]
+
+
+class WandbConfig(BaseModel):
+    """Optional session-scoped W&B logging configuration."""
+
+    enabled: bool = True
+    project: str | None = None
+    entity: str | None = None
+    name: str | None = None
+    tags: list[str] | None = None
+    log_interval_seconds: float | None = None
 
 
 class RuntimeConfig(BaseModel):
@@ -63,6 +75,7 @@ class RuntimeConfig(BaseModel):
     model: ModelConfig
     train: TrainConfig
     rollout: RolloutConfig
+    wandb: WandbConfig | None = None
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "RuntimeConfig":

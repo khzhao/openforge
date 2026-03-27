@@ -63,6 +63,7 @@ class _RouterState:
         self._trajectory_expected_versions: dict[str, int] = {}
         self._worker_sync_errors = dict.fromkeys(self._worker_names, None)
         self._last_health_refresh_monotonic = 0.0
+        self._last_reconcile_monotonic = time.monotonic()
         self._latest_published_train_version = max(
             self._worker_versions.values(),
             default=0,
@@ -248,9 +249,20 @@ class _RouterState:
     def status_payload(self) -> dict[str, Any]:
         """Return router status."""
         self._refresh_worker_health(force=True)
+        now = time.monotonic()
         with self._condition:
+            min_weight_version = min(self._worker_versions.values(), default=0)
+            max_weight_version = max(self._worker_versions.values(), default=0)
             return {
+                "heartbeat_age_s": max(0.0, now - self._last_reconcile_monotonic),
                 "latest_published_train_version": self._latest_published_train_version,
+                "min_weight_version": min_weight_version,
+                "max_weight_version": max_weight_version,
+                "stale_worker_count": sum(
+                    1
+                    for version in self._worker_versions.values()
+                    if version < self._latest_published_train_version
+                ),
                 "workers": {
                     worker_name: {
                         "healthy": self._worker_health[worker_name],
@@ -284,15 +296,24 @@ class _RouterState:
             ):
                 return
 
-        health_by_name: dict[str, bool] = {}
-        for worker_name in self._worker_names:
+        timeout = float(self.spec.health_check_timeout_secs)
+
+        def check_worker(worker_name: str) -> tuple[str, bool]:
             try:
                 healthy = self._worker_clients[worker_name].health_generate(
-                    timeout=float(self.spec.health_check_timeout_secs)
+                    timeout=timeout
                 )
             except Exception:
                 healthy = False
-            health_by_name[worker_name] = healthy
+            return worker_name, healthy
+
+        if not self._worker_names:
+            health_by_name = {}
+        elif len(self._worker_names) == 1:
+            health_by_name = dict([check_worker(self._worker_names[0])])
+        else:
+            with ThreadPoolExecutor(max_workers=len(self._worker_names)) as executor:
+                health_by_name = dict(executor.map(check_worker, self._worker_names))
 
         with self._condition:
             self._last_health_refresh_monotonic = time.monotonic()
@@ -359,6 +380,7 @@ class _RouterState:
 
     def _reconcile_loop(self) -> None:
         while not self._reconcile_stop.is_set():
+            self._last_reconcile_monotonic = time.monotonic()
             self._refresh_worker_health(force=True)
             ready_worker_names, target_version = self._take_ready_workers()
             if not ready_worker_names:

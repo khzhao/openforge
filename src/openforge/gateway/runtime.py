@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Sequence
 
 from openforge.configs.models import GatewayServerConfig, OpenForgeConfig
@@ -16,17 +15,12 @@ from openforge.gateway.types import (
     chat_message_payload,
     tool_payloads,
 )
+from openforge.utils.models import SUPPORTED_MODELS, validate_supported_model
 
 __all__ = [
     "Generation",
     "Runtime",
     "RuntimeSlot",
-]
-
-
-SUPPORTED_MODELS: list[str] = [
-    "Qwen/Qwen2.5-0.5B-Instruct",
-    "Qwen/Qwen2.5-3B-Instruct",
 ]
 
 
@@ -87,8 +81,7 @@ class Runtime:
         runtime_config: RuntimeConfig,
     ) -> str:
         model_name = runtime_config.model.model_name_or_path
-        if not self._is_supported_model(model_name):
-            raise Exception(f"unsupported model: {model_name}")
+        validate_supported_model(model_name)
 
         runtime_cfg = self._build_config(runtime_config=runtime_config)
         if self._loaded_model is None:
@@ -195,6 +188,22 @@ class Runtime:
         slot = self._slot
         assert slot is not None
         return slot.train_runtime
+
+    def status(self) -> dict[str, Any]:
+        slot = self._slot
+        if slot is None:
+            return {
+                "current_model": self._loaded_model,
+                "train": {},
+                "rollout": {},
+                "cluster": {},
+            }
+        return {
+            "current_model": self._loaded_model,
+            "train": slot.train_runtime.status(),
+            "rollout": slot.rollout_manager.status(),
+            "cluster": self._cluster_status(),
+        }
 
     def release_trajectories(self, trajectory_ids: Sequence[str]) -> None:
         if not trajectory_ids:
@@ -367,7 +376,23 @@ class Runtime:
         return self._tokenizer
 
     @staticmethod
-    def _is_supported_model(model_name: str) -> bool:
-        if model_name in SUPPORTED_MODELS:
-            return True
-        return Path(model_name).exists()
+    def _cluster_status() -> dict[str, Any]:
+        import ray
+
+        if not ray.is_initialized():
+            return {}
+        nodes = ray.nodes()
+        return {
+            "node_count": len(nodes),
+            "alive_nodes": sum(1 for node in nodes if bool(node.get("Alive"))),
+            "total_resources": {
+                key: float(value)
+                for key, value in ray.cluster_resources().items()
+                if isinstance(value, (int, float))
+            },
+            "available_resources": {
+                key: float(value)
+                for key, value in ray.available_resources().items()
+                if isinstance(value, (int, float))
+            },
+        }

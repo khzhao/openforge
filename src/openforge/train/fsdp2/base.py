@@ -26,6 +26,17 @@ from .memory import offload_optimizer, offload_params, onload_optimizer, onload_
 from .utils import apply_fsdp2, create_device_mesh
 
 
+def _selected_token_log_probs(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+) -> torch.Tensor:
+    return (
+        F.log_softmax(logits, dim=-1)
+        .gather(dim=-1, index=targets.unsqueeze(-1))
+        .squeeze(-1)
+    )
+
+
 class FSDP2Engine(TrainBackend):
     """FSDP2Engine for training. Essentially a wrapper around PyTorch FSDP2."""
 
@@ -185,11 +196,17 @@ class FSDP2Engine(TrainBackend):
         if self.use_grad_scaler:
             self.grad_scaler.unscale_(self.optimizer)
 
-        # 2. Clip the gradients
-        nn.utils.clip_grad_norm_(
+        # 2. Clip the gradients and materialize the scalar norm for logging.
+        grad_norm_obj = nn.utils.clip_grad_norm_(
             self.main_model.parameters(),
             optim_cfg.max_grad_norm,
         )
+        grad_norm_tensor = grad_norm_obj.full_tensor().to(
+            device=self.device,
+            dtype=torch.float32,
+        )
+        if grad_norm_tensor.ndim != 0:
+            grad_norm_tensor = grad_norm_tensor.reshape(())
 
         # 3. Step the optimizer and scheduler
         if self.use_grad_scaler:
@@ -201,6 +218,7 @@ class FSDP2Engine(TrainBackend):
 
         # 4. Return the metrics
         metrics = {
+            "grad_norm": float(grad_norm_tensor),
             "lr": float(self.optimizer.param_groups[0]["lr"]),
             "global_step": -1.0,
             "gradient_accumulation_steps": float(
@@ -256,7 +274,7 @@ class FSDP2Engine(TrainBackend):
             position_ids=position_ids,
         )
         targets = tokens[1:]
-        return -F.cross_entropy(logits, targets, reduction="none")
+        return _selected_token_log_probs(logits, targets)
 
     def _compute_logits(
         self,

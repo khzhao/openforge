@@ -52,6 +52,10 @@ class _FakeTrainRuntime:
         _FakeTrainLoop.instances.clear()
         self._train_loop: _FakeTrainLoop | None = None
         self.policy_version = 0
+        self._update_callback = None
+
+    def set_update_callback(self, callback) -> None:
+        self._update_callback = callback
 
     def start_session(self, *, session_id: str, store) -> None:
         assert self._train_loop is None
@@ -75,6 +79,14 @@ class _FakeTrainRuntime:
         train_loop = self._train_loop
         assert train_loop is not None
         return train_loop.policy_version, f"/tmp/checkpoint-{train_loop.policy_version}"
+
+    def status(self) -> dict[str, object]:
+        return {
+            "active": self._train_loop is not None,
+            "policy_version": self.policy_version,
+            "heartbeat_age_s": 0.0,
+            "last_update_age_s": None,
+        }
 
     async def shutdown(self) -> None:
         await self.end_session()
@@ -257,6 +269,21 @@ class _FakeRuntime:
 
     def train(self) -> _FakeTrainRuntime:
         return self._train
+
+    def status(self) -> dict[str, object]:
+        return {
+            "current_model": self._current_model,
+            "train": self._train.status(),
+            "rollout": {
+                "heartbeat_age_s": 0.0,
+                "latest_published_train_version": 0,
+                "min_weight_version": 0,
+                "max_weight_version": 0,
+                "stale_worker_count": 0,
+                "workers": {},
+            },
+            "cluster": {},
+        }
 
     def release_trajectories(self, trajectory_ids: list[str]) -> None:
         self.released_trajectory_ids.append(list(trajectory_ids))
@@ -446,6 +473,7 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
                     },
                 }
                 assert client.get("/current_session").status_code == 404
+                assert client.get("/status").status_code == 200
                 assert client.get("/v1/models").json()["data"] == [
                     {
                         "id": "model-a",
@@ -460,6 +488,9 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
                 )
                 assert started.status_code == 200
                 assert client.get("/current_session").json() == started.json()
+                status = client.get("/status")
+                assert status.status_code == 200
+                assert status.json()["session_id"] == started.json()["session_id"]
 
 
 def test_gateway_http_updates_shared_state_for_gateway_and_session() -> None:
@@ -593,7 +624,10 @@ def test_gateway_http_generate_validates_request_and_unknown_records() -> None:
             with TestClient(app) as client:
                 invalid = client.post(
                     "/v1/chat/completions",
-                    json={"model": "model-a", "messages": [{"role": "user", "content": "hello"}]},
+                    json={
+                        "model": "model-a",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
                 )
                 assert invalid.status_code == 422
 

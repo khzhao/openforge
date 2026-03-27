@@ -363,6 +363,64 @@ def test_openforge_gateway_stop_escalates_to_sigkill() -> None:
     assert state_path.exists() is False
 
 
+def test_openforge_watch_prints_status_once() -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_urlopen(request, timeout: float):
+        requests.append((request.method, request.full_url))
+        if request.full_url.endswith("/health"):
+            return _FakeHTTPResponse(status=200, payload={"ok": True})
+        if request.full_url.endswith("/status"):
+            return _FakeHTTPResponse(
+                status=200,
+                payload={
+                    "session_id": "sess-123",
+                    "wall_time_s": 3.5,
+                    "gateway": {"heartbeat_age_s": 0.2, "pending_generate_count": 1},
+                    "train": {
+                        "active": True,
+                        "heartbeat_age_s": 0.1,
+                        "last_update_age_s": 1.2,
+                        "global_step": 4,
+                        "policy_version": 4,
+                        "latest_update": {
+                            "reward_mean": 0.5,
+                            "grad_norm": 1.25,
+                            "lr": 1.0e-5,
+                        },
+                    },
+                    "rollout": {
+                        "heartbeat_age_s": 0.3,
+                        "latest_published_train_version": 4,
+                        "min_weight_version": 3,
+                        "max_weight_version": 4,
+                        "stale_worker_count": 1,
+                        "workers": {},
+                    },
+                    "cluster": {},
+                },
+            )
+        raise AssertionError(request.full_url)
+
+    with patch.object(
+        openforge_cli.active_state,
+        "load_active_gateway_target",
+        lambda: ("127.0.0.1", 8000),
+    ):
+        with patch.object(openforge_cli.urllib_request, "urlopen", fake_urlopen):
+            with patch.object(openforge_cli.sys.stdout, "isatty", lambda: False):
+                with patch("builtins.print") as print_mock:
+                    assert openforge_cli.main(["watch", "--once"]) == 0
+
+    printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list)
+    assert "session sess-123" in printed
+    assert "min_weight_version=3" in printed
+    assert requests == [
+        ("GET", "http://127.0.0.1:8000/health"),
+        ("GET", "http://127.0.0.1:8000/status"),
+    ]
+
+
 def main() -> int:
     return run_tests(
         [
@@ -371,6 +429,7 @@ def main() -> int:
             test_openforge_session_stop_ends_active_session,
             test_openforge_gateway_stop_terminates_recorded_process,
             test_openforge_gateway_stop_escalates_to_sigkill,
+            test_openforge_watch_prints_status_once,
         ]
     )
 
