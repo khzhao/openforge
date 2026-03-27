@@ -56,7 +56,7 @@ class RolloutManager:
             ),
             "worker_startup_timeout_secs": router_kwargs.pop(
                 "worker_startup_timeout_secs",
-                300,
+                600,
             ),
             "worker_startup_check_interval": router_kwargs.pop(
                 "worker_startup_check_interval",
