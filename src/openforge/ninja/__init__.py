@@ -21,6 +21,7 @@ from openforge.gateway.types import ChatCompletionResponse, ModelListResponse
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+_LOG = logging.getLogger(__name__)
 
 __all__ = ["agent", "train"]
 
@@ -148,8 +149,9 @@ def _try_active_global_batch_size() -> int | None:
 
 
 class _ActiveSession:
-    REQUEST_TIMEOUT_SECONDS = 300.0
+    REQUEST_TIMEOUT_SECONDS = 1800.0
     EXPORT_TIMEOUT_SECONDS = 1800.0
+    MAX_CONNECTIONS = _AUTO_CONCURRENCY_CAP
     END_RETRIES = 3
     END_RETRY_DELAY_SECONDS = 0.02
 
@@ -167,7 +169,11 @@ class _ActiveSession:
     def __enter__(self) -> _ActiveSession:
         self._http = httpx.Client(
             base_url=self._base_url,
-            timeout=self.REQUEST_TIMEOUT_SECONDS,
+            timeout=httpx.Timeout(self.REQUEST_TIMEOUT_SECONDS, connect=10.0),
+            limits=httpx.Limits(
+                max_connections=self.MAX_CONNECTIONS,
+                max_keepalive_connections=self.MAX_CONNECTIONS,
+            ),
         )
         response = self.get("/current_session")
         if response.status_code == 404:
@@ -345,7 +351,7 @@ class _ActiveSession:
                 response = self.post(path, payload)
                 response.raise_for_status()
                 return response
-            except httpx.ReadError:
+            except httpx.TransportError:
                 if attempt + 1 == self.END_RETRIES:
                     raise
                 time.sleep(self.END_RETRY_DELAY_SECONDS)
@@ -712,13 +718,14 @@ def _execute_grouped_results(
     ) -> _GroupedExecutionResult:
         request_index, (call_args, call_kwargs) = group_job
         last_error: Exception | None = None
+        group_id = f"group_{uuid4().hex}"
 
         for attempt in range(retries + 1):
             clients: list[_TrajectoryClient] = []
             try:
                 clients = session.trajectory_groups(
                     counts=[group_size],
-                    group_ids=[f"group_{uuid4().hex}"],
+                    group_ids=[group_id],
                 )[0]
 
                 def run_rollout(
@@ -756,6 +763,14 @@ def _execute_grouped_results(
                 )
             except Exception as exc:
                 last_error = exc
+                _LOG.exception(
+                    "grouped execute attempt failed: request_index=%s attempt=%s/%s group_id=%s trajectories=%s",
+                    request_index,
+                    attempt + 1,
+                    retries + 1,
+                    group_id,
+                    [client.trajectory_id for client in clients],
+                )
                 _fail_clients_best_effort(session, clients)
                 if attempt >= retries:
                     raise RuntimeError(

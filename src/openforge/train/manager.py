@@ -95,7 +95,9 @@ class TrainManager:
 
     def step_update(
         self,
-        rank_minibatches_per_update: Sequence[Sequence[dict[str, torch.Tensor]]],
+        rank_minibatches_per_update: Sequence[
+            Sequence[Sequence[dict[str, torch.Tensor]]]
+        ],
         *,
         global_step: int | None = None,
     ) -> list[list[TrainStepResult]]:
@@ -108,7 +110,9 @@ class TrainManager:
 
     def step_update_and_publish(
         self,
-        rank_minibatches_per_update: Sequence[Sequence[dict[str, torch.Tensor]]],
+        rank_minibatches_per_update: Sequence[
+            Sequence[Sequence[dict[str, torch.Tensor]]]
+        ],
         *,
         global_step: int | None = None,
         policy_version: int,
@@ -285,21 +289,23 @@ class TrainManager:
 
     def _build_rank_updates(
         self,
-        rank_minibatches_per_update: Sequence[Sequence[dict[str, torch.Tensor]]],
-    ) -> list[list[dict[str, torch.Tensor]]]:
+        rank_minibatches_per_update: Sequence[
+            Sequence[Sequence[dict[str, torch.Tensor]]]
+        ],
+    ) -> list[list[list[dict[str, torch.Tensor]]]]:
         rank_updates = [[] for _ in range(self.world_size)]
         for rank_minibatches in rank_minibatches_per_update:
             assert len(rank_minibatches) == self.world_size, (
                 "Expected one mini-batch per training rank: "
                 f"{self.world_size} != {len(rank_minibatches)}"
             )
-            for rank, mini_batch in enumerate(rank_minibatches):
-                rank_updates[rank].append(mini_batch)
+            for rank, microbatches in enumerate(rank_minibatches):
+                rank_updates[rank].append(list(microbatches))
         return rank_updates
 
     def _step_update_locked(
         self,
-        rank_updates: Sequence[Sequence[dict[str, torch.Tensor]]],
+        rank_updates: Sequence[Sequence[Sequence[dict[str, torch.Tensor]]]],
         *,
         global_step: int | None = None,
     ) -> list[list[TrainStepResult]]:

@@ -18,9 +18,10 @@ from transformers import AutoTokenizer
 from openforge.train.fsdp2.base import FSDP2Engine
 from openforge.train.types import TrainStepResult, TrainWorkerSpec, TrainWorkerState
 from openforge.utils.networking import get_free_port
-from openforge.utils.packed import pack_micro_batch, serialize_tensor_bucket
+from openforge.utils.packed import serialize_tensor_bucket
 from openforge.utils.ray import get_current_ray_node_ip_address
 from openforge.utils.torch import get_torch_dtype
+from openforge.utils.train_batching import pack_microbatch_group, pack_minibatch
 
 __all__ = ["TrainWorker", "RayTrainWorker"]
 
@@ -52,9 +53,11 @@ class TrainWorker:
         *,
         global_step: int | None = None,
     ) -> TrainStepResult:
-        microbatches = self._pack_mini_batch(mini_batch)
-        for batch in microbatches:
-            batch["old_log_probs"] = self.engine.compute_old_log_probs(batch)
+        microbatches = pack_minibatch(
+            mini_batch,
+            micro_batch_size=self.spec.cfg.train.micro_batch_size,
+        )
+        self._prepare_log_probs(microbatches)
         return self._step_microbatches(
             microbatches,
             global_step=global_step,
@@ -62,22 +65,21 @@ class TrainWorker:
 
     def step_update(
         self,
-        mini_batches: Sequence[dict[str, torch.Tensor]],
+        microbatch_groups: Sequence[Sequence[dict[str, torch.Tensor]]],
         *,
         global_step: int | None = None,
     ) -> list[TrainStepResult]:
-        packed_batches = [
-            self._pack_mini_batch(mini_batch) for mini_batch in mini_batches
-        ]
-        for microbatches in packed_batches:
-            for batch in microbatches:
-                batch["old_log_probs"] = self.engine.compute_old_log_probs(batch)
+        packed_groups = []
+        for microbatches in microbatch_groups:
+            packed_batches = pack_microbatch_group(list(microbatches))
+            self._prepare_log_probs(packed_batches)
+            packed_groups.append(packed_batches)
         results: list[TrainStepResult] = []
         for _ in range(self.spec.cfg.train.ppo_epochs):
-            for microbatches in packed_batches:
+            for packed_batches in packed_groups:
                 results.append(
                     self._step_microbatches(
-                        microbatches,
+                        packed_batches,
                         global_step=global_step,
                     )
                 )
@@ -89,23 +91,27 @@ class TrainWorker:
         *,
         global_step: int | None,
     ) -> TrainStepResult:
+        loss_weights = [
+            float(batch["loss_mask"].sum().clamp_min(1.0)) for batch in microbatches
+        ]
+        total_loss_weight = max(sum(loss_weights), 1.0)
         self.engine.zero_grad()
         last_index = len(microbatches) - 1
         forward_metrics: dict[str, float] = {}
-        for index, batch in enumerate(microbatches):
+        for index, (batch, loss_weight) in enumerate(
+            zip(microbatches, loss_weights, strict=True)
+        ):
             context = self.engine.no_sync() if index < last_index else nullcontext()
             with context:
                 outputs = self.engine.forward(batch)
+                outputs["loss"] = outputs["loss"] * (loss_weight / total_loss_weight)
                 self.engine.backward(outputs)
             for key, value in outputs.items():
                 if key == "loss" or value is None or value.ndim != 0:
                     continue
-                forward_metrics[key] = forward_metrics.get(key, 0.0) + float(value)
-
-        if microbatches:
-            scale = 1.0 / len(microbatches)
-            for key in list(forward_metrics):
-                forward_metrics[key] *= scale
+                forward_metrics[key] = forward_metrics.get(key, 0.0) + float(value) * (
+                    loss_weight / total_loss_weight
+                )
 
         metrics = self.engine.step_optimizer()
         return TrainStepResult(
@@ -118,21 +124,28 @@ class TrainWorker:
             },
         )
 
-    def _pack_mini_batch(
+    def _prepare_log_probs(
         self,
-        mini_batch: dict[str, torch.Tensor],
-    ) -> list[dict[str, torch.Tensor]]:
-        batch_size = int(mini_batch["lengths"].shape[0])
-        assert batch_size > 0, "step requires at least one sample"
-        micro_batch_size = self.spec.cfg.train.micro_batch_size
-        microbatches = [
-            {
-                key: value[index : index + micro_batch_size]
-                for key, value in mini_batch.items()
-            }
-            for index in range(0, batch_size, micro_batch_size)
-        ]
-        return [pack_micro_batch(micro_batch) for micro_batch in microbatches]
+        microbatches: list[dict[str, torch.Tensor]],
+    ) -> None:
+        if self.engine.ref_model is not None:
+            self.engine.offload_train_state()
+            self.engine.onload_ref_state()
+            try:
+                for batch in microbatches:
+                    batch["ref_log_probs"] = self.engine.compute_token_log_probs(
+                        batch,
+                        model="ref",
+                    )
+            finally:
+                self.engine.offload_ref_state()
+                self.engine.onload_train_state()
+
+        for batch in microbatches:
+            batch["old_log_probs"] = self.engine.compute_token_log_probs(
+                batch,
+                model="main",
+            )
 
     def sleep(self) -> None:
         self.engine.sleep()

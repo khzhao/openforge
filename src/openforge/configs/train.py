@@ -80,6 +80,7 @@ class TrainConfig(OpenForgeBaseModel):
     global_batch_size: int
     mini_batch_size: int
     micro_batch_size: int
+    max_tokens_per_micro_batch: int | None = None
     ppo_epochs: int = 1
     max_rollout_policy_lag: int
     checkpoints: str
@@ -95,6 +96,11 @@ class TrainConfig(OpenForgeBaseModel):
             raise ValueError("mini_batch_size must be > 0")
         if self.micro_batch_size <= 0:
             raise ValueError("micro_batch_size must be > 0")
+        if (
+            self.max_tokens_per_micro_batch is not None
+            and self.max_tokens_per_micro_batch <= 0
+        ):
+            raise ValueError("max_tokens_per_micro_batch must be > 0")
         if self.ppo_epochs <= 0:
             raise ValueError("ppo_epochs must be > 0")
         if self.max_rollout_policy_lag < 0:

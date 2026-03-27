@@ -10,6 +10,8 @@ import requests
 class SGLangClient:
     """Small client for SGLang server control and metadata endpoints."""
 
+    GENERATE_TIMEOUT_SECONDS = 3600.0
+
     def __init__(
         self,
         base_url: str,
@@ -39,7 +41,7 @@ class SGLangClient:
         self,
         *,
         sampling_params: dict[str, Any],
-        timeout: float = 300.0,
+        timeout: float = GENERATE_TIMEOUT_SECONDS,
         **kwargs: Any,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         response = self._request(

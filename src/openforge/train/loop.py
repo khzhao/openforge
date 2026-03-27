@@ -8,11 +8,11 @@ import time
 from typing import Callable
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
 
 from openforge.data import OpenForgeStore, Trajectory, Turn
 from openforge.logging import build_train_update
 from openforge.runtime import create_algorithm
+from openforge.utils.train_batching import build_rank_microbatch_groups
 
 __all__ = ["TrainLoop"]
 
@@ -139,29 +139,16 @@ class TrainLoop:
                 )
 
         assert len(trajectory_samples) == self.train.global_batch_size
-        rank_minibatches_per_update: list[list[dict[str, torch.Tensor]]] = []
-        offset = 0
-        trajectories_per_minibatch = self.world_size * self.train.mini_batch_size
-        while offset < len(trajectory_samples):
-            rank_minibatches: list[dict[str, torch.Tensor]] = []
-            for _rank in range(self.world_size):
-                rank_trajectories = trajectory_samples[
-                    offset : offset + self.train.mini_batch_size
-                ]
-                rank_minibatches.append(
-                    self._collate(
-                        [
-                            sample
-                            for trajectory in rank_trajectories
-                            for sample in trajectory
-                        ]
-                    )
-                )
-                offset += self.train.mini_batch_size
-            rank_minibatches_per_update.append(rank_minibatches)
-        assert (
-            len(rank_minibatches_per_update) * trajectories_per_minibatch
-            == self.train.global_batch_size
+        rank_minibatches_per_update = build_rank_microbatch_groups(
+            trajectory_samples,
+            world_size=self.world_size,
+            mini_batch_size=self.train.mini_batch_size,
+            micro_batch_size=self.train.micro_batch_size,
+            max_tokens_per_micro_batch=getattr(
+                self.train,
+                "max_tokens_per_micro_batch",
+                None,
+            ),
         )
 
         next_global_step = self.global_step + 1
@@ -257,7 +244,7 @@ class TrainLoop:
 
     def _step_and_publish(
         self,
-        rank_minibatches_per_update: list[list[dict[str, torch.Tensor]]],
+        rank_minibatches_per_update: list[list[list[dict[str, torch.Tensor]]]],
         *,
         global_step: int,
         policy_version: int,
@@ -327,29 +314,3 @@ class TrainLoop:
                 }
             )
         return samples
-
-    @staticmethod
-    def _collate(samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-        return {
-            "tokens": pad_sequence(
-                [sample["tokens"] for sample in samples],
-                batch_first=True,
-            ),
-            "position_ids": pad_sequence(
-                [sample["position_ids"] for sample in samples],
-                batch_first=True,
-            ),
-            "advantages": pad_sequence(
-                [sample["advantages"] for sample in samples],
-                batch_first=True,
-            ),
-            "loss_mask": pad_sequence(
-                [sample["loss_mask"] for sample in samples],
-                batch_first=True,
-            ),
-            "rollout_log_probs": pad_sequence(
-                [sample["rollout_log_probs"] for sample in samples],
-                batch_first=True,
-            ),
-            "lengths": torch.stack([sample["lengths"] for sample in samples]),
-        }

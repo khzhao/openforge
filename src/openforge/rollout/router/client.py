@@ -26,7 +26,7 @@ class RolloutRouterClient(SGLangClient):
         self,
         sampling_params: dict[str, Any],
         *,
-        timeout: float = 300.0,
+        timeout: float = SGLangClient.GENERATE_TIMEOUT_SECONDS,
         **kwargs: Any,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         """Route one generate request through the router."""

@@ -21,6 +21,8 @@ __all__ = ["RolloutManager"]
 class RolloutManager:
     """Thin lifecycle owner for rollout engines and the custom router."""
 
+    REQUEST_TIMEOUT_SECONDS = 1800
+
     def __init__(
         self,
         cfg: OpenForgeConfig,
@@ -48,7 +50,10 @@ class RolloutManager:
             "router_name": "openforge-router",
             "router_ip": router_ip or get_host_ip(),
             "router_port": router_port or get_free_port(start=30000),
-            "request_timeout_secs": router_kwargs.pop("request_timeout_secs", 300),
+            "request_timeout_secs": router_kwargs.pop(
+                "request_timeout_secs",
+                self.REQUEST_TIMEOUT_SECONDS,
+            ),
             "worker_startup_timeout_secs": router_kwargs.pop(
                 "worker_startup_timeout_secs",
                 300,

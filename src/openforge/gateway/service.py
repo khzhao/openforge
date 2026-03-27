@@ -669,7 +669,9 @@ class Service:
             )
         await self.store.append_turns(turns_to_append)
         for trajectory_id in trajectory_ids:
-            self._active_turn_counts[trajectory_id] += 1
+            turn_count = self._active_turn_counts.get(trajectory_id)
+            if turn_count is not None:
+                self._active_turn_counts[trajectory_id] = turn_count + 1
         async with self._generate_lock:
             pending_generate_count = len(self._pending_generates)
         self._session_logger.record_generations(

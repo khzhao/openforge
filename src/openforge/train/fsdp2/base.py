@@ -101,9 +101,8 @@ class FSDP2Engine(TrainBackend):
         self.optimizer = self._create_optimizer()
         self.scheduler = self._create_scheduler()
         self.grad_scaler = self._create_grad_scaler()
-
-        # 4. Finalize components
-        self._finalize()
+        self.onload_train_state()
+        self.sleeping = False
 
     def zero_grad(self) -> None:
         self.optimizer.zero_grad(set_to_none=True)
@@ -145,13 +144,11 @@ class FSDP2Engine(TrainBackend):
                 position_ids=position_ids,
             )
 
-        ref_log_probs = None
-        if self.ref_model is not None:
-            ref_log_probs = self._compute_token_log_probs(
-                model=self.ref_model,
-                tokens=tokens,
-                position_ids=position_ids,
-            )
+        ref_log_probs = batch.get("ref_log_probs")
+        if ref_log_probs is not None:
+            ref_log_probs = ref_log_probs.to(self.device).float()
+        elif self.ref_model is not None:
+            raise ValueError("ref_log_probs must be precomputed when ref_model is set")
 
         # 2. Delegate the algorithm-specific loss math
         outputs: dict[str, torch.Tensor | None] = {
@@ -172,18 +169,28 @@ class FSDP2Engine(TrainBackend):
         return outputs
 
     @torch.no_grad()
-    def compute_old_log_probs(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def compute_token_log_probs(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        model: Literal["main", "ref"] = "main",
+    ) -> torch.Tensor:
         tokens = batch["tokens"].to(self.device).long()
         position_ids = batch["position_ids"].to(self.device).long()
+        target_model = self.main_model
+        if model == "ref":
+            if self.ref_model is None:
+                raise ValueError("ref_model is not configured")
+            target_model = self.ref_model
         token_log_probs = self._compute_token_log_probs(
-            model=self.main_model,
+            model=target_model,
             tokens=tokens,
             position_ids=position_ids,
         )
         return token_log_probs.float().cpu()
 
     def backward(self, forward_out: dict[str, torch.Tensor]) -> None:
-        loss = forward_out["loss"] / self.cfg.train.gradient_accumulation_steps
+        loss = forward_out["loss"]
         if self.use_grad_scaler:
             self.grad_scaler.scale(loss).backward()
         else:
@@ -230,17 +237,12 @@ class FSDP2Engine(TrainBackend):
         return metrics
 
     def sleep(self) -> None:
-        offload_params(self.main_model, offload_grad=True)
-        if self.ref_model is not None:
-            offload_params(self.ref_model, offload_grad=False)
-        offload_optimizer(self.optimizer)
+        self.offload_train_state()
+        self.offload_ref_state()
         self.sleeping = True
 
     def wakeup(self) -> None:
-        onload_params(self.main_model, self.device, onload_grad=True)
-        if self.ref_model is not None:
-            onload_params(self.ref_model, self.device, onload_grad=False)
-        onload_optimizer(self.optimizer, self.device)
+        self.onload_train_state()
         self.sleeping = False
 
     def shutdown(self) -> None:
@@ -319,6 +321,7 @@ class FSDP2Engine(TrainBackend):
         model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             attn_implementation=attn_implementation,
+            torch_dtype=get_torch_dtype(fsdp_cfg.mixed_precision.param_dtype),
             trust_remote_code=True,
         )
         if not is_eval_only and fsdp_cfg.gradient_checkpointing:
@@ -374,9 +377,18 @@ class FSDP2Engine(TrainBackend):
             enabled=self.use_grad_scaler,
         )
 
-    def _finalize(self):
+    def offload_train_state(self) -> None:
+        offload_params(self.main_model, offload_grad=True)
+        offload_optimizer(self.optimizer)
+
+    def onload_train_state(self) -> None:
         onload_params(self.main_model, self.device, onload_grad=True)
+        onload_optimizer(self.optimizer, self.device)
+
+    def offload_ref_state(self) -> None:
+        if self.ref_model is not None:
+            offload_params(self.ref_model, offload_grad=False)
+
+    def onload_ref_state(self) -> None:
         if self.ref_model is not None:
             onload_params(self.ref_model, self.device, onload_grad=False)
-        onload_optimizer(self.optimizer, self.device)
-        self.sleeping = False
