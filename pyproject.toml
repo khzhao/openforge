@@ -5,21 +5,47 @@ build-backend = "uv_build"
 [project]
 name = "openforge"
 version = "0.1.0"
-description = "Add your description here"
+description = "Gateway-first post-training for LLM agents."
 readme = "README.md"
-authors = [{ name = "Kevin Zhao", email = "kzhao16@gmail.com" }]
+license = { file = "LICENSE" }
+authors = [
+    { name = "Kevin Zhao", email = "kzhao16@gmail.com" },
+    { name = "Zhaoran Wang", email = "zhaoran.wang@u.northwestern.edu" },
+]
 requires-python = ">=3.10"
+keywords = ["llm", "rl", "post-training", "agents", "grpo"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "fastapi>=0.129.0",
+    "httpx",
+    "huggingface_hub",
     "loguru>=0.7.3",
+    "packaging",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.0",
     "ray>=2.54.0",
+    "requests",
+    "sglang[all]==0.5.9",
+    "sglang_router==0.3.2",
     "torch==2.9.1",
     "transformers==4.57.1",
     "uvicorn>=0.41.0",
     "wandb>=0.23.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/khzhao/openforge"
+Repository = "https://github.com/khzhao/openforge"
 
 [project.scripts]
 openforge = "openforge.cli.main:main"
@@ -49,7 +75,7 @@ src = ["src"]
 include = ["src/**/*.py"]
 line-length = 88
 indent-width = 4
-target-version = "py312"
+target-version = "py310"
 
 [tool.ruff.lint]
 preview = true
