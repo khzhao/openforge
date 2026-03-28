@@ -4,14 +4,10 @@
 
 # openforge
 
-Gateway-first post-training for LLM agents.
+Gateway-first post-training for LLM agents. RL-as-a-Service (RLaaS).
 
 Train the agent, not the glue code.
 
-![Gateway-First](https://img.shields.io/badge/Gateway-First-0f766e)
-![Ninja-API](https://img.shields.io/badge/Ninja-API-1d4ed8)
-![Algorithms](https://img.shields.io/badge/Algorithms-GRPO%20%2B%20GRPO--TIS-b45309)
-![Stack](https://img.shields.io/badge/Stack-Ray%20%2B%20SGLang%20%2B%20FSDP2-111827)
 ![License](https://img.shields.io/badge/License-Apache%202.0-7c3aed)
 
 ## News
@@ -32,6 +28,7 @@ Most post-training stacks ask you to edit launch scripts, trainer internals, rol
 
 ## Contents
 
+- [System Overview](#system-overview)
 - [The Ninja API](#the-ninja-api)
 - [Features](#features)
 - [Roadmap](#roadmap)
@@ -42,6 +39,12 @@ Most post-training stacks ask you to edit launch scripts, trainer internals, rol
 - [Algorithms](#algorithms)
 - [Development](#development)
 - [Citation](#citation)
+
+## System Overview
+
+High-level architecture:
+
+![openforge system overview](./assets/excalidraw.png)
 
 ## The Ninja API
 
@@ -165,9 +168,11 @@ Our short-term roadmap has two tracks:
 - ✅ Gateway/session lifecycle CLI
 - ✅ Ray-backed runtime management with SGLang rollout and FSDP2 training
 - ✅ In-tree support for `grpo` and `grpo_tis`
+- ⬜ `cispo`
 - ⬜ Better rollout/engine recovery and restart
 - ⬜ Better back pressure and load balancing on the gateway
 - ⬜ LoRA training support
+- ⬜ Tinker support
 - ⬜ More HTTP throughput / move to websocket
 - ⬜ Additional algorithms and rollout backends
 - ⬜ More cluster presets and deployment guidance

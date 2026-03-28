@@ -26,7 +26,7 @@ train:
       pin_memory: false
     amp:
       enabled: false
-      precision: float32
+      precision: bfloat16
       use_grad_scaler: false
     optim:
       lr: 1.0e-6
