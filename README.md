@@ -1,5 +1,7 @@
 ![openforge banner](./assets/openforge-ninja.png)
 
+> Banner image generated with Google Nano Banana
+
 # openforge
 
 Gateway-first post-training for LLM agents.
@@ -174,7 +176,7 @@ Our short-term roadmap has two tracks:
 
 We welcome contributions around algorithms, runtime backends, tests, and docs. Good places to start are [`src/openforge/ninja/`](./src/openforge/ninja/), [`src/openforge/gateway/`](./src/openforge/gateway/), and [`src/openforge/train/`](./src/openforge/train/).
 
-Questions can be directed to Kevin Zhao (`kzhao16@gmail.com`) or Zhaoran Wang (`zhaoran.wang@u.northwestern.edu`).
+Questions can be directed to Kevin Zhao (`kzhao16 [at] gmail [dot] com`) or Zhaoran Wang (`zhaoran [dot] wang [at] u [dot] northwestern [dot] edu`).
 
 ## openforge Quick Start
 
@@ -186,6 +188,24 @@ Requirements:
 - Python 3.10+
 - NVIDIA GPU(s) with a working CUDA stack
 - `uv`
+
+If you do not already have `uv`, install it first:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+If `curl` is unavailable, you can use:
+
+```bash
+wget -qO- https://astral.sh/uv/install.sh | sh
+```
+
+Then confirm the install:
+
+```bash
+uv --version
+```
 
 Install the project environment:
 
