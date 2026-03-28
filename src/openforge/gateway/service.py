@@ -59,6 +59,7 @@ class Service:
     """Own the session, trajectory, and turn-recording workflow."""
 
     GENERATE_BATCH_MAX_SIZE = 320
+    GENERATE_BATCH_MAX_SIZE_PER_REPLICA = 64
     GENERATE_BATCH_MAX_WAIT_SECONDS = 0.02
     _TOOL_CALL_PATTERN = re.compile(
         r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
@@ -80,6 +81,7 @@ class Service:
         self._generate_lock = asyncio.Lock()
         self._generate_task: asyncio.Task[None] | None = None
         self._pending_generates: list[_PendingGenerate] = []
+        self._generate_batch_max_size = self.GENERATE_BATCH_MAX_SIZE
         self._runtime_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="openforge-gateway-runtime",
@@ -165,6 +167,17 @@ class Service:
         self._active_session_model_name = resolved_model_name
         self._active_trajectories = {}
         self._active_turn_counts = {}
+        rollout_replicas = sum(
+            int(engine_group.replicas)
+            for engine_group in runtime_config.rollout.engine_groups
+        )
+        self._generate_batch_max_size = max(
+            1,
+            min(
+                self.GENERATE_BATCH_MAX_SIZE,
+                rollout_replicas * self.GENERATE_BATCH_MAX_SIZE_PER_REPLICA,
+            ),
+        )
         train_runtime = self.runtime.train()
         self._session_logger.start(
             session_id=session_id,
@@ -488,6 +501,7 @@ class Service:
         self._active_session_model_name = None
         self._active_trajectories = {}
         self._active_turn_counts = {}
+        self._generate_batch_max_size = self.GENERATE_BATCH_MAX_SIZE
         self._session_logger.flush(force=True)
         self._session_logger.finish()
         await self.runtime.train().end_session()
@@ -500,6 +514,7 @@ class Service:
         self._active_session_model_name = None
         self._active_trajectories = {}
         self._active_turn_counts = {}
+        self._generate_batch_max_size = self.GENERATE_BATCH_MAX_SIZE
         self._session_logger.finish()
         try:
             await self.runtime.shutdown()
@@ -572,7 +587,7 @@ class Service:
         for request in self._pending_generates:
             if (
                 request.batch_key == batch_key
-                and len(batch) < self.GENERATE_BATCH_MAX_SIZE
+                and len(batch) < self._generate_batch_max_size
             ):
                 batch.append(request)
                 continue

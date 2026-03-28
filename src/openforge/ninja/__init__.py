@@ -149,8 +149,8 @@ def _try_active_global_batch_size() -> int | None:
 
 
 class _ActiveSession:
-    REQUEST_TIMEOUT_SECONDS = 1800.0
-    EXPORT_TIMEOUT_SECONDS = 1800.0
+    REQUEST_TIMEOUT_SECONDS = 3600.0
+    EXPORT_TIMEOUT_SECONDS = 3600.0
     MAX_CONNECTIONS = _AUTO_CONCURRENCY_CAP
     END_RETRIES = 3
     END_RETRY_DELAY_SECONDS = 0.02
@@ -642,6 +642,12 @@ class _GroupedExecutionResult:
     rewards: list[float]
 
 
+@dataclass(slots=True)
+class _GroupedExecutionFailure:
+    request_index: int
+    error: str
+
+
 def _resolve_gateway_target(
     gateway_config: GatewayServerConfig | None,
 ) -> tuple[str, int]:
@@ -687,13 +693,14 @@ def _execute_grouped(
     concurrency: int,
     retries: int,
 ) -> list[list[float]]:
-    grouped_results = _execute_grouped_results(
+    grouped_results, _failures = _execute_grouped_results(
         agent,
         session,
         call_specs,
         group_size=group_size,
         concurrency=concurrency,
         retries=retries,
+        raise_on_failure=True,
     )
     rewards_by_request = [[0.0 for _ in range(group_size)] for _ in call_specs]
     for result in grouped_results:
@@ -709,13 +716,14 @@ def _execute_grouped_results(
     group_size: int,
     concurrency: int,
     retries: int,
-) -> list[_GroupedExecutionResult]:
+    raise_on_failure: bool = True,
+) -> tuple[list[_GroupedExecutionResult], list[_GroupedExecutionFailure]]:
     rollout_concurrency = max(1, min(group_size, concurrency))
     group_concurrency = max(1, concurrency // rollout_concurrency)
 
     def run_group(
         group_job: tuple[int, tuple[tuple[Any, ...], dict[str, Any]]],
-    ) -> _GroupedExecutionResult:
+    ) -> _GroupedExecutionResult | _GroupedExecutionFailure:
         request_index, (call_args, call_kwargs) = group_job
         last_error: Exception | None = None
         group_id = f"group_{uuid4().hex}"
@@ -773,6 +781,11 @@ def _execute_grouped_results(
                 )
                 _fail_clients_best_effort(session, clients)
                 if attempt >= retries:
+                    if not raise_on_failure:
+                        return _GroupedExecutionFailure(
+                            request_index=request_index,
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
                     raise RuntimeError(
                         f"grouped execute failed for request index {request_index}"
                     ) from exc
@@ -781,11 +794,19 @@ def _execute_grouped_results(
         assert last_error is not None
         raise last_error
 
-    return _map_parallel(
+    outputs = _map_parallel(
         list(enumerate(call_specs)),
         concurrency=group_concurrency,
         fn=run_group,
     )
+    grouped_results: list[_GroupedExecutionResult] = []
+    failures: list[_GroupedExecutionFailure] = []
+    for output in outputs:
+        if isinstance(output, _GroupedExecutionResult):
+            grouped_results.append(output)
+        else:
+            failures.append(output)
+    return grouped_results, failures
 
 
 def _wait_for_trained_trajectories(
@@ -843,7 +864,7 @@ def train(
     group_size: int,
     concurrency: int | None = None,
     retries: int = 0,
-    wait_timeout: float = 1800.0,
+    wait_timeout: float = 3600.0,
 ) -> dict[str, Any]:
     """Run grouped trajectories through the gateway and wait until they are trained."""
     if not isinstance(agent, _RegisteredAgent):
@@ -881,13 +902,14 @@ def train(
             )
     with agent._session() as session:
         initial_policy_version = session.current_policy_version()
-        grouped_results = _execute_grouped_results(
+        grouped_results, _failures = _execute_grouped_results(
             agent,
             session,
             call_specs,
             group_size=group_size,
             concurrency=resolved_concurrency,
             retries=retries,
+            raise_on_failure=True,
         )
         trajectory_ids = [
             trajectory_id
