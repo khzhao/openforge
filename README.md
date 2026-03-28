@@ -1,58 +1,40 @@
-<p align="center">
-  <img src="./assets/openforge-ninja.png" alt="OpenForge banner" width="960" />
-</p>
+![openforge banner](./assets/openforge-ninja.png)
 
-<h1 align="center"><code>openforge</code></h1>
+# openforge
 
-<p align="center">
-  <strong>Gateway-first post-training for LLM agents.</strong>
-</p>
+Gateway-first post-training for LLM agents.
 
-<p align="center">
-  Train the agent, not the glue code.
-</p>
+Train the agent, not the glue code.
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#openforge-ninja-api">Ninja API</a> •
-  <a href="#configuration">Configuration</a> •
-  <a href="#why-it-feels-different">Why OpenForge</a>
-</p>
+![Gateway-First](https://img.shields.io/badge/Gateway-First-0f766e)
+![Ninja-API](https://img.shields.io/badge/Ninja-API-1d4ed8)
+![Algorithms](https://img.shields.io/badge/Algorithms-GRPO%20%2B%20GRPO--TIS-b45309)
+![Stack](https://img.shields.io/badge/Stack-Ray%20%2B%20SGLang%20%2B%20FSDP2-111827)
+![License](https://img.shields.io/badge/License-Apache%202.0-7c3aed)
 
-<p align="center">
-  Bring up one live runtime, attach a small Python agent through <code>ninja</code>,
-  and keep rollout, training, checkpoints, and session lifecycle behind one surface.
-</p>
+## News
 
-<p align="center">
-  Gateway-first RL • Minimal agent API • Config-first setup
-</p>
+- [2026/3/28] The public surface is one CLI (`openforge`) plus one Python API (`openforge.ninja`) for agent registration, sampling, training, validation, and checkpoint export.
+- [2026/3/28] In-tree runtime configs support `grpo` and `grpo_tis` on a Ray + SGLang + FSDP2 stack.
+- [2026/3/28] Active gateway/session discovery uses machine-local shared state so scripts and CLI commands can attach to the same live runtime.
 
-## Correspondence
+---
 
-- Kevin Zhao: `kzhao16 [at] gmail [dot] com`
-- Zhaoran Wang: `zhaoran.wang [at] u [dot] northwestern [dot] edu`
+## TL;DR
 
-## OpenForge
+> **openforge** is a gateway-first post-training framework for LLM agents. It keeps gateway lifecycle, rollout collection, training, checkpoint export, and local active-state discovery behind one surface, then exposes a small Python API so you can train an agent by writing normal OpenAI-style calls plus a reward function.
 
-Most post-training repos ask you to edit launch scripts, shell state, and
-framework internals at the same time. OpenForge is built around a simpler
-contract:
+Most post-training stacks ask you to edit launch scripts, trainer internals, rollout code, and shell state at the same time. openforge uses YAML to start the runtime, records the active gateway and session on the local machine, and lets Ninja agents attach to that environment automatically.
 
-1. Start a gateway from YAML.
-2. Start a training session from YAML.
-3. Define a Python agent with `@ninja.agent()`.
-4. Run it directly or train it with `ninja.train(...)`.
+> **Highlights:** Gateway-first control plane | One public CLI | `@ninja.agent()` + `ninja.train(...)` | Active local discovery | Config-first runtime setup | GRPO and GRPO+TIS
 
-That is the catch phrase of the repo in practice: **train the agent, not the
-glue code.**
-
-## OpenForge Ninja API
+## The Ninja API
 
 This is the center of the project:
 
 ```python
 import openforge.ninja as ninja
+
 
 @ninja.agent()
 def agent(client, *, prompt: str, target: str) -> float:
@@ -63,6 +45,7 @@ def agent(client, *, prompt: str, target: str) -> float:
     reward = ...
     return reward
 
+
 summary = ninja.train(
     agent,
     inputs=[{"prompt": "2 + 2 = ?", "target": "4"}],
@@ -70,177 +53,204 @@ summary = ninja.train(
 )
 ```
 
-The important API points are:
+A basic train/validation loop looks like this:
 
-- `agent(...)`
-  Runs one trajectory through the active gateway and returns one reward.
-- `agent.sample(requests=[...], group_size=N)`
-  Collects one or more stored trajectories without waiting for a train update.
-- `ninja.train(agent, inputs=[...], group_size=N)`
-  Runs grouped trajectories, stores them, and waits for those trajectories to be
-  trained before returning a summary.
+```python
+import openforge.ninja as ninja
 
-If a gateway and session are active, `@ninja.agent()` discovers them
-automatically. If you need to target a different gateway explicitly, pass a
-`GatewayServerConfig` as the decorator argument, for example
-`@ninja.agent(gateway_config)`.
 
-The active environment is recorded on the local machine at:
+@ninja.agent()
+def agent(client, *, prompt: str, target: str) -> float:
+    response = client.chat.completions.create(
+        model="...",
+        messages=[{"role": "user", "content": prompt}],
+        ...,
+    )
+    text = ...
+    reward = ...
+    return reward
+
+
+train_batches = ...
+validation_path = "..."
+
+for update_index, batch_inputs in enumerate(train_batches, start=1):
+    ninja.train(
+        agent,
+        inputs=batch_inputs,
+        group_size=8,
+        ...,
+    )
+
+    if update_index % 10 == 0:
+        ninja.validate(
+            agent,
+            file_path=validation_path,
+            ...,
+        )
+
+agent.save()
+```
+
+Important API points:
+
+- `agent(...)` runs one trajectory through the active gateway and returns one reward.
+- `agent.sample(requests=[...], group_size=N)` collects one or more stored trajectories without waiting for a train update.
+- `ninja.train(agent, inputs=[...], group_size=N)` runs grouped trajectories, stores them, and waits for those trajectories to be trained before returning a summary.
+- `ninja.validate(agent, file_path=...)` runs validation requests against the active session and returns validation metrics.
+- `agent.save()` exports the current checkpoint through the active session.
+
+If a gateway and session are active, `@ninja.agent()` discovers them automatically. If you need to target a different gateway explicitly, pass a `GatewayServerConfig` object to the decorator.
+
+## Features
+
+### Gateway-first control plane
+
+openforge puts runtime ownership behind the gateway. The gateway owns session lifecycle, health/status endpoints, generation routing, trajectory bookkeeping, and checkpoint export.
+
+### One public CLI
+
+The user-facing CLI is `openforge`. It starts and stops the gateway, starts and stops the active session, and renders live status with `openforge watch`.
+
+### Small Python agent surface
+
+Ninja agents are plain Python functions registered with `@ninja.agent()`. If you can write a reward function around `client.chat.completions.create(...)`, you can train with openforge.
+
+### Active local discovery
+
+Once a gateway and session are active, Ninja scripts attach automatically. The shared local state lives at:
 
 - `$OPENFORGE_CACHE_HOME/openforge/active_gateway.json`
 - `~/.cache/openforge/active_gateway.json` when `OPENFORGE_CACHE_HOME` is unset
 
-## Why It Feels Different
+### Config-first runtime setup
 
-- **Gateway-first control plane.** Runtime ownership, session lifecycle,
-  generation, checkpoint export, and metadata live behind one API.
-- **One public CLI.** OpenForge installs a single user-facing command,
-  `openforge`, for gateway and session lifecycle.
-- **Small Python surface.** If you can write a reward function around
-  `client.chat.completions.create(...)`, you can train with OpenForge through
-  `ninja.train(...)`.
-- **Shared local discovery.** Once a gateway and session are active, Ninja
-  scripts attach automatically. You do not need to thread gateway/session flags
-  through every example.
-- **Config-first workflow.** Cluster, model, rollout, and training settings
-  live in YAML. The CLI starts things from config; it does not become a second
-  config system.
+Cluster shape, model settings, rollout parameters, and training topology live in YAML. The CLI starts things from config paths; it does not become a second config system.
 
-## System At A Glance
+### Validation and checkpoint export
 
-| Layer | What it does |
-| --- | --- |
-| `gateway` | Runs the FastAPI control plane, owns the live runtime, exposes `/health`, `/info`, session lifecycle, generation, and checkpoint export. |
-| `ninja` | The user-facing Python API for agent code. It registers agents, routes OpenAI-style chat-completions calls through the active gateway/session, and exposes grouped training via `ninja.train(...)`. |
-| `active_state` | Stores the active gateway and active session on the local machine so scripts can auto-discover the current environment. |
-| `benchmarks` | Prompt-building and scoring helpers used by the bundled examples and benchmarks. |
-| `configs` | Pydantic-backed YAML models for gateway, cluster, model, rollout, and training setup. |
-| `data` | SQLite-backed storage for sessions and trajectories. |
-| `rollout` / `train` | SGLang rollout management and FSDP2 training infrastructure. |
-| `examples` | Runnable configs, training scripts, shared helpers, and the batching benchmark. |
+The active session exposes grouped training, file-backed validation, and checkpoint export through the same Ninja surface. That keeps rollout, training, validation, and checkpointing behind one contract.
 
-## Installation
+---
 
-### Requirements
+## Roadmap
+
+Our short-term roadmap has two tracks:
+
+#### Track 1 - Agent ergonomics and docs
+
+- ✅ `@ninja.agent()` registration and grouped `ninja.train(...)`
+- ✅ Validation and checkpoint export through the active session
+- ✅ Active gateway/session discovery on the local machine
+- ⬜ More validation/reporting workflows and observability
+- ⬜ Smaller-footprint recipes and more setup guidance
+
+#### Track 2 - Runtime and training infrastructure
+
+- ✅ Gateway/session lifecycle CLI
+- ✅ Ray-backed runtime management with SGLang rollout and FSDP2 training
+- ✅ In-tree support for `grpo` and `grpo_tis`
+- ⬜ Better rollout/engine recovery and restart
+- ⬜ Better back pressure and load balancing on the gateway
+- ⬜ LoRA training support
+- ⬜ More HTTP throughput / move to websocket
+- ⬜ Additional algorithms and rollout backends
+- ⬜ More cluster presets and deployment guidance
+
+## Contributing
+
+We welcome contributions around algorithms, runtime backends, tests, and docs. Good places to start are [`src/openforge/ninja/`](./src/openforge/ninja/), [`src/openforge/gateway/`](./src/openforge/gateway/), and [`src/openforge/train/`](./src/openforge/train/).
+
+Questions can be directed to Kevin Zhao (`kzhao16@gmail.com`) or Zhaoran Wang (`zhaoran.wang@u.northwestern.edu`).
+
+## Contents
+
+- [The Ninja API](#the-ninja-api)
+- [openforge Quick Start](#openforge-quick-start)
+- [Configuration](#configuration)
+- [Ninja API Details](#ninja-api-details)
+- [Algorithms](#algorithms)
+- [Development](#development)
+- [Citation](#citation)
+
+---
+
+## openforge Quick Start
+
+### 1. Install
+
+Requirements:
 
 - Linux
 - Python 3.10+
 - NVIDIA GPU(s) with a working CUDA stack
 - `uv`
 
-### Install
+Install the project environment:
 
 ```bash
 uv venv --python 3.10
 source .venv/bin/activate
 
 uv sync --dev
-uv pip install -r requirements.txt
 ```
 
-`uv pip install -r requirements.txt` is required for the runtime stack.
-
-OpenForge exposes one CLI:
+Check the public CLI:
 
 ```bash
 openforge --help
 ```
 
-The module entrypoint still works too:
+### 2. Start a gateway
+
+Launch the gateway from your gateway config:
 
 ```bash
-python -m openforge.cli.main --help
+openforge gateway start --config /path/to/gateway.yaml
 ```
 
-## Configuration
+The gateway config must define:
 
-Start from the bundled example files:
+- `data.path`
+- `gateway.host`
+- `gateway.port`
+- `cluster.num_nodes`
+- `cluster.gpus_per_node`
+- `cluster.cpus_per_node`
 
-- `examples/gsm8k/gateway.yaml`
-- `examples/gsm8k/runtime.yaml`
+### 3. Start a session
 
-The gateway config controls:
+Submit your runtime config to the active gateway:
 
-- gateway host and port
-- data path
-- cluster shape
+```bash
+openforge session start --runtime-config /path/to/runtime.yaml
+```
 
-The runtime config controls:
+Optional status view:
 
-- algorithm
-- model
-- rollout engine groups
-- training topology and checkpoints
+```bash
+openforge watch --once
+```
 
-The CLI only accepts config paths. If you want to change behavior, change the
-YAML.
+`session start` is the heavy step. It creates or attaches to Ray, allocates the runtime, and may take a few minutes on a cold start.
 
-The bundled GSM8K example is configured for:
+### 4. Run your agent script
 
-- 1 node
-- 4 GPUs per node
-- 1 FSDP2 training worker
-- 3 SGLang rollout replicas
-- GRPO on `Qwen/Qwen2.5-0.5B-Instruct`
+Once the gateway and session are active, run your own agent script:
 
-There is also a Search-R1-style example configured for:
+```bash
+python your_agent.py
+```
 
-- GRPO + TIS (`grpo_tis`)
-- `Qwen/Qwen2.5-3B-Instruct`
-- one Python `search` tool inside a multi-turn Ninja agent
+If the script uses `@ninja.agent()`, it will discover the active gateway and session automatically unless you override the target explicitly.
 
-OpenForge runs on Ray, but the default behavior is simple:
-
-- if `RAY_ADDRESS` is unset, `session start` creates a local Ray runtime
-- if `RAY_ADDRESS` is set, `session start` attaches to that cluster
-
-To attach to an existing Ray cluster instead of using a local one:
+To attach to an existing Ray cluster instead of creating a local one:
 
 ```bash
 export RAY_ADDRESS="ray://<head-node>:10001"
 ```
 
-## Quick Start
-
-### Fastest Path
-
-```bash
-bash examples/gsm8k/run_ninja_train.sh
-```
-
-This wrapper starts the gateway, starts a session, runs the GSM8K Ninja
-training example, and cleans up on exit.
-
-### Manual Flow
-
-Shell 1:
-
-```bash
-openforge gateway start --config examples/gsm8k/gateway.yaml
-```
-
-Shell 2:
-
-```bash
-openforge session start --runtime-config examples/gsm8k/runtime.yaml
-```
-
-Shell 3:
-
-```bash
-PYTHONUNBUFFERED=1 python -m examples.gsm8k.train_ninja \
-  --artifact-dir /tmp/openforge-gsm8k-train \
-  --total-epochs 15
-```
-
-The training script attaches to the active gateway and active session
-automatically and uses `ninja.train(...)` under the hood.
-
-`session start` is the heavy step. It creates or attaches to Ray, allocates the
-runtime, and may take a few minutes on a cold start.
-
-If you want to use an existing Ray cluster instead of the local default, export
-`RAY_ADDRESS` before running `session start`.
+### 5. Stop the runtime
 
 When you are done:
 
@@ -249,111 +259,137 @@ openforge session stop
 openforge gateway stop
 ```
 
-### Search-R1-Style Example
+## Configuration
 
-The Search-R1 example keeps the same gateway/session flow, but the agent body is
-multi-turn and uses an explicit search tool:
+openforge uses two YAML entrypoints:
 
-```bash
-bash examples/search_r1/run_ninja_train.sh
+- Gateway config for `openforge gateway start`
+- Runtime config for `openforge session start`
+
+Gateway config fields:
+
+- `data.path` for the gateway-owned SQLite path
+- `gateway.host` and `gateway.port` for the API endpoint
+- `cluster.num_nodes`, `cluster.gpus_per_node`, and `cluster.cpus_per_node` for physical cluster inventory
+
+Runtime config fields:
+
+- `algo` for algorithm settings such as `name`, `clip_range`, `kl_coef`, and `tis_cap`
+- `model` for model/tokenizer/reference-model paths and attention implementation
+- `train` for backend, batch sizing, optimizer/scheduler settings, checkpoint path, and train parallelism
+- `rollout` for request defaults, engine groups, and rollout resource allocation
+- `wandb` for optional session-scoped logging
+
+The CLI only accepts config paths. If you want to change runtime behavior, change the YAML.
+
+## Ninja API Details
+
+The most important part of Ninja is the contract:
+
+- Register a synchronous Python function with `@ninja.agent()`
+- If the first argument is named `client`, openforge injects an OpenAI-style client
+- Return a numeric reward
+- Use `ninja.train(...)` and `ninja.validate(...)` to drive the outer loop
+
+Minimal agent shape:
+
+```python
+import openforge.ninja as ninja
+
+
+@ninja.agent()
+def agent(client, *, prompt: str, target: str) -> float:
+    response = client.chat.completions.create(
+        model="...",
+        messages=[{"role": "user", "content": prompt}],
+        ...,
+    )
+    reward = ...
+    return reward
 ```
 
-Important details:
+The four most important execution modes are:
 
-- the runtime config is `examples/search_r1/runtime.yaml`
-- the example runtime uses 4 GPUs as `2` train workers plus `2` rollout replicas
-- the agent script is `python -m examples.search_r1.train_ninja`
-- the wrapper uses `examples/search_r1/gateway.yaml` for an isolated gateway DB
-- the built-in prompt-data default is `/home/guo/kzhao/data/kzhao/search_r1_train.parquet`
-- the built-in field defaults are `input-key=prompt` and `label-key=reward_model`
-- `session start` is the slow step on a cold `Qwen/Qwen2.5-3B-Instruct` run
+```python
+reward = agent(prompt="...", target="...")
 
-If your Search-R1 parquet lives somewhere else, you can still override it:
+samples = agent.sample(requests=[{"prompt": "...", "target": "..."}], group_size=8)
 
-```bash
-bash examples/search_r1/run_ninja_train.sh \
-  --prompt-data /path/to/train.parquet
+train_update = ninja.train(agent, inputs=[{"prompt": "...", "target": "..."}], group_size=8, ...)
+
+validation_update = ninja.validate(agent, file_path="...", ...)
 ```
 
-## Repository Layout
+Checkpoint export stays on the same surface:
 
-```text
-.
-├── assets/
-│   └── openforge-ninja.png
-├── examples/
-│   ├── shared.py
-│   ├── gsm8k/
-│   │   ├── common.py
-│   │   ├── gateway.yaml
-│   │   ├── run_ninja_train.sh
-│   │   ├── runtime.yaml
-│   │   ├── task.py
-│   │   └── train_ninja.py
-│   └── search_r1/
-│       ├── gateway.yaml
-│       ├── run_ninja_train.sh
-│       ├── runtime.yaml
-│       └── train_ninja.py
-├── src/openforge/
-│   ├── active_state.py
-│   ├── algo/
-│   ├── cli/
-│   ├── configs/
-│   ├── data/
-│   ├── gateway/
-│   ├── ninja/
-│   ├── rollout/
-│   │   ├── router/
-│   │   └── sglang/
-│   ├── train/
-│   │   ├── fsdp2/
-│   │   └── server/
-│   ├── runtime.py
-│   └── utils/
-├── tests/
-├── pyproject.toml
-├── requirements.txt
-└── README.md
+```python
+checkpoint = agent.save()
 ```
 
-Key paths:
+By default, `@ninja.agent()` uses the active gateway and active session recorded on the local machine. If you want to target a specific gateway explicitly, pass a `GatewayServerConfig` to the decorator instead of relying on autodiscovery.
 
-- `src/openforge/cli/main.py`
-  The only public CLI entrypoint.
-- `src/openforge/ninja/__init__.py`
-  Agent registration, request execution, checkpoint export, and grouped
-  training.
-- `src/openforge/gateway/`
-  FastAPI server, runtime/service lifecycle, and gateway-facing types.
-- `src/openforge/rollout/`
-  Rollout orchestration plus router and SGLang integrations.
-- `src/openforge/train/`
-  Training manager/runtime code, the FSDP2 backend, and the train-side server.
-- `examples/shared.py`
-  Shared artifact helpers and the outer `ninja.train(...)` scheduling loop used
-  by the bundled examples.
-- `tests/`
-  Unit, integration, and real-runtime coverage for CLI, gateway, rollout,
-  training, and Ninja flows.
-- `checkpoints/`
-  A generated local output directory that may appear after training runs. It is
-  gitignored and not part of the source layout.
+For validation, `file_path` can point to a `.jsonl`, `.json`, or `.parquet` file, or to a directory containing `validation.jsonl`, `validation.json`, or `validation.parquet`.
+
+## Algorithms
+
+openforge currently supports two algorithm names in runtime config:
+
+### GRPO
+
+Use `grpo` for standard grouped rollout optimization:
+
+```yaml
+algo:
+  name: grpo
+```
+
+`grpo` requires `train.max_rollout_policy_lag: 0`.
+
+### GRPO + TIS
+
+Use `grpo_tis` when you want token-level importance sampling correction:
+
+```yaml
+algo:
+  name: grpo_tis
+  tis_cap: 2.0
+```
+
+`grpo_tis` requires `train.max_rollout_policy_lag > 0` and accepts `tis_cap`.
 
 ## Development
 
+Format and lint:
+
 ```bash
-ruff format src tests examples
-ruff check src tests examples
-python tests/test_active_state.py
-python tests/test_cli.py
-python tests/test_gateway_service.py
-python tests/test_ninja.py
+ruff format src tests
+ruff check src tests
+pyrefly check
 ```
 
-## Current Scope
+Run the core test suite:
 
-OpenForge is intentionally focused today: gateway-driven post-training with
-GRPO and GRPO+TIS, SGLang rollout, FSDP2 training, and the bundled GSM8K plus
-Search-R1-style examples. If you want a small agent API on top of a real
-runtime stack, that is the point of this repo.
+```bash
+pytest
+```
+
+Or run a smaller slice while iterating:
+
+```bash
+pytest tests/test_cli.py tests/test_ninja.py tests/test_gateway_service.py
+```
+
+## Citation
+
+If you use openforge in your work, please cite:
+
+```bibtex
+@misc{zhao2026openforge,
+  title        = {openforge},
+  author       = {Zhao, Kevin and Wang, Zhaoran},
+  year         = {2026},
+  howpublished = {\url{https://github.com/khzhao/openforge}},
+  note         = {Gateway-first post-training for LLM agents},
+  version      = {0.1.0}
+}
+```
