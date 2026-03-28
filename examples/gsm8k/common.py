@@ -12,7 +12,6 @@ import datasets
 
 from examples.gsm8k.task import build_gsm8k_prompt, extract_gsm8k_ground_truth
 from examples.shared import add_train_cli_args, load_runtime_config, make_artifact_dir
-from openforge.gateway.types import RuntimeConfig
 
 
 @dataclass(slots=True)
@@ -25,13 +24,14 @@ class GSM8kExample:
     ground_truth: str
 
 
-def load_train_examples(
+def load_examples(
     *,
+    split: str,
     seed: int,
     max_examples: int | None,
 ) -> list[GSM8kExample]:
-    """Load and prepare shuffled GSM8K training examples."""
-    rows = datasets.load_dataset("openai/gsm8k", "main")["train"].shuffle(seed=seed)
+    """Load and prepare shuffled GSM8K examples from one dataset split."""
+    rows = datasets.load_dataset("openai/gsm8k", "main")[split].shuffle(seed=seed)
     examples: list[GSM8kExample] = []
     for row in rows:
         question = str(row["question"])
@@ -90,11 +90,23 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
     artifact_dir = make_artifact_dir(args.artifact_dir, prefix="gsm8k-ninja-")
     runtime_config = load_runtime_config(args.runtime_config)
 
-    train_examples = load_train_examples(
+    train_examples = load_examples(
+        split="train",
         seed=args.seed,
         max_examples=args.max_train_examples,
     )
     save_split(artifact_dir / "data" / "train.jsonl", train_examples)
+    validation_path: Path | None = None
+    validation_examples_count = 0
+    if args.validation_every_updates > 0:
+        validation_examples = load_examples(
+            split="test",
+            seed=args.seed,
+            max_examples=args.max_validation_examples,
+        )
+        validation_path = artifact_dir / "data" / "validation.jsonl"
+        save_split(validation_path, validation_examples)
+        validation_examples_count = len(validation_examples)
 
     sampling_params = {
         "temperature": args.train_temperature,
@@ -119,6 +131,8 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         "global_batch_size": runtime_config.train.global_batch_size,
         "total_epochs": args.total_epochs,
         "train_examples": len(train_examples),
+        "validation_every_updates": args.validation_every_updates,
+        "validation_examples": validation_examples_count,
         "train_group_parallelism": (
             "auto"
             if args.train_group_parallelism is None
@@ -133,4 +147,5 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         "sampling_params": sampling_params,
         "summary": summary,
         "summary_path": artifact_dir / "summary.json",
+        "validation_path": validation_path,
     }

@@ -10,8 +10,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-import openforge.ninja as ninja
 from loguru import logger
+
+import openforge.ninja as ninja
 from openforge import active_state
 from openforge.gateway.types import RuntimeConfig
 
@@ -65,6 +66,8 @@ def add_train_cli_args(
     )
     parser.add_argument("--train-group-retries", type=int, default=2)
     parser.add_argument("--max-updates", type=int, default=None)
+    parser.add_argument("--validation-every-updates", type=int, default=0)
+    parser.add_argument("--max-validation-examples", type=int, default=None)
     return parser
 
 
@@ -78,6 +81,71 @@ def load_runtime_config(path: str | None) -> RuntimeConfig:
 def print_train_update(update: dict[str, object]) -> None:
     """Emit one machine-readable train progress event."""
     logger.info("TRAIN_UPDATE {}", json.dumps(update, sort_keys=True))
+
+
+def print_validation_update(update: dict[str, object]) -> None:
+    """Emit one machine-readable validation progress event."""
+    logger.info("VALIDATION_UPDATE {}", json.dumps(update, sort_keys=True))
+
+
+def plan_train_batches(
+    *,
+    runtime_config: RuntimeConfig,
+    inputs: list[dict[str, Any]],
+    group_size: int,
+    epochs: int,
+    seed: int,
+    max_updates: int | None = None,
+) -> dict[str, object]:
+    """Shuffle prompt groups into one-update batches sized to global_batch_size."""
+    if group_size <= 0:
+        raise ValueError("group_size must be > 0")
+    if epochs <= 0:
+        raise ValueError("epochs must be > 0")
+    if not inputs:
+        raise ValueError("inputs must not be empty")
+
+    global_batch_size = int(runtime_config.train.global_batch_size)
+    if global_batch_size <= 0:
+        raise ValueError("runtime_config.train.global_batch_size must be > 0")
+    if global_batch_size % group_size != 0:
+        raise ValueError(
+            "runtime_config.train.global_batch_size must be divisible by group_size"
+        )
+
+    prompt_groups_per_update = global_batch_size // group_size
+    rng = random.Random(seed)
+    schedule: list[dict[str, Any]] = []
+    for _epoch in range(epochs):
+        epoch_inputs = list(inputs)
+        rng.shuffle(epoch_inputs)
+        schedule.extend(epoch_inputs)
+
+    expected_updates = len(schedule) // prompt_groups_per_update
+    if max_updates is not None:
+        expected_updates = min(expected_updates, max_updates)
+    if expected_updates <= 0:
+        raise ValueError(
+            "not enough prompt groups to perform one update: "
+            f"have {len(schedule)}, need {prompt_groups_per_update}"
+        )
+
+    planned_prompt_groups = expected_updates * prompt_groups_per_update
+    return {
+        "update_inputs": [
+            schedule[
+                update_index * prompt_groups_per_update : (update_index + 1)
+                * prompt_groups_per_update
+            ]
+            for update_index in range(expected_updates)
+        ],
+        "expected_updates": expected_updates,
+        "prompt_groups_per_update": prompt_groups_per_update,
+        "global_batch_size": global_batch_size,
+        "train_groups": len(schedule),
+        "train_groups_planned": planned_prompt_groups,
+        "train_groups_dropped": len(schedule) - planned_prompt_groups,
+    }
 
 
 def run_train(
@@ -178,7 +246,10 @@ def run_train(
                 update_results.extend(grouped_results)
                 update_failed_groups += len(failures)
                 failed_prompt_groups_total += len(failures)
-                if consumed_groups >= len(schedule) and len(update_results) < prompt_groups_per_update:
+                if (
+                    consumed_groups >= len(schedule)
+                    and len(update_results) < prompt_groups_per_update
+                ):
                     break
 
             if len(update_results) < prompt_groups_per_update:
@@ -206,7 +277,9 @@ def run_train(
                 "policy_version": final_policy_version,
                 "prompt_groups": len(update_results),
                 "samples": len(rewards),
-                "max_group_reward": max(max(result.rewards) for result in update_results),
+                "max_group_reward": max(
+                    max(result.rewards) for result in update_results
+                ),
                 "mean_group_reward": sum(group_mean_rewards) / len(group_mean_rewards),
                 "sample_mean_reward": sum(rewards) / len(rewards),
                 "failed_prompt_groups": update_failed_groups,

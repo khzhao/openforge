@@ -18,8 +18,9 @@ from examples.shared import (
     add_train_cli_args,
     load_runtime_config,
     make_artifact_dir,
+    plan_train_batches,
     print_train_update,
-    run_train,
+    print_validation_update,
     save_summary,
 )
 
@@ -61,6 +62,7 @@ _DEFAULT_PROMPT_DATA = "/home/guo/kzhao/data/kzhao/search_r1_train.parquet"
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI flags for the SearchR1 Ninja example."""
     parser = add_train_cli_args(
         argparse.ArgumentParser(description=__doc__),
         default_group_size=8,
@@ -71,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-turns", type=int, default=2)
     parser.add_argument("--search-top-k", type=int, default=3)
     parser.add_argument("--search-timeout", type=float, default=30.0)
+    parser.add_argument("--validation-data", default=None)
     return parser.parse_args()
 
 
@@ -102,6 +105,13 @@ def _load_prompt_rows(
         if max_examples is not None and len(examples) >= max_examples:
             break
     return examples
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
 
 
 def _strip_html(text: str) -> str:
@@ -184,7 +194,9 @@ def _extract_answer(text: str) -> str | None:
 def _extract_information_blocks(text: str) -> list[str]:
     return [
         match.strip()
-        for match in re.findall(r"<information>(.*?)</information>", text, flags=re.DOTALL)
+        for match in re.findall(
+            r"<information>(.*?)</information>", text, flags=re.DOTALL
+        )
     ]
 
 
@@ -293,11 +305,14 @@ def _messages_from_prompt(prompt: Any) -> list[dict[str, str]]:
 
 
 def main() -> int:
+    """Run the SearchR1 Ninja example with explicit train and validate calls."""
     args = parse_args()
     if args.max_turns <= 0:
         raise ValueError("max-turns must be > 0")
     if args.search_top_k <= 0:
         raise ValueError("search-top-k must be > 0")
+    if args.validation_every_updates < 0:
+        raise ValueError("validation-every-updates must be >= 0")
 
     artifact_dir = make_artifact_dir(args.artifact_dir, prefix="search-r1-ninja-")
     runtime_config = load_runtime_config(args.runtime_config)
@@ -313,6 +328,22 @@ def main() -> int:
         seed=args.seed,
         max_examples=args.max_train_examples,
     )
+    _write_jsonl(artifact_dir / "data" / "train.jsonl", inputs)
+    validation_path: Path | None = None
+    validation_examples = 0
+    if args.validation_every_updates > 0:
+        validation_inputs = _load_prompt_rows(
+            path=args.prompt_data
+            if args.validation_data is None
+            else args.validation_data,
+            input_key=args.input_key,
+            label_key=args.label_key,
+            seed=args.seed,
+            max_examples=args.max_validation_examples,
+        )
+        validation_path = artifact_dir / "data" / "validation.jsonl"
+        _write_jsonl(validation_path, validation_inputs)
+        validation_examples = len(validation_inputs)
 
     @ninja.agent()
     def search_agent(client, *, prompt: Any, reward_model: Any) -> float:
@@ -358,33 +389,86 @@ def main() -> int:
 
         return _compute_reward("".join(trace_parts), reward_model)
 
+    train_plan = plan_train_batches(
+        runtime_config=runtime_config,
+        inputs=inputs,
+        group_size=args.group_size,
+        epochs=args.total_epochs,
+        seed=args.seed,
+        max_updates=args.max_updates,
+    )
+    train_updates: list[dict[str, object]] = []
+    validation_updates: list[dict[str, object]] = []
+    for update_index, batch_inputs in enumerate(
+        train_plan["update_inputs"],
+        start=1,
+    ):
+        assert isinstance(batch_inputs, list)
+        train_update = ninja.train(
+            search_agent,
+            inputs=batch_inputs,
+            group_size=args.group_size,
+            concurrency=args.train_group_parallelism,
+            retries=args.train_group_retries,
+            wait_timeout=args.wait_timeout,
+        )
+        train_event = {
+            **train_update,
+            "policy_version": train_update["final_policy_version"],
+            "update_index": update_index,
+        }
+        train_updates.append(train_event)
+        print_train_update(train_event)
+        if (
+            validation_path is not None
+            and args.validation_every_updates > 0
+            and update_index % args.validation_every_updates == 0
+        ):
+            validation_update = ninja.validate(
+                search_agent,
+                file_path=str(validation_path),
+                wait_timeout=args.wait_timeout,
+            )
+            validation_event = {
+                **validation_update,
+                "update_index": update_index,
+            }
+            validation_updates.append(validation_event)
+            print_validation_update(validation_event)
+
     summary = {
         "artifact_dir": str(artifact_dir),
+        "completed_updates": len(train_updates),
+        "expected_updates": train_plan["expected_updates"],
+        "final_checkpoint": search_agent.save(),
+        "final_policy_version": search_agent.policy_version(),
+        "global_batch_size": train_plan["global_batch_size"],
         "group_size": args.group_size,
         "input_key": args.input_key,
         "label_key": args.label_key,
+        "last_train_update": train_updates[-1] if train_updates else None,
+        "last_validation_update": (
+            validation_updates[-1] if validation_updates else None
+        ),
         "max_turns": args.max_turns,
         "max_updates": args.max_updates,
         "model_path": runtime_config.model.model_name_or_path,
+        "prompt_groups_per_update": train_plan["prompt_groups_per_update"],
         "prompt_data": args.prompt_data,
         "search_top_k": args.search_top_k,
+        "train_groups": train_plan["train_groups"],
+        "train_groups_consumed": len(train_updates)
+        * int(train_plan["prompt_groups_per_update"]),
+        "train_groups_dropped": train_plan["train_groups_dropped"],
         "train_examples": len(inputs),
+        "train_updates": train_updates,
+        "validation_data": (
+            args.prompt_data if args.validation_data is None else args.validation_data
+        ),
+        "validation_every_updates": args.validation_every_updates,
+        "validation_examples": validation_examples,
+        "validation_updates": validation_updates,
     }
-    summary.update(
-        run_train(
-            search_agent,
-            runtime_config=runtime_config,
-            inputs=inputs,
-            group_size=args.group_size,
-            epochs=args.total_epochs,
-            seed=args.seed,
-            parallelism=args.train_group_parallelism,
-            retries=args.train_group_retries,
-            wait_timeout=args.wait_timeout,
-            max_updates=args.max_updates,
-            progress_callback=print_train_update,
-        )
-    )
     save_summary(artifact_dir / "summary.json", summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

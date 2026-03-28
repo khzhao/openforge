@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from examples import shared
+
 import openforge.ninja as ninja
 from openforge.gateway.types import RuntimeConfig, StartSessionRequest
 
@@ -128,6 +128,7 @@ class _FakeAgent:
 
 
 def test_run_train_skips_failed_groups_and_tops_up_update() -> None:
+    """run_train should replace failed groups until one update is full."""
     agent = _FakeAgent()
     progress_updates: list[dict[str, object]] = []
     execute_calls: list[list[str]] = []
@@ -141,7 +142,11 @@ def test_run_train_skips_failed_groups_and_tops_up_update() -> None:
                     rewards=[1.0, 1.0],
                 )
             ],
-            [ninja._GroupedExecutionFailure(request_index=1, error="RuntimeError: boom")],
+            [
+                ninja._GroupedExecutionFailure(
+                    request_index=1, error="RuntimeError: boom"
+                )
+            ],
         ),
         (
             [
@@ -175,7 +180,9 @@ def test_run_train_skips_failed_groups_and_tops_up_update() -> None:
         session.policy_version = 1
 
     with patch.object(ninja, "_execute_grouped_results", fake_execute_grouped_results):
-        with patch.object(ninja, "_wait_for_trained_trajectories", fake_wait_for_trained):
+        with patch.object(
+            ninja, "_wait_for_trained_trajectories", fake_wait_for_trained
+        ):
             with patch.object(shared.random.Random, "shuffle", lambda self, seq: None):
                 summary = shared.run_train(
                     agent,
@@ -202,3 +209,31 @@ def test_run_train_skips_failed_groups_and_tops_up_update() -> None:
     assert summary["last_train_update"]["failed_prompt_groups"] == 1
     assert summary["last_train_update"]["attempted_prompt_groups"] == 3
     assert progress_updates == [summary["last_train_update"]]
+
+
+def test_plan_train_batches_chunks_updates_by_global_batch_size() -> None:
+    """plan_train_batches should chunk prompt groups into full updates."""
+    with patch.object(shared.random.Random, "shuffle", lambda self, seq: None):
+        plan = shared.plan_train_batches(
+            runtime_config=_runtime_config(global_batch_size=4),
+            inputs=[
+                {"prompt": "a"},
+                {"prompt": "b"},
+                {"prompt": "c"},
+            ],
+            group_size=2,
+            epochs=2,
+            seed=0,
+            max_updates=2,
+        )
+
+    assert plan["expected_updates"] == 2
+    assert plan["prompt_groups_per_update"] == 2
+    assert plan["global_batch_size"] == 4
+    assert plan["train_groups"] == 6
+    assert plan["train_groups_planned"] == 4
+    assert plan["train_groups_dropped"] == 2
+    assert plan["update_inputs"] == [
+        [{"prompt": "a"}, {"prompt": "b"}],
+        [{"prompt": "c"}, {"prompt": "a"}],
+    ]
