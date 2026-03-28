@@ -28,6 +28,19 @@ Most post-training stacks ask you to edit launch scripts, trainer internals, rol
 
 > **Highlights:** Gateway-first control plane | One public CLI | `@ninja.agent()` + `ninja.train(...)` | Active local discovery | Config-first runtime setup | GRPO and GRPO+TIS
 
+## Contents
+
+- [The Ninja API](#the-ninja-api)
+- [Features](#features)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [openforge Quick Start](#openforge-quick-start)
+- [Configuration](#configuration)
+- [Ninja API Details](#ninja-api-details)
+- [Algorithms](#algorithms)
+- [Development](#development)
+- [Citation](#citation)
+
 ## The Ninja API
 
 This is the center of the project:
@@ -162,18 +175,6 @@ Our short-term roadmap has two tracks:
 We welcome contributions around algorithms, runtime backends, tests, and docs. Good places to start are [`src/openforge/ninja/`](./src/openforge/ninja/), [`src/openforge/gateway/`](./src/openforge/gateway/), and [`src/openforge/train/`](./src/openforge/train/).
 
 Questions can be directed to Kevin Zhao (`kzhao16@gmail.com`) or Zhaoran Wang (`zhaoran.wang@u.northwestern.edu`).
-
-## Contents
-
-- [The Ninja API](#the-ninja-api)
-- [openforge Quick Start](#openforge-quick-start)
-- [Configuration](#configuration)
-- [Ninja API Details](#ninja-api-details)
-- [Algorithms](#algorithms)
-- [Development](#development)
-- [Citation](#citation)
-
----
 
 ## openforge Quick Start
 
