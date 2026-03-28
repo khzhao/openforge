@@ -112,6 +112,10 @@ def test_rollout_manager_initialize_sets_nccl_defaults() -> None:
 
         for key, value in NCCL_ENV_DEFAULTS.items():
             assert os.environ[key] == value
+        assert (
+            manager.router_spec.request_timeout_secs
+            == rollout_manager_module.RolloutManager.REQUEST_TIMEOUT_SECONDS
+        )
 
 
 def test_start_sglang_engines_propagates_nccl_defaults() -> None:

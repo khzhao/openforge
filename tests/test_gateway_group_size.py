@@ -56,7 +56,7 @@ class _FakeTrainManager:
     ) -> None:
         self.world_size = 1
         self.cfg = SimpleNamespace(
-            algo=SimpleNamespace(name="grpo"),
+            algo=SimpleNamespace(name="grpo", normalize_group_std=False),
             train=_FakeTrainConfig(
                 global_batch_size=global_batch_size,
                 mini_batch_size=mini_batch_size,
@@ -67,15 +67,14 @@ class _FakeTrainManager:
         self.step_calls: list[int] = []
         self.publish_calls: list[int] = []
 
-    def step_update(
+    def step_update_and_publish(
         self,
         rank_minibatches_per_update,
         *,
         global_step: int,
+        policy_version: int,
     ) -> None:
         self.step_calls.append(global_step)
-
-    def publish_rollout_policy_version(self, policy_version: int) -> None:
         self.publish_calls.append(policy_version)
 
 

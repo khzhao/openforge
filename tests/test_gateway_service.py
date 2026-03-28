@@ -17,8 +17,12 @@ from openforge.gateway.runtime import (
     Generation,
     Runtime,
 )
-from openforge.gateway.service import Service
-from openforge.gateway.types import ChatCompletionCreateRequest, StartSessionRequest
+from openforge.gateway.service import Service, _PendingGenerate
+from openforge.gateway.types import (
+    ChatCompletionCreateRequest,
+    ChatMessage,
+    StartSessionRequest,
+)
 
 
 class _FakeTrainLoop:
@@ -91,6 +95,14 @@ class _FakeTrainRuntime:
 
 
 def _start_session_kwargs(model_name: str = "model-a") -> dict[str, object]:
+    return _start_session_kwargs_with_replicas(model_name=model_name, replicas=1)
+
+
+def _start_session_kwargs_with_replicas(
+    *,
+    model_name: str = "model-a",
+    replicas: int,
+) -> dict[str, object]:
     request = StartSessionRequest.model_validate(
         {
             "runtime": {
@@ -161,7 +173,7 @@ def _start_session_kwargs(model_name: str = "model-a") -> dict[str, object]:
                         {
                             "name": "regular",
                             "worker_type": "regular",
-                            "replicas": 1,
+                            "replicas": replicas,
                             "num_gpus_per_replica": 1,
                             "num_cpus_per_replica": 1,
                             "parallelism": {
@@ -436,6 +448,42 @@ def test_gateway_service_start_generate_and_end() -> None:
     asyncio.run(run())
 
 
+def test_gateway_service_caps_generate_batch_per_rollout_replica() -> None:
+    async def run() -> None:
+        store = SQLiteOpenForgeStore(":memory:")
+        runtime = _FakeRuntime()
+        service = Service(store=store, runtime=runtime)
+
+        session = await service.start_session(
+            **_start_session_kwargs_with_replicas(model_name="model-a", replicas=2)
+        )
+        assert service._generate_batch_max_size == 128
+
+        loop = asyncio.get_running_loop()
+        service._pending_generates = [
+            _PendingGenerate(
+                session_id=session.session_id,
+                trajectory_id=f"traj_{i}",
+                group_id=None,
+                messages=[],
+                tools=None,
+                sampling_params={},
+                future=loop.create_future(),
+                batch_key=("batch", "tools", "params"),
+            )
+            for i in range(200)
+        ]
+        batch = service._take_generate_batch_locked()
+        assert len(batch) == 128
+
+        ended = await service.end_session(session_id=session.session_id)
+        assert ended.status == "completed"
+        assert service._generate_batch_max_size == Service.GENERATE_BATCH_MAX_SIZE
+        await store.close()
+
+    asyncio.run(run())
+
+
 def test_gateway_service_current_session_tracks_active_model() -> None:
     async def run() -> None:
         store = SQLiteOpenForgeStore(":memory:")
@@ -705,6 +753,53 @@ def test_gateway_service_end_session_requires_all_trajectories_completed() -> No
     asyncio.run(run())
 
 
+def test_gateway_service_ignores_late_turn_count_updates_for_finished_trajectories() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+            runtime = _FakeRuntime()
+            service = Service(store=store, runtime=runtime)
+
+            session = await service.start_session(**_start_session_kwargs())
+            started = await service.start_trajectory(session_id=session.session_id)
+
+            original_append_turns = store.append_turns
+
+            async def append_turns_and_finish(turns):
+                await original_append_turns(turns)
+                trajectory_id = turns[0].trajectory_id
+                service._active_turn_counts.pop(trajectory_id, None)
+                service._active_trajectories.pop(trajectory_id, None)
+
+            store.append_turns = append_turns_and_finish  # type: ignore[method-assign]
+
+            outputs = await service._execute_generate_batch(
+                session_id=session.session_id,
+                trajectory_ids=[started.trajectory_id],
+                group_ids=[None],
+                messages_per_item=[
+                    [
+                        ChatMessage(role="user", content="hello world")
+                    ]
+                ],
+                tools=None,
+                sampling_params={
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "top_k": 1,
+                    "max_new_tokens": 8,
+                },
+            )
+
+            assert len(outputs) == 1
+            stored_turns = await store.list_turns(started.trajectory_id)
+            assert len(stored_turns) == 1
+            assert started.trajectory_id not in service._active_turn_counts
+            await store.close()
+
+    asyncio.run(run())
+
+
 def test_parse_generation_payload_parses_numeric_weight_version() -> None:
     generation = Runtime._parse_generation_info(
         {
@@ -817,6 +912,7 @@ def main() -> int:
             test_gateway_service_generate_wraps_tokenization_failure,
             test_gateway_service_trajectory_lifecycle_errors,
             test_gateway_service_end_session_requires_all_trajectories_completed,
+            test_gateway_service_ignores_late_turn_count_updates_for_finished_trajectories,
             test_parse_generation_payload_parses_numeric_weight_version,
             test_gateway_controller_parses_router_payload,
             test_gateway_controller_parses_router_payload_with_meta_token_ids,

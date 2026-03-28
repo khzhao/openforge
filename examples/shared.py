@@ -53,12 +53,15 @@ def add_train_cli_args(
     parser.add_argument("--group-size", type=int, default=default_group_size)
     parser.add_argument("--total-epochs", type=int, default=default_total_epochs)
     parser.add_argument("--max-train-examples", type=int, default=None)
-    parser.add_argument("--wait-timeout", type=float, default=1800.0)
+    parser.add_argument("--wait-timeout", type=float, default=3600.0)
     parser.add_argument(
         "--train-group-parallelism",
         type=int,
         default=None,
-        help="Override Ninja execute parallelism. Defaults to framework auto mode.",
+        help=(
+            "Override Ninja execute parallelism in total in-flight rollouts. "
+            "Prompt-group concurrency is roughly this value divided by group_size."
+        ),
     )
     parser.add_argument("--train-group-retries", type=int, default=2)
     parser.add_argument("--max-updates", type=int, default=None)
@@ -87,7 +90,7 @@ def run_train(
     seed: int,
     parallelism: int | None = None,
     retries: int = 0,
-    wait_timeout: float = 1800.0,
+    wait_timeout: float = 3600.0,
     max_updates: int | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -132,41 +135,98 @@ def run_train(
     last_update: dict[str, Any] | None = None
     train_updates: list[dict[str, Any]] = []
     consumed_groups = 0
-    for update_offset in range(available_updates):
-        batch_inputs = schedule[
-            consumed_groups : consumed_groups + prompt_groups_per_update
-        ]
-        train_summary = ninja.train(
-            agent_func,
-            inputs=batch_inputs,
-            group_size=group_size,
-            concurrency=parallelism,
-            retries=retries,
-            wait_timeout=wait_timeout,
-        )
-        final_policy_version = int(train_summary["final_policy_version"])
-        consumed_groups += prompt_groups_per_update
-        last_update = {
-            "policy_version": final_policy_version,
-            "prompt_groups": int(train_summary["prompt_groups"]),
-            "samples": int(train_summary["samples"]),
-            "max_group_reward": float(train_summary["max_group_reward"]),
-            "mean_group_reward": float(train_summary["mean_group_reward"]),
-            "sample_mean_reward": float(train_summary["sample_mean_reward"]),
-            "update_index": update_offset + 1,
-        }
-        train_updates.append(dict(last_update))
-        if progress_callback is not None:
-            progress_callback(dict(last_update))
+    failed_prompt_groups_total = 0
+    stopped_early_reason: str | None = None
+    resolved_concurrency = ninja._resolve_concurrency(
+        concurrency=parallelism,
+        job_count=prompt_groups_per_update * group_size,
+    )
+    with agent_func._session() as session:
+        final_policy_version = int(session.current_policy_version())
+        for update_offset in range(available_updates):
+            update_results: list[ninja._GroupedExecutionResult] = []
+            update_failed_groups = 0
+            update_start_consumed = consumed_groups
+            while len(update_results) < prompt_groups_per_update:
+                remaining_groups = prompt_groups_per_update - len(update_results)
+                batch_inputs = schedule[
+                    consumed_groups : consumed_groups + remaining_groups
+                ]
+                if not batch_inputs:
+                    break
+                consumed_groups += len(batch_inputs)
+                call_specs, _single_request = ninja._normalize_requests(
+                    args=(),
+                    kwargs={},
+                    requests=batch_inputs,
+                )
+                for request_index, (call_args, call_kwargs) in enumerate(call_specs):
+                    agent_func._validate_call(
+                        call_args,
+                        call_kwargs,
+                        request_index=request_index,
+                    )
+                grouped_results, failures = ninja._execute_grouped_results(
+                    agent_func,
+                    session,
+                    call_specs,
+                    group_size=group_size,
+                    concurrency=resolved_concurrency,
+                    retries=retries,
+                    raise_on_failure=False,
+                )
+                update_results.extend(grouped_results)
+                update_failed_groups += len(failures)
+                failed_prompt_groups_total += len(failures)
+                if consumed_groups >= len(schedule) and len(update_results) < prompt_groups_per_update:
+                    break
+
+            if len(update_results) < prompt_groups_per_update:
+                stopped_early_reason = (
+                    "insufficient successful prompt groups to complete another update"
+                )
+                break
+
+            trajectory_ids = [
+                trajectory_id
+                for result in update_results
+                for trajectory_id in result.trajectory_ids
+            ]
+            ninja._wait_for_trained_trajectories(
+                session,
+                trajectory_ids,
+                timeout=wait_timeout,
+            )
+            final_policy_version = int(session.current_policy_version())
+            rewards = [reward for result in update_results for reward in result.rewards]
+            group_mean_rewards = [
+                sum(result.rewards) / len(result.rewards) for result in update_results
+            ]
+            last_update = {
+                "policy_version": final_policy_version,
+                "prompt_groups": len(update_results),
+                "samples": len(rewards),
+                "max_group_reward": max(max(result.rewards) for result in update_results),
+                "mean_group_reward": sum(group_mean_rewards) / len(group_mean_rewards),
+                "sample_mean_reward": sum(rewards) / len(rewards),
+                "failed_prompt_groups": update_failed_groups,
+                "attempted_prompt_groups": consumed_groups - update_start_consumed,
+                "update_index": update_offset + 1,
+            }
+            train_updates.append(dict(last_update))
+            if progress_callback is not None:
+                progress_callback(dict(last_update))
 
     return {
-        "completed_updates": available_updates,
+        "completed_updates": len(train_updates),
         "expected_updates": available_updates,
         "final_checkpoint": agent_func.save(),
         "final_policy_version": (
             0 if final_policy_version is None else final_policy_version
         ),
         "last_train_update": last_update,
+        "failed_prompt_groups": failed_prompt_groups_total,
+        "stopped_early_reason": stopped_early_reason,
         "train_updates": train_updates,
         "prompt_groups_per_update": prompt_groups_per_update,
         "global_batch_size": global_batch_size,

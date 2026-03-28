@@ -9,11 +9,13 @@ from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
+import torch.optim as optim
 from torch.nn.utils.rnn import pad_sequence
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from openforge.train.fsdp2.base import FSDP2Engine, _selected_token_log_probs
 from openforge.train.worker import TrainWorker
+from openforge.utils.train_batching import build_rank_microbatch_groups
 from openforge.utils.packed import pack_micro_batch
 
 
@@ -23,6 +25,8 @@ class _FakeEngine:
         self.forward_batches: list[dict[str, torch.Tensor]] = []
         self.backward_calls = 0
         self.no_sync_calls = 0
+        self.ref_model = None
+        self.state_calls: list[str] = []
 
     def zero_grad(self) -> None:
         self.zero_grad_calls += 1
@@ -43,8 +47,71 @@ class _FakeEngine:
     def step_optimizer(self) -> dict[str, float]:
         return {"lr": 0.1}
 
-    def compute_old_log_probs(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def compute_token_log_probs(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        model: str = "main",
+    ) -> torch.Tensor:
+        if model == "ref":
+            return torch.ones(batch["loss_mask"].shape[0], dtype=torch.float32)
         return torch.zeros(batch["loss_mask"].shape[0], dtype=torch.float32)
+
+    def offload_train_state(self) -> None:
+        self.state_calls.append("offload_train")
+
+    def onload_train_state(self) -> None:
+        self.state_calls.append("onload_train")
+
+    def offload_ref_state(self) -> None:
+        self.state_calls.append("offload_ref")
+
+    def onload_ref_state(self) -> None:
+        self.state_calls.append("onload_ref")
+
+
+class _ToyTrainEngine:
+    def __init__(self, model: LlamaForCausalLM, *, lr: float = 0.01) -> None:
+        self.model = model
+        self.optimizer = optim.SGD(self.model.parameters(), lr=lr)
+        self.ref_model = None
+
+    def zero_grad(self) -> None:
+        self.optimizer.zero_grad(set_to_none=True)
+
+    @contextmanager
+    def no_sync(self):
+        yield
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return {"loss": _loss(self.model, batch)}
+
+    def backward(self, outputs: dict[str, torch.Tensor]) -> None:
+        outputs["loss"].backward()
+
+    def step_optimizer(self) -> dict[str, float]:
+        self.optimizer.step()
+        return {"lr": float(self.optimizer.param_groups[0]["lr"])}
+
+    def compute_token_log_probs(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        model: str = "main",
+    ) -> torch.Tensor:
+        return torch.zeros(batch["loss_mask"].shape[0], dtype=torch.float32)
+
+    def offload_train_state(self) -> None:
+        return None
+
+    def onload_train_state(self) -> None:
+        return None
+
+    def offload_ref_state(self) -> None:
+        return None
+
+    def onload_ref_state(self) -> None:
+        return None
 
 
 def _sample(
@@ -100,6 +167,7 @@ def test_train_worker_step_chunks_and_packs_local_minibatch() -> None:
         cfg=SimpleNamespace(
             train=SimpleNamespace(
                 micro_batch_size=2,
+                max_tokens_per_micro_batch=None,
             )
         ),
     )
@@ -147,6 +215,7 @@ def test_train_worker_only_aggregates_scalar_forward_metrics() -> None:
         cfg=SimpleNamespace(
             train=SimpleNamespace(
                 micro_batch_size=2,
+                max_tokens_per_micro_batch=None,
             )
         ),
     )
@@ -167,6 +236,174 @@ def test_train_worker_only_aggregates_scalar_forward_metrics() -> None:
     )
 
     assert result.metrics == {"pg_loss": 2.0, "lr": 0.1, "global_step": -1.0}
+
+
+def test_train_worker_step_update_uses_precomputed_microbatch_groups() -> None:
+    worker = TrainWorker()
+    worker.spec = SimpleNamespace(
+        rank=0,
+        cfg=SimpleNamespace(
+            train=SimpleNamespace(
+                micro_batch_size=8,
+                ppo_epochs=1,
+            )
+        ),
+    )
+    worker.engine = _FakeEngine()
+
+    results = worker.step_update(
+        [
+            [
+                _mini_batch(
+                    [
+                        _sample([1, 2, 3], 1.0),
+                        _sample([4, 5, 6, 7], 2.0),
+                    ]
+                ),
+                _mini_batch(
+                    [
+                        _sample([8, 9, 10], 3.0),
+                    ]
+                ),
+            ]
+        ]
+    )
+
+    assert len(results) == 1
+    assert len(worker.engine.forward_batches) == 2
+    assert worker.engine.forward_batches[0]["tokens"].tolist() == [1, 2, 3, 4, 5, 6, 7]
+    assert worker.engine.forward_batches[1]["tokens"].tolist() == [8, 9, 10]
+
+
+def test_train_worker_precomputes_ref_log_probs_with_exclusive_residency() -> None:
+    worker = TrainWorker()
+    worker.spec = SimpleNamespace(
+        rank=0,
+        cfg=SimpleNamespace(
+            train=SimpleNamespace(
+                micro_batch_size=2,
+                ppo_epochs=1,
+            )
+        ),
+    )
+    worker.engine = _FakeEngine()
+    worker.engine.ref_model = object()
+
+    worker.step(
+        _mini_batch(
+            [
+                _sample([1, 2, 3], 1.0),
+                _sample([4, 5, 6], 2.0),
+            ]
+        )
+    )
+
+    assert worker.engine.state_calls == [
+        "offload_train",
+        "onload_ref",
+        "offload_ref",
+        "onload_train",
+    ]
+    assert worker.engine.forward_batches[0]["ref_log_probs"].tolist() == [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    ]
+
+
+def test_train_worker_updates_match_stable_step_with_and_without_dynamic_schedule() -> None:
+    torch.manual_seed(0)
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=64,
+    )
+    config._attn_implementation = "eager"
+
+    base_model = LlamaForCausalLM(config).train()
+    stable_model = copy.deepcopy(base_model)
+    regular_model = copy.deepcopy(base_model)
+    dynamic_model = copy.deepcopy(base_model)
+
+    samples = [
+        _sample([1, 2, 3, 4, 5, 6], 1.0, prompt_length=2),
+        _sample([7, 8, 9, 10, 11], -0.5, prompt_length=1),
+        _sample([12, 13, 14, 15], 0.75, prompt_length=2),
+        _sample([16, 17, 18], -1.25, prompt_length=1),
+    ]
+    full_minibatch = _mini_batch(samples)
+
+    stable_worker = TrainWorker()
+    stable_worker.spec = SimpleNamespace(
+        rank=0,
+        cfg=SimpleNamespace(
+            train=SimpleNamespace(
+                micro_batch_size=4,
+                ppo_epochs=1,
+            )
+        ),
+    )
+    stable_worker.engine = _ToyTrainEngine(stable_model)
+    stable_worker.step(full_minibatch)
+
+    regular_worker = TrainWorker()
+    regular_worker.spec = SimpleNamespace(
+        rank=0,
+        cfg=SimpleNamespace(
+            train=SimpleNamespace(
+                micro_batch_size=2,
+                ppo_epochs=1,
+            )
+        ),
+    )
+    regular_worker.engine = _ToyTrainEngine(regular_model)
+    regular_worker.step(full_minibatch)
+
+    dynamic_worker = TrainWorker()
+    dynamic_worker.spec = SimpleNamespace(
+        rank=0,
+        cfg=SimpleNamespace(
+            train=SimpleNamespace(
+                micro_batch_size=2,
+                ppo_epochs=1,
+            )
+        ),
+    )
+    dynamic_worker.engine = _ToyTrainEngine(dynamic_model)
+    trajectory_samples = [[sample] for sample in samples]
+    rank_microbatch_groups = build_rank_microbatch_groups(
+        trajectory_samples,
+        world_size=1,
+        mini_batch_size=4,
+        micro_batch_size=2,
+        max_tokens_per_micro_batch=7,
+    )
+    dynamic_worker.step_update([rank_microbatch_groups[0][0]])
+
+    for stable_param, regular_param, dynamic_param in zip(
+        stable_model.parameters(),
+        regular_model.parameters(),
+        dynamic_model.parameters(),
+        strict=True,
+    ):
+        torch.testing.assert_close(
+            regular_param,
+            stable_param,
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        torch.testing.assert_close(
+            dynamic_param,
+            stable_param,
+            atol=1e-6,
+            rtol=1e-6,
+        )
 
 
 def test_fsdp2_full_grad_norm_uses_full_tensor_for_metric_and_clipping() -> None:

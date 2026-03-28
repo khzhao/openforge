@@ -150,10 +150,22 @@ class _FakeGateway:
         self.active_generates = 0
         self.max_active_generates = 0
         self.http_client_count = 0
-        self._read_errors: dict[tuple[str, str], int] = {}
+        self._transport_errors: dict[
+            tuple[str, str], tuple[int, type[httpx.TransportError]]
+        ] = {}
+
+    def inject_transport_error(
+        self,
+        method: str,
+        path: str,
+        *,
+        count: int = 1,
+        error_type: type[httpx.TransportError] = httpx.ReadError,
+    ) -> None:
+        self._transport_errors[(method, path)] = (count, error_type)
 
     def inject_read_error(self, method: str, path: str, *, count: int = 1) -> None:
-        self._read_errors[(method, path)] = count
+        self.inject_transport_error(method, path, count=count)
 
     def handle(
         self,
@@ -163,10 +175,12 @@ class _FakeGateway:
     ) -> _FakeResponse:
         read_error_key = (method, path)
         with self._lock:
-            remaining = self._read_errors.get(read_error_key, 0)
+            remaining, error_type = self._transport_errors.get(
+                read_error_key, (0, httpx.ReadError)
+            )
             if remaining > 0:
-                self._read_errors[read_error_key] = remaining - 1
-                raise httpx.ReadError(f"transient read error for {method} {path}")
+                self._transport_errors[read_error_key] = (remaining - 1, error_type)
+                raise error_type(f"transient transport error for {method} {path}")
 
         if method == "GET" and path == "/current_session":
             if self.active_session_id is None:
@@ -736,6 +750,49 @@ def test_execute_grouped_retries_only_failed_group() -> None:
     assert failed_prompts == {"hello"}
 
 
+def test_execute_grouped_results_can_return_failures_without_raising() -> None:
+    prompt_counts: dict[str, int] = {}
+    lock = Lock()
+
+    @ninja.agent(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        assert response.choices[0].message.content
+        with lock:
+            prompt_counts[prompt] = prompt_counts.get(prompt, 0) + 1
+            prompt_call_index = prompt_counts[prompt]
+        if prompt == "hello" and prompt_call_index == 1:
+            raise RuntimeError("boom")
+        return 1.0
+
+    with _patched_ninja() as fake_gateway:
+        with agent._session() as session:
+            call_specs, _single_request = ninja._normalize_requests(
+                args=(),
+                kwargs={},
+                requests=[{"prompt": "hello"}, {"prompt": "goodbye"}],
+            )
+            grouped_results, failures = ninja._execute_grouped_results(
+                agent,
+                session,
+                call_specs,
+                group_size=2,
+                concurrency=4,
+                retries=0,
+                raise_on_failure=False,
+            )
+
+    assert len(grouped_results) == 1
+    assert grouped_results[0].request_index == 1
+    assert len(failures) == 1
+    assert failures[0].request_index == 0
+    assert "RuntimeError: boom" in failures[0].error
+    assert len(fake_gateway.failed) == 2
+
+
 def test_grouped_fail_fallback_marks_started_clients_failed() -> None:
     with _patched_ninja() as fake_gateway:
         session = ninja._ActiveSession(("127.0.0.1", 8000))
@@ -751,6 +808,40 @@ def test_grouped_fail_fallback_marks_started_clients_failed() -> None:
 
     assert len(fake_gateway.failed) == 3
     assert fake_gateway.active_trajectory_ids == set()
+
+
+def test_active_session_configures_http_client_for_high_concurrency() -> None:
+    captured: dict[str, object] = {}
+
+    class _CapturingHttpClient:
+        def __init__(self, *args, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def get(self, path: str) -> _FakeResponse:
+            assert path == "/current_session"
+            return _FakeResponse(200, {"session_id": "sess_1"})
+
+        def close(self) -> None:
+            return None
+
+    with patch.object(ninja.httpx, "Client", _CapturingHttpClient):
+        session = ninja._ActiveSession(("127.0.0.1", 8000))
+        with session:
+            pass
+
+    timeout = captured["timeout"]
+    limits = captured["limits"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 10.0
+    assert timeout.read == ninja._ActiveSession.REQUEST_TIMEOUT_SECONDS
+    assert timeout.write == ninja._ActiveSession.REQUEST_TIMEOUT_SECONDS
+    assert timeout.pool == ninja._ActiveSession.REQUEST_TIMEOUT_SECONDS
+    assert isinstance(limits, httpx.Limits)
+    assert limits.max_connections == ninja._ActiveSession.MAX_CONNECTIONS
+    assert (
+        limits.max_keepalive_connections
+        == ninja._ActiveSession.MAX_CONNECTIONS
+    )
 
 
 def test_sample_validates_requests_before_connecting() -> None:
@@ -800,6 +891,28 @@ def test_register_retries_single_fail_on_read_error() -> None:
 
     assert len(fake_gateway.failed) == 1
     assert fake_gateway.finished == []
+
+
+def test_register_retries_single_finish_on_remote_protocol_error() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return 1.0
+
+    with _patched_ninja() as fake_gateway:
+        fake_gateway.inject_transport_error(
+            "POST",
+            "/end_trajectory",
+            error_type=httpx.RemoteProtocolError,
+        )
+        reward = agent(prompt="hello")
+
+    assert reward == 1.0
+    assert len(fake_gateway.finished) == 1
+    assert fake_gateway.failed == []
 
 
 def test_agent_checkpoint_and_policy_accessors() -> None:

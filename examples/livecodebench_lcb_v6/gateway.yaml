@@ -1,0 +1,13 @@
+# Copyright 2026 openforge
+
+data:
+  path: /tmp/livecodebench-lcb-v6-gateway.sqlite3
+
+gateway:
+  host: 127.0.0.1
+  port: 8000
+
+cluster:
+  num_nodes: 1
+  gpus_per_node: 4
+  cpus_per_node: 32

@@ -7,6 +7,7 @@ import asyncio
 from types import SimpleNamespace
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from _script_test_utils import install_test_stubs, run_tests
 
 install_test_stubs()
@@ -25,11 +26,13 @@ class _FakeTrainConfig:
         mini_batch_size: int,
         micro_batch_size: int,
         max_rollout_policy_lag: int,
+        max_tokens_per_micro_batch: int | None = None,
     ) -> None:
         self.global_batch_size = global_batch_size
         self.mini_batch_size = mini_batch_size
         self.micro_batch_size = micro_batch_size
         self.max_rollout_policy_lag = max_rollout_policy_lag
+        self.max_tokens_per_micro_batch = max_tokens_per_micro_batch
 
     @property
     def gradient_accumulation_steps(self) -> int:
@@ -45,6 +48,7 @@ class _FakeTrainManager:
         mini_batch_size: int,
         micro_batch_size: int,
         max_rollout_policy_lag: int,
+        max_tokens_per_micro_batch: int | None = None,
     ) -> None:
         self.world_size = world_size
         self.cfg = SimpleNamespace(
@@ -54,27 +58,80 @@ class _FakeTrainManager:
                 mini_batch_size=mini_batch_size,
                 micro_batch_size=micro_batch_size,
                 max_rollout_policy_lag=max_rollout_policy_lag,
+                max_tokens_per_micro_batch=max_tokens_per_micro_batch,
             ),
         )
         self.step_calls: list[tuple[int, list[object]]] = []
+        self.raw_step_calls: list[list[list[dict[str, torch.Tensor]]]] = []
         self.publish_calls: list[int] = []
 
-    def step_update(
+    def step_update_and_publish(
         self,
         rank_minibatches_per_update,
         *,
         global_step: int,
+        policy_version: int,
     ) -> list[TrainStepResult]:
         assert len(rank_minibatches_per_update) == 1
         rank_minibatches = rank_minibatches_per_update[0]
-        self.step_calls.append((global_step, rank_minibatches))
+        self.raw_step_calls.append(rank_minibatches)
+        merged_rank_minibatches = [
+            _merge_microbatches(microbatches) for microbatches in rank_minibatches
+        ]
+        self.step_calls.append((global_step, merged_rank_minibatches))
+        self.publish_calls.append(policy_version)
         return [
             TrainStepResult(rank=rank, global_step=global_step, metrics={"lr": 0.1})
             for rank in range(self.world_size)
         ]
 
-    def publish_rollout_policy_version(self, policy_version: int) -> None:
-        self.publish_calls.append(policy_version)
+
+def _merge_microbatches(
+    microbatches: list[dict[str, torch.Tensor]],
+) -> dict[str, torch.Tensor]:
+    if len(microbatches) == 1:
+        return microbatches[0]
+
+    samples: list[dict[str, torch.Tensor]] = []
+    for microbatch in microbatches:
+        lengths = microbatch["lengths"].tolist()
+        for index, length in enumerate(lengths):
+            samples.append(
+                {
+                    "tokens": microbatch["tokens"][index, :length],
+                    "position_ids": microbatch["position_ids"][index, :length],
+                    "advantages": microbatch["advantages"][index, :length],
+                    "loss_mask": microbatch["loss_mask"][index, : max(length - 1, 0)],
+                    "rollout_log_probs": microbatch["rollout_log_probs"][
+                        index, : max(length - 1, 0)
+                    ],
+                    "lengths": microbatch["lengths"][index],
+                }
+            )
+
+    return {
+        "tokens": pad_sequence(
+            [sample["tokens"] for sample in samples],
+            batch_first=True,
+        ),
+        "position_ids": pad_sequence(
+            [sample["position_ids"] for sample in samples],
+            batch_first=True,
+        ),
+        "advantages": pad_sequence(
+            [sample["advantages"] for sample in samples],
+            batch_first=True,
+        ),
+        "loss_mask": pad_sequence(
+            [sample["loss_mask"] for sample in samples],
+            batch_first=True,
+        ),
+        "rollout_log_probs": pad_sequence(
+            [sample["rollout_log_probs"] for sample in samples],
+            batch_first=True,
+        ),
+        "lengths": torch.stack([sample["lengths"] for sample in samples]),
+    }
 
 
 def _turn(
@@ -248,6 +305,51 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
         assert trained_ids == ["trained", "trained", "trained", "trained"]
         assert remaining is not None
         assert remaining.status == "completed"
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_train_loop_balances_microbatches_by_trajectory_tokens() -> None:
+    async def run() -> None:
+        store = SQLiteOpenForgeStore(":memory:")
+        await store.create_session(Session(session_id="s0", model_name="model-a"))
+        for index, token_ids in enumerate(
+            (
+                [10, 11, 12, 13, 14],
+                [20, 21, 22, 23, 24],
+                [30, 31],
+                [40, 41],
+            )
+        ):
+            await _completed_trajectory(
+                store,
+                session_id="s0",
+                trajectory_id=f"t{index}",
+                reward=float(index),
+                token_ids=token_ids,
+                prompt_length=1,
+            )
+
+        train_manager = _FakeTrainManager(
+            world_size=1,
+            global_batch_size=4,
+            mini_batch_size=4,
+            micro_batch_size=2,
+            max_rollout_policy_lag=0,
+            max_tokens_per_micro_batch=5,
+        )
+        loop = TrainLoop(session_id="s0", store=store, train_manager=train_manager)
+
+        trained = await loop.train_once()
+
+        assert trained is True
+        assert len(train_manager.raw_step_calls) == 1
+        rank_microbatches = train_manager.raw_step_calls[0][0]
+        assert len(rank_microbatches) == 3
+        assert rank_microbatches[0]["lengths"].tolist() == [5]
+        assert rank_microbatches[1]["lengths"].tolist() == [5]
+        assert rank_microbatches[2]["lengths"].tolist() == [2, 2]
         await store.close()
 
     asyncio.run(run())

@@ -333,7 +333,7 @@ def run_weight_sync_e2e(
             for _ in range(3):
                 global_step += 1
                 step_results = train_manager.step_update(
-                    [rank_minibatches],
+                    [[[mini_batch] for mini_batch in rank_minibatches]],
                     global_step=global_step,
                 )
             post_step_weights = train_manager.build_tensor_buckets(
