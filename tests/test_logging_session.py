@@ -147,6 +147,7 @@ def test_session_logger_uses_runtime_wandb_config() -> None:
     assert logger._run is fake_run
     assert logger._log_interval_seconds == 3.0
     assert ("train/*", "policy_version") in fake_run.defined
+    assert ("validation/*", "policy_version") in fake_run.defined
     assert ("rollout/*", "wall_time_s") in fake_run.defined
     assert ("rollout_by_policy/*", "policy_version") not in fake_run.defined
     logger.finish()
@@ -255,6 +256,55 @@ def test_session_logger_logs_train_metrics_on_wall_time_axis() -> None:
     logger.finish()
 
 
+def test_session_logger_logs_validation_metrics_on_policy_axis() -> None:
+    logger = SessionLogger()
+    fake_run = _FakeRun()
+    fake_wandb = SimpleNamespace(init=lambda **kwargs: fake_run)
+
+    with patch.dict(sys.modules, {"wandb": fake_wandb}):
+        logger.start(
+            session_id="sess-12345678",
+            runtime_config=_runtime_config(
+                wandb={
+                    "enabled": True,
+                    "project": "proj-a",
+                    "log_interval_seconds": 0.0,
+                }
+            ),
+        )
+
+    logger.record_validation_update(
+        {
+            "policy_version": 7,
+            "sample_count": 32,
+            "reward_mean": 0.75,
+            "reward_std": 0.1,
+            "validation_time_s": 4.0,
+        }
+    )
+
+    assert any(
+        payload.get("policy_version") == 7
+        and payload.get("validation/sample_count") == 32
+        and payload.get("validation/reward_mean") == 0.75
+        and payload.get("validation/reward_std") == 0.1
+        and payload.get("validation/validation_time_s") == 4.0
+        for payload in fake_run.logged
+    )
+
+    snapshot = logger.snapshot(
+        train_status={},
+        rollout_status={},
+        cluster_status={},
+    )
+    validation = snapshot["validation"]
+    assert isinstance(validation, dict)
+    latest_update = validation["latest_update"]
+    assert isinstance(latest_update, dict)
+    assert latest_update["policy_version"] == 7
+    logger.finish()
+
+
 def test_session_logger_logs_rollout_metrics_and_version_skew() -> None:
     logger = SessionLogger()
     fake_run = _FakeRun()
@@ -340,6 +390,7 @@ def main() -> int:
             test_session_logger_runtime_wandb_requires_project,
             test_build_train_update_normalizes_token_metrics_per_trajectory,
             test_session_logger_logs_train_metrics_on_wall_time_axis,
+            test_session_logger_logs_validation_metrics_on_policy_axis,
             test_session_logger_logs_rollout_metrics_and_version_skew,
             test_session_logger_snapshot_includes_rollout_max_version_skew,
         ]

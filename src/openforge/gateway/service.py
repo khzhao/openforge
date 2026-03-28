@@ -35,6 +35,7 @@ from openforge.gateway.types import (
     StartTrajectoryResponse,
     TrajectoryStatusesResponse,
     TrajectoryStatusInfo,
+    ValidationUpdateResponse,
 )
 from openforge.logging import SessionLogger
 
@@ -52,7 +53,8 @@ class _PendingGenerate:
     tools: list[ChatCompletionTool] | None
     sampling_params: dict[str, object]
     future: asyncio.Future[ChatCompletionResponse]
-    batch_key: tuple[str, str, str]
+    batch_key: tuple[str, str, str, str]
+    purpose: str = "train"
 
 
 class Service:
@@ -199,6 +201,7 @@ class Service:
         *,
         session_id: str,
         group_id: str | None = None,
+        purpose: str = "train",
     ) -> StartTrajectoryResponse:
         await self._require_active_session(session_id)
         trajectory = Trajectory(
@@ -206,6 +209,7 @@ class Service:
             session_id=session_id,
             group_id=group_id,
             status="active",
+            purpose=purpose,
             expected_group_size=1,
         )
         await self._record_active_trajectories([trajectory])
@@ -221,6 +225,7 @@ class Service:
         session_id: str,
         counts: list[int],
         group_ids: list[str | None],
+        purpose: str = "train",
     ) -> StartTrajectoryGroupsResponse:
         await self._require_active_session(session_id)
         if len(counts) != len(group_ids):
@@ -243,6 +248,7 @@ class Service:
                         session_id=session_id,
                         group_id=group_id,
                         status="active",
+                        purpose=purpose,
                         expected_group_size=count,
                     )
                 )
@@ -261,6 +267,7 @@ class Service:
         session_id = request.openforge.session_id
         trajectory_id = request.openforge.trajectory_id
         group_id = request.openforge.group_id
+        purpose = request.openforge.purpose
         session = await self._require_active_session(session_id)
         if request.model != session.model_name:
             raise Exception(
@@ -285,12 +292,14 @@ class Service:
             session_id=session_id,
             trajectory_id=trajectory_id,
             group_id=group_id,
+            purpose=purpose,
             messages=list(request.messages),
             tools=tools,
             sampling_params=sampling_params,
             future=future,
             batch_key=(
                 session_id,
+                purpose,
                 self._sampling_params_key(sampling_params),
                 self._tools_key(tools),
             ),
@@ -361,6 +370,7 @@ class Service:
                     session_id=trajectory.session_id,
                     group_id=trajectory.group_id,
                     status="completed",
+                    purpose=trajectory.purpose,
                     expected_group_size=trajectory.expected_group_size,
                     final_reward=final_reward,
                 )
@@ -391,6 +401,7 @@ class Service:
                     session_id=trajectory.session_id,
                     group_id=trajectory.group_id,
                     status="failed",
+                    purpose=trajectory.purpose,
                     expected_group_size=trajectory.expected_group_size,
                 )
             ]
@@ -427,6 +438,7 @@ class Service:
                     session_id=trajectory.session_id,
                     group_id=trajectory.group_id,
                     status="failed",
+                    purpose=trajectory.purpose,
                     expected_group_size=trajectory.expected_group_size,
                 )
             )
@@ -456,6 +468,7 @@ class Service:
                     session_id=trajectory.session_id,
                     group_id=trajectory.group_id,
                     status="discarded",
+                    purpose=trajectory.purpose,
                     expected_group_size=trajectory.expected_group_size,
                 )
             ]
@@ -484,6 +497,17 @@ class Service:
             policy_version=policy_version,
             checkpoint_path=checkpoint_path,
         )
+
+    async def log_validation_update(
+        self,
+        *,
+        session_id: str,
+        payload: dict[str, object],
+    ) -> ValidationUpdateResponse:
+        await self._require_active_session(session_id)
+        self._session_logger.record_validation_update(payload)
+        self._session_logger.flush()
+        return ValidationUpdateResponse(session_id=session_id)
 
     async def end_session(
         self,
@@ -562,6 +586,7 @@ class Service:
                     session_id=batch[0].session_id,
                     trajectory_ids=[request.trajectory_id for request in batch],
                     group_ids=[request.group_id for request in batch],
+                    purpose=batch[0].purpose,
                     messages_per_item=[request.messages for request in batch],
                     tools=batch[0].tools,
                     sampling_params=batch[0].sampling_params,
@@ -601,6 +626,7 @@ class Service:
         session_id: str,
         trajectory_ids: list[str],
         group_ids: list[str | None],
+        purpose: str = "train",
         messages_per_item: list[list[ChatCompletionMessage]],
         tools: list[ChatCompletionTool] | None,
         sampling_params: dict[str, object],
@@ -631,6 +657,7 @@ class Service:
                         session_id=session_id,
                         group_id=group_id,
                         status="active",
+                        purpose=purpose,
                         expected_group_size=1,
                     )
                 )
@@ -682,7 +709,8 @@ class Service:
                     generation=generation,
                 )
             )
-        await self.store.append_turns(turns_to_append)
+        if purpose == "train":
+            await self.store.append_turns(turns_to_append)
         for trajectory_id in trajectory_ids:
             turn_count = self._active_turn_counts.get(trajectory_id)
             if turn_count is not None:
@@ -849,6 +877,8 @@ class Service:
         if not trajectories:
             return
         for trajectory in trajectories:
+            if trajectory.purpose != "train":
+                continue
             await self.store.update_trajectory(trajectory)
         # This is a short control-plane release call. Keeping it inline avoids
         # executor hangs in short-lived async test runners.
@@ -865,7 +895,9 @@ class Service:
     ) -> None:
         if not trajectories:
             return
-        await self.store.create_trajectories(trajectories)
+        await self.store.create_trajectories(
+            [trajectory for trajectory in trajectories if trajectory.purpose == "train"]
+        )
         for trajectory in trajectories:
             self._active_trajectories[trajectory.trajectory_id] = trajectory
             self._active_turn_counts[trajectory.trajectory_id] = 0

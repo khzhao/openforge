@@ -320,6 +320,7 @@ def _chat_request(
     trajectory_id: str,
     content: str,
     model: str = "model-a",
+    purpose: str = "train",
     temperature: float | None = None,
     top_p: float | None = None,
     top_k: int | None = None,
@@ -331,6 +332,7 @@ def _chat_request(
             "session_id": session_id,
             "trajectory_id": trajectory_id,
             "group_id": None,
+            "purpose": purpose,
         },
         "model": model,
         "messages": [{"role": "user", "content": content}],
@@ -500,6 +502,42 @@ def test_gateway_service_current_session_tracks_active_model() -> None:
         assert await service.current_session() == created
 
         await store.close()
+
+    asyncio.run(run())
+
+
+def test_gateway_service_validation_trajectories_are_not_persisted() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+            runtime = _FakeRuntime()
+            service = Service(store=store, runtime=runtime)
+
+            session = await service.start_session(**_start_session_kwargs("model-a"))
+            started = await service.start_trajectory(
+                session_id=session.session_id,
+                purpose="validation",
+            )
+            response = await service.generate(
+                request=_chat_request(
+                    session_id=session.session_id,
+                    trajectory_id=started.trajectory_id,
+                    content="hello validation",
+                    purpose="validation",
+                )
+            )
+            assert response.metadata["trajectory_id"] == started.trajectory_id
+
+            ended = await service.end_trajectory(
+                session_id=session.session_id,
+                trajectory_id=started.trajectory_id,
+                final_reward=0.75,
+            )
+            assert ended.status == "completed"
+            assert runtime.last_trajectory_ids == [started.trajectory_id]
+            assert runtime.released_trajectory_ids == [[started.trajectory_id]]
+            assert await store.list_trajectories(session.session_id) == []
+            await store.close()
 
     asyncio.run(run())
 
@@ -904,6 +942,7 @@ def main() -> int:
         [
             test_gateway_service_start_generate_and_end,
             test_gateway_service_current_session_tracks_active_model,
+            test_gateway_service_validation_trajectories_are_not_persisted,
             test_gateway_service_reports_trajectory_statuses,
             test_gateway_service_status_includes_gateway_train_and_rollout,
             test_gateway_service_start_session_rejects_second_active_session,

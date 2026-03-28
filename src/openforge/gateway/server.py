@@ -38,6 +38,8 @@ from openforge.gateway.types import (
     StartTrajectoryResponse,
     TrajectoryStatusesRequest,
     TrajectoryStatusesResponse,
+    ValidationUpdateRequest,
+    ValidationUpdateResponse,
 )
 
 __all__ = ["create_app"]
@@ -140,6 +142,7 @@ def create_app(
             service.start_trajectory(
                 session_id=payload.session_id,
                 group_id=payload.group_id,
+                purpose=payload.purpose,
             )
         )
 
@@ -152,6 +155,7 @@ def create_app(
                 session_id=payload.session_id,
                 counts=payload.counts,
                 group_ids=payload.group_ids,
+                purpose=payload.purpose,
             )
         )
 
@@ -229,5 +233,16 @@ def create_app(
         payload: ExportCheckpointRequest,
     ) -> ExportCheckpointResponse:
         return await _invoke(service.export_checkpoint(session_id=payload.session_id))
+
+    @app.post("/log_validation", response_model=ValidationUpdateResponse)
+    async def log_validation(
+        payload: ValidationUpdateRequest,
+    ) -> ValidationUpdateResponse:
+        return await _invoke(
+            service.log_validation_update(
+                session_id=payload.session_id,
+                payload=payload.payload,
+            )
+        )
 
     return app

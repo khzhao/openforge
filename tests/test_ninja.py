@@ -13,7 +13,6 @@ from typing import Iterator
 from unittest.mock import patch
 
 import httpx
-
 from _script_test_utils import expect_raises, install_test_stubs, run_tests
 
 install_test_stubs()
@@ -150,6 +149,9 @@ class _FakeGateway:
         self.active_generates = 0
         self.max_active_generates = 0
         self.http_client_count = 0
+        self.status_calls = 0
+        self.validation_updates: list[dict[str, object]] = []
+        self.rollout_min_weight_versions: list[int] = []
         self._transport_errors: dict[
             tuple[str, str], tuple[int, type[httpx.TransportError]]
         ] = {}
@@ -191,6 +193,44 @@ class _FakeGateway:
                     "session_id": self.active_session_id,
                     "model": "model-a",
                     "policy_version": self.policy_version,
+                },
+            )
+
+        if method == "GET" and path == "/status":
+            with self._lock:
+                self.status_calls += 1
+                min_weight_version = (
+                    self.rollout_min_weight_versions.pop(0)
+                    if self.rollout_min_weight_versions
+                    else self.policy_version
+                )
+            return _FakeResponse(
+                200,
+                {
+                    "session_id": self.active_session_id,
+                    "wall_time_s": 0.0,
+                    "gateway": {
+                        "heartbeat_age_s": 0.0,
+                        "pending_generate_count": 0,
+                    },
+                    "train": {
+                        "policy_version": self.policy_version,
+                        "latest_update": None,
+                    },
+                    "rollout": {
+                        "latest_published_train_version": self.policy_version,
+                        "min_weight_version": min_weight_version,
+                        "max_weight_version": min_weight_version,
+                        "stale_worker_count": int(
+                            min_weight_version < self.policy_version
+                        ),
+                        "heartbeat_age_s": 0.0,
+                        "max_version_skew": max(
+                            0,
+                            self.policy_version - min_weight_version,
+                        ),
+                    },
+                    "cluster": {},
                 },
             )
 
@@ -238,6 +278,7 @@ class _FakeGateway:
             messages = [dict(message) for message in payload["messages"]]
             openforge = dict(payload["_openforge"])
             trajectory_id = str(openforge["trajectory_id"])
+            purpose = str(openforge.get("purpose", "train"))
             sampling_params: dict[str, object] = {}
             if "temperature" in payload:
                 sampling_params["temperature"] = payload["temperature"]
@@ -260,6 +301,7 @@ class _FakeGateway:
                 self.generate_calls.append(
                     {
                         "trajectory_id": trajectory_id,
+                        "purpose": purpose,
                         "messages": messages,
                         "sampling_params": sampling_params,
                     }
@@ -421,6 +463,18 @@ class _FakeGateway:
                     "session_id": self.active_session_id,
                     "policy_version": self.policy_version,
                     "checkpoint_path": "/tmp/openforge-test-checkpoint",
+                },
+            )
+
+        if method == "POST" and path == "/log_validation":
+            assert payload is not None
+            logged_payload = dict(payload["payload"])
+            self.validation_updates.append(logged_payload)
+            return _FakeResponse(
+                200,
+                {
+                    "session_id": self.active_session_id,
+                    "status": "logged",
                 },
             )
 
@@ -596,6 +650,7 @@ def test_register_routes_explicit_messages() -> None:
     assert fake_gateway.generate_calls == [
         {
             "trajectory_id": trajectory_id,
+            "purpose": "train",
             "messages": [{"role": "user", "content": "hello"}],
             "sampling_params": {
                 "temperature": 0.7,
@@ -605,6 +660,7 @@ def test_register_routes_explicit_messages() -> None:
         },
         {
             "trajectory_id": trajectory_id,
+            "purpose": "train",
             "messages": [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "reply to hello"},
@@ -1040,6 +1096,86 @@ def test_module_train_skips_active_runtime_preflight_for_explicit_gateway() -> N
     assert fake_gateway.http_client_count == 1
 
 
+def test_validate_runs_file_backed_requests_and_logs_validation_update() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, *, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        assert response.choices[0].message.content
+        return float(len(prompt))
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        validation_dir = Path(tmpdir)
+        (validation_dir / "validation.jsonl").write_text(
+            json.dumps({"prompt": "a"}) + "\n" + json.dumps({"prompt": "abcd"}) + "\n",
+            encoding="utf-8",
+        )
+        with _patched_ninja() as fake_gateway:
+            summary = ninja.validate(
+                agent,
+                file_path=tmpdir,
+            )
+
+    assert summary["policy_version"] == 0
+    assert summary["sample_count"] == 2
+    assert summary["reward_mean"] == 2.5
+    assert summary["reward_min"] == 1.0
+    assert summary["reward_max"] == 4.0
+    assert summary["file_path"] == str(validation_dir / "validation.jsonl")
+    assert fake_gateway.validation_updates == [
+        {
+            "policy_version": 0,
+            "sample_count": 2,
+            "reward_mean": 2.5,
+            "reward_std": 1.5,
+            "reward_min": 1.0,
+            "reward_max": 4.0,
+            "validation_time_s": fake_gateway.validation_updates[0]["validation_time_s"],
+            "samples_per_second": fake_gateway.validation_updates[0][
+                "samples_per_second"
+            ],
+        }
+    ]
+    assert all(call["purpose"] == "validation" for call in fake_gateway.generate_calls)
+
+
+def test_validate_waits_for_rollout_to_load_latest_policy_version() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, *, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        assert response.choices[0].message.content
+        return 1.0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        validation_dir = Path(tmpdir)
+        (validation_dir / "validation.jsonl").write_text(
+            json.dumps({"prompt": "check"}) + "\n",
+            encoding="utf-8",
+        )
+        with _patched_ninja() as fake_gateway:
+            fake_gateway.policy_version = 2
+            fake_gateway.rollout_min_weight_versions = [0, 1, 2]
+            with patch.object(
+                ninja._ActiveSession,
+                "STATUS_POLL_INTERVAL_SECONDS",
+                0.001,
+            ):
+                summary = ninja.validate(
+                    agent,
+                    file_path=tmpdir,
+                    wait_timeout=1.0,
+                )
+
+    assert summary["policy_version"] == 2
+    assert fake_gateway.status_calls == 3
+    assert all(call["purpose"] == "validation" for call in fake_gateway.generate_calls)
+
+
 def main() -> int:
     return run_tests(
         [
@@ -1064,6 +1200,8 @@ def main() -> int:
             test_module_train_validates_requests_before_connecting,
             test_module_train_preflights_against_active_runtime_global_batch_size,
             test_module_train_skips_active_runtime_preflight_for_explicit_gateway,
+            test_validate_runs_file_backed_requests_and_logs_validation_update,
+            test_validate_waits_for_rollout_to_load_latest_policy_version,
         ]
     )
 

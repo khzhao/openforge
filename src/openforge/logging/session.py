@@ -88,6 +88,7 @@ class SessionLogger:
         self._start_monotonic: float | None = None
         self._last_gateway_heartbeat_monotonic: float | None = None
         self._latest_train_update: dict[str, object] | None = None
+        self._latest_validation_update: dict[str, object] | None = None
         self._latest_rollout_status: dict[str, Any] = {}
         self._latest_cluster_status: dict[str, Any] = {}
         self._pending_generate_count = 0
@@ -105,6 +106,7 @@ class SessionLogger:
         self._window_started_monotonic = now
         self._last_flush_monotonic = now
         self._latest_train_update = None
+        self._latest_validation_update = None
         self._latest_rollout_status = {}
         self._latest_cluster_status = {}
         self._pending_generate_count = 0
@@ -178,6 +180,20 @@ class SessionLogger:
             f"train/{key}": value
             for key, value in payload.items()
             if key != "policy_version"
+        }
+        self._run.log({"policy_version": policy_version, **metrics})
+
+    def record_validation_update(self, payload: dict[str, object]) -> None:
+        """Record one validation summary and forward it to the active W&B run."""
+        self._latest_validation_update = dict(payload)
+        self._last_gateway_heartbeat_monotonic = time.monotonic()
+        if self._run is None:
+            return
+        policy_version = int(payload["policy_version"])
+        metrics = {
+            f"validation/{key}": value
+            for key, value in payload.items()
+            if key != "policy_version" and isinstance(value, int | float)
         }
         self._run.log({"policy_version": policy_version, **metrics})
 
@@ -317,6 +333,9 @@ class SessionLogger:
                 **train_status,
                 "latest_update": self._latest_train_update,
             },
+            "validation": {
+                "latest_update": self._latest_validation_update,
+            },
             "rollout": {
                 **rollout_status,
                 "max_version_skew": self._rollout_max_version_skew(
@@ -336,6 +355,7 @@ class SessionLogger:
         self._start_monotonic = None
         self._last_gateway_heartbeat_monotonic = None
         self._latest_train_update = None
+        self._latest_validation_update = None
         self._latest_rollout_status = {}
         self._latest_cluster_status = {}
         self._pending_generate_count = 0
@@ -426,6 +446,7 @@ class SessionLogger:
         )
         run.define_metric("policy_version")
         run.define_metric("train/*", step_metric="policy_version")
+        run.define_metric("validation/*", step_metric="policy_version")
         run.define_metric("wall_time_s")
         run.define_metric("rollout/*", step_metric="wall_time_s")
         run.define_metric("status/*", step_metric="wall_time_s")

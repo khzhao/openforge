@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import math
 import os
@@ -10,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import update_wrapper
+from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -23,7 +25,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 _LOG = logging.getLogger(__name__)
 
-__all__ = ["agent", "train"]
+__all__ = ["agent", "train", "validate"]
 
 _AUTO_CONCURRENCY_CAP = 512
 _AUTO_CONCURRENCY_CPU_MULTIPLIER = 16
@@ -148,9 +150,102 @@ def _try_active_global_batch_size() -> int | None:
     return int(runtime_config.train.global_batch_size)
 
 
+def _resolve_request_data_path(path: str, *, split_name: str) -> Path:
+    candidate = Path(path)
+    if candidate.is_dir():
+        for suffix in (".jsonl", ".json", ".parquet"):
+            split_path = candidate / f"{split_name}{suffix}"
+            if split_path.exists():
+                return split_path
+        raise ValueError(f"{path} is missing {split_name}.jsonl/.json/.parquet")
+    return candidate
+
+
+def _load_request_rows(
+    *,
+    file_path: str,
+    split_name: str,
+    max_examples: int | None,
+) -> tuple[Path, list[dict[str, Any]]]:
+    resolved_path = _resolve_request_data_path(file_path, split_name=split_name)
+    suffix = resolved_path.suffix
+    rows: list[dict[str, Any]] = []
+
+    def append_row(row: object, *, context: str) -> None:
+        if not isinstance(row, dict):
+            raise TypeError(f"{context} must decode to an object")
+        rows.append(dict(row))
+
+    if suffix == ".jsonl":
+        with resolved_path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                append_row(
+                    json.loads(stripped),
+                    context=f"{resolved_path}:{line_number}",
+                )
+                if max_examples is not None and len(rows) >= max_examples:
+                    break
+        return resolved_path, rows
+
+    if suffix == ".json":
+        payload = json.loads(resolved_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise TypeError(f"{resolved_path} must decode to a list of objects")
+        for index, row in enumerate(payload, start=1):
+            append_row(row, context=f"{resolved_path}[{index}]")
+            if max_examples is not None and len(rows) >= max_examples:
+                break
+        return resolved_path, rows
+
+    if suffix == ".parquet":
+        import datasets
+
+        dataset = datasets.load_dataset("parquet", data_files=str(resolved_path))[
+            "train"
+        ]
+        for index, row in enumerate(dataset, start=1):
+            append_row(row, context=f"{resolved_path}[{index}]")
+            if max_examples is not None and len(rows) >= max_examples:
+                break
+        return resolved_path, rows
+
+    raise ValueError("validation file must be a .jsonl, .json, or .parquet file")
+
+
+def _build_validation_update(
+    *,
+    rewards: list[float],
+    duration_seconds: float,
+    policy_version: int,
+) -> dict[str, object]:
+    if not rewards:
+        raise ValueError("validation file produced no requests")
+    reward_mean = sum(rewards) / len(rewards)
+    reward_variance = sum((reward - reward_mean) ** 2 for reward in rewards) / len(
+        rewards
+    )
+    return {
+        "policy_version": policy_version,
+        "sample_count": len(rewards),
+        "reward_mean": reward_mean,
+        "reward_std": math.sqrt(reward_variance),
+        "reward_min": min(rewards),
+        "reward_max": max(rewards),
+        "validation_time_s": duration_seconds,
+        "samples_per_second": (
+            len(rewards) / duration_seconds if duration_seconds > 0.0 else 0.0
+        ),
+    }
+
+
 class _ActiveSession:
     REQUEST_TIMEOUT_SECONDS = 3600.0
     EXPORT_TIMEOUT_SECONDS = 3600.0
+    VALIDATION_WAIT_TIMEOUT_SECONDS = 300.0
+    STATUS_POLL_INTERVAL_SECONDS = 0.1
     MAX_CONNECTIONS = _AUTO_CONCURRENCY_CAP
     END_RETRIES = 3
     END_RETRY_DELAY_SECONDS = 0.02
@@ -201,6 +296,7 @@ class _ActiveSession:
         group_id: str | None = None,
         trajectory_id: str | None = None,
         used: bool = False,
+        purpose: str = "train",
     ) -> _TrajectoryClient:
         return _TrajectoryClient(
             post=self.post,
@@ -209,6 +305,7 @@ class _ActiveSession:
             trajectory_id=trajectory_id or f"traj_{uuid4().hex}",
             group_id=group_id,
             used=used,
+            purpose=purpose,
         )
 
     def trajectory_groups(
@@ -216,6 +313,7 @@ class _ActiveSession:
         *,
         counts: list[int],
         group_ids: list[str | None],
+        purpose: str = "train",
     ) -> list[list[_TrajectoryClient]]:
         if len(counts) != len(group_ids):
             raise ValueError("counts must align with group_ids")
@@ -230,6 +328,7 @@ class _ActiveSession:
                 "session_id": self.session_id,
                 "counts": counts,
                 "group_ids": group_ids,
+                "purpose": purpose,
             },
         )
         response.raise_for_status()
@@ -243,6 +342,7 @@ class _ActiveSession:
                     group_id=group_id,
                     trajectory_id=str(trajectory_id),
                     used=True,
+                    purpose=purpose,
                 )
                 for trajectory_id in trajectory_ids
             ]
@@ -300,6 +400,43 @@ class _ActiveSession:
         payload = response.json()
         assert isinstance(payload, dict)
         return int(payload["policy_version"])
+
+    def status(self) -> dict[str, object]:
+        response = self.get("/status")
+        response.raise_for_status()
+        payload = response.json()
+        assert isinstance(payload, dict)
+        return payload
+
+    def wait_for_rollout_policy_version(
+        self,
+        *,
+        policy_version: int,
+        timeout: float = VALIDATION_WAIT_TIMEOUT_SECONDS,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self.status()
+            rollout = status.get("rollout", {})
+            if isinstance(rollout, dict):
+                min_weight_version = int(rollout.get("min_weight_version", 0))
+                if min_weight_version >= policy_version:
+                    return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "timed out waiting for rollout to load policy_version "
+                    f"{policy_version}"
+                )
+            time.sleep(self.STATUS_POLL_INTERVAL_SECONDS)
+
+    def log_validation_update(self, payload: dict[str, object]) -> None:
+        self._retry_post(
+            "/log_validation",
+            {
+                "session_id": self.session_id,
+                "payload": payload,
+            },
+        )
 
     def trajectory_statuses(self, trajectory_ids: list[str]) -> dict[str, str]:
         response = self._retry_post(
@@ -370,6 +507,7 @@ class _TrajectoryClient:
         trajectory_id: str,
         group_id: str | None = None,
         used: bool = False,
+        purpose: str = "train",
     ) -> None:
         self._post = post
         self._retry_post = retry_post
@@ -377,6 +515,7 @@ class _TrajectoryClient:
         self._trajectory_id = trajectory_id
         self._group_id = group_id
         self._used = used
+        self._purpose = purpose
 
     @property
     def trajectory_id(self) -> str:
@@ -389,6 +528,10 @@ class _TrajectoryClient:
     @property
     def group_id(self) -> str | None:
         return self._group_id
+
+    @property
+    def purpose(self) -> str:
+        return self._purpose
 
     def mark_used(self) -> None:
         self._used = True
@@ -424,6 +567,7 @@ class _TrajectoryClient:
             {
                 "session_id": self._session_id,
                 "group_id": self._group_id,
+                "purpose": self._purpose,
             },
         )
         response.raise_for_status()
@@ -455,6 +599,7 @@ class _ChatCompletionsClient:
             "session_id": self._trajectory.session_id,
             "trajectory_id": self._trajectory.trajectory_id,
             "group_id": self._trajectory.group_id,
+            "purpose": self._trajectory.purpose,
         }
         response = self._session.post("/v1/chat/completions", payload)
         response.raise_for_status()
@@ -546,6 +691,7 @@ class _RegisteredAgent:
                     call_specs,
                     concurrency=resolved_concurrency,
                     retries=retries,
+                    purpose="train",
                 )
             else:
                 results = _execute_grouped(
@@ -555,6 +701,7 @@ class _RegisteredAgent:
                     group_size=group_size,
                     concurrency=resolved_concurrency,
                     retries=retries,
+                    purpose="train",
                 )
         if single_request:
             return results[0]
@@ -585,8 +732,10 @@ class _RegisteredAgent:
         session: _ActiveSession,
         call_args: tuple[Any, ...],
         call_kwargs: dict[str, Any],
+        *,
+        purpose: str = "train",
     ) -> Any:
-        client = session.client()
+        client = session.client(purpose=purpose)
         try:
             reward = self._call_body(session, client, call_args, call_kwargs)
         except Exception:
@@ -663,12 +812,20 @@ def _execute_many(
     *,
     concurrency: int,
     retries: int,
+    purpose: str,
 ) -> list[float]:
     def run_once(call_spec: tuple[tuple[Any, ...], dict[str, Any]]) -> float:
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                return float(agent._invoke(session, call_spec[0], call_spec[1]))
+                return float(
+                    agent._invoke(
+                        session,
+                        call_spec[0],
+                        call_spec[1],
+                        purpose=purpose,
+                    )
+                )
             except Exception as exc:
                 last_error = exc
                 if attempt >= retries:
@@ -692,6 +849,7 @@ def _execute_grouped(
     group_size: int,
     concurrency: int,
     retries: int,
+    purpose: str,
 ) -> list[list[float]]:
     grouped_results, _failures = _execute_grouped_results(
         agent,
@@ -700,6 +858,7 @@ def _execute_grouped(
         group_size=group_size,
         concurrency=concurrency,
         retries=retries,
+        purpose=purpose,
         raise_on_failure=True,
     )
     rewards_by_request = [[0.0 for _ in range(group_size)] for _ in call_specs]
@@ -716,6 +875,7 @@ def _execute_grouped_results(
     group_size: int,
     concurrency: int,
     retries: int,
+    purpose: str = "train",
     raise_on_failure: bool = True,
 ) -> tuple[list[_GroupedExecutionResult], list[_GroupedExecutionFailure]]:
     rollout_concurrency = max(1, min(group_size, concurrency))
@@ -734,6 +894,7 @@ def _execute_grouped_results(
                 clients = session.trajectory_groups(
                     counts=[group_size],
                     group_ids=[group_id],
+                    purpose=purpose,
                 )[0]
 
                 def run_rollout(
@@ -909,6 +1070,7 @@ def train(
             group_size=group_size,
             concurrency=resolved_concurrency,
             retries=retries,
+            purpose="train",
             raise_on_failure=True,
         )
         trajectory_ids = [
@@ -944,6 +1106,76 @@ def train(
         "max_group_reward": max(max(result.rewards) for result in grouped_results),
         "mean_group_reward": sum(group_mean_rewards) / len(group_mean_rewards),
         "sample_mean_reward": sum(rewards) / len(rewards),
+    }
+
+
+def validate(
+    agent: _RegisteredAgent,
+    *,
+    file_path: str,
+    concurrency: int | None = None,
+    retries: int = 0,
+    max_examples: int | None = None,
+    wait_timeout: float = _ActiveSession.VALIDATION_WAIT_TIMEOUT_SECONDS,
+    log_to_wandb: bool = True,
+) -> dict[str, object]:
+    """Run file-backed validation requests against the latest active policy."""
+    if not isinstance(agent, _RegisteredAgent):
+        raise TypeError("agent must be a function registered with @ninja.agent")
+    if retries < 0:
+        raise ValueError("retries must be >= 0")
+    if max_examples is not None and max_examples <= 0:
+        raise ValueError("max_examples must be > 0")
+
+    resolved_path, requests = _load_request_rows(
+        file_path=file_path,
+        split_name="validation",
+        max_examples=max_examples,
+    )
+    call_specs, _single_request = _normalize_requests(
+        args=(),
+        kwargs={},
+        requests=requests,
+    )
+    if not call_specs:
+        raise ValueError("validation file produced no requests")
+    for request_index, (call_args, call_kwargs) in enumerate(call_specs):
+        agent._validate_call(
+            call_args,
+            call_kwargs,
+            request_index=request_index,
+        )
+
+    resolved_concurrency = _resolve_concurrency(
+        concurrency=concurrency,
+        job_count=len(call_specs),
+    )
+    with agent._session() as session:
+        policy_version = session.current_policy_version()
+        session.wait_for_rollout_policy_version(
+            policy_version=policy_version,
+            timeout=wait_timeout,
+        )
+        validation_started_monotonic = time.monotonic()
+        rewards = _execute_many(
+            agent,
+            session,
+            call_specs,
+            concurrency=resolved_concurrency,
+            retries=retries,
+            purpose="validation",
+        )
+        payload = _build_validation_update(
+            rewards=rewards,
+            duration_seconds=time.monotonic() - validation_started_monotonic,
+            policy_version=policy_version,
+        )
+        if log_to_wandb:
+            session.log_validation_update(payload)
+
+    return {
+        **payload,
+        "file_path": str(resolved_path),
     }
 
 

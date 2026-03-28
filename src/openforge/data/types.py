@@ -8,12 +8,14 @@ from typing import Literal
 __all__ = [
     "Session",
     "Trajectory",
+    "TrajectoryPurpose",
     "TrajectoryStatus",
     "Turn",
 ]
 
 
 TrajectoryStatus = Literal["active", "completed", "trained", "failed", "discarded"]
+TrajectoryPurpose = Literal["train", "validation"]
 
 
 @dataclass(slots=True)
@@ -32,6 +34,7 @@ class Trajectory:
     session_id: str
     group_id: str | None
     status: TrajectoryStatus
+    purpose: TrajectoryPurpose = "train"
     expected_group_size: int = 1
     final_reward: float | None = None
 

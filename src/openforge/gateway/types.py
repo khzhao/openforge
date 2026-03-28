@@ -13,7 +13,7 @@ from openforge.configs.algo import AlgorithmConfig
 from openforge.configs.models import ModelConfig
 from openforge.configs.rollout import RolloutConfig
 from openforge.configs.train import TrainConfig
-from openforge.data.types import TrajectoryStatus
+from openforge.data.types import TrajectoryPurpose, TrajectoryStatus
 
 __all__ = [
     "AssistantMessage",
@@ -51,6 +51,8 @@ __all__ = [
     "TrajectoryStatusInfo",
     "TrajectoryStatusesRequest",
     "TrajectoryStatusesResponse",
+    "ValidationUpdateRequest",
+    "ValidationUpdateResponse",
     "WandbConfig",
     "chat_message_payload",
     "tool_payloads",
@@ -127,6 +129,7 @@ class StartTrajectoryRequest(BaseModel):
 
     session_id: str
     group_id: str | None = None
+    purpose: TrajectoryPurpose = "train"
 
 
 class StartTrajectoryResponse(BaseModel):
@@ -143,6 +146,7 @@ class StartTrajectoryGroupsRequest(BaseModel):
     session_id: str
     counts: list[int]
     group_ids: list[str | None]
+    purpose: TrajectoryPurpose = "train"
 
 
 class StartTrajectoryGroupsResponse(BaseModel):
@@ -233,6 +237,7 @@ class _OpenForgeRequestState(BaseModel):
     session_id: str
     trajectory_id: str
     group_id: str | None = None
+    purpose: TrajectoryPurpose = "train"
 
 
 class ChatCompletionCreateRequest(BaseModel):
@@ -382,6 +387,20 @@ class EndSessionResponse(BaseModel):
 
     session_id: str
     status: str
+
+
+class ValidationUpdateRequest(BaseModel):
+    """Request payload for logging one validation update."""
+
+    session_id: str
+    payload: dict[str, Any]
+
+
+class ValidationUpdateResponse(BaseModel):
+    """Response payload for one logged validation update."""
+
+    session_id: str
+    status: Literal["logged"] = "logged"
 
 
 def chat_message_payload(message: ChatCompletionMessage) -> dict[str, Any]:
