@@ -210,7 +210,7 @@ def run_train(
         job_count=prompt_groups_per_update * group_size,
     )
     with agent_func._session() as session:
-        final_policy_version = int(session.current_policy_version())
+        final_policy_version = int(session.current_train_policy_version())
         for update_offset in range(available_updates):
             update_results: list[ninja._GroupedExecutionResult] = []
             update_failed_groups = 0
@@ -268,7 +268,7 @@ def run_train(
                 trajectory_ids,
                 timeout=wait_timeout,
             )
-            final_policy_version = int(session.current_policy_version())
+            final_policy_version = int(session.current_train_policy_version())
             rewards = [reward for result in update_results for reward in result.rewards]
             group_mean_rewards = [
                 sum(result.rewards) / len(result.rewards) for result in update_results

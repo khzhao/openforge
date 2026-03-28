@@ -101,10 +101,6 @@ class _RegisteredAgent:
         with self._session() as session:
             return session.export_checkpoint()
 
-    def policy_version(self) -> int:
-        with self._session() as session:
-            return session.current_policy_version()
-
     def _call_body(
         self,
         session: _ActiveSession,

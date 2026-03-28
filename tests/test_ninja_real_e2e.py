@@ -10,10 +10,8 @@ import os
 import signal
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any
 
-import openforge.ninja as ninja
 import ray
 from _script_test_utils import start_test_ray_cluster
 from test_gateway_real_e2e import (
@@ -27,6 +25,8 @@ from test_gateway_real_e2e import (
     wait_for_http,
     write_temp_config,
 )
+
+import openforge.ninja as ninja
 
 
 def parse_args() -> argparse.Namespace:
@@ -137,9 +137,6 @@ def main() -> int:
         assert response["choices"][0]["message"]["role"] == "assistant"
         assert isinstance(response["choices"][0]["message"]["content"], str)
 
-        policy_version = agent.policy_version()
-        assert policy_version == 0
-
         request_json(
             "POST",
             f"{base_url}/end_session",
@@ -150,7 +147,7 @@ def main() -> int:
         summary = {
             "artifact_dir": str(artifact_dir),
             "response": response,
-            "policy_version": policy_version,
+            "policy_version": int(started["policy_version"]),
         }
         summary_path.write_text(
             json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"

@@ -96,12 +96,13 @@ def main() -> int:
             validation_updates.append(validation_event)
             print_validation_update(validation_event)
 
+    final_checkpoint = user_agent.save()
     summary = {
         **setup["summary"],
         "completed_updates": len(train_updates),
         "expected_updates": train_plan["expected_updates"],
-        "final_checkpoint": user_agent.save(),
-        "final_policy_version": user_agent.policy_version(),
+        "final_checkpoint": final_checkpoint,
+        "final_policy_version": final_checkpoint["policy_version"],
         "last_train_update": train_updates[-1] if train_updates else None,
         "last_validation_update": (
             validation_updates[-1] if validation_updates else None

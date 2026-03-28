@@ -16,6 +16,33 @@ from .registered import _RegisteredAgent
 from .session import _ActiveSession
 
 
+def _build_train_summary(
+    *,
+    grouped_results,
+    group_size: int,
+    initial_policy_version: int,
+    final_policy_version: int,
+    trajectory_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    rewards = [reward for result in grouped_results for reward in result.rewards]
+    group_mean_rewards = [
+        sum(result.rewards) / len(result.rewards) for result in grouped_results
+    ]
+    payload: dict[str, Any] = {
+        "group_size": group_size,
+        "prompt_groups": len(grouped_results),
+        "samples": len(rewards),
+        "initial_policy_version": initial_policy_version,
+        "final_policy_version": final_policy_version,
+        "max_group_reward": max(max(result.rewards) for result in grouped_results),
+        "mean_group_reward": sum(group_mean_rewards) / len(group_mean_rewards),
+        "sample_mean_reward": sum(rewards) / len(rewards),
+    }
+    if trajectory_ids is not None:
+        payload["trajectory_ids"] = list(trajectory_ids)
+    return payload
+
+
 def _wait_for_trained_trajectories(
     session: _ActiveSession,
     trajectory_ids: list[str],
@@ -71,7 +98,7 @@ def train(
     group_size: int,
     concurrency: int | None = None,
     retries: int = 0,
-    wait_timeout: float = 3600.0,
+    wait_timeout: float = 7200.0,
 ) -> dict[str, Any]:
     """Run grouped trajectories through the gateway and wait until they are trained."""
     if not isinstance(agent, _RegisteredAgent):
@@ -108,7 +135,7 @@ def train(
                 f"{group_size} > {global_batch_size}"
             )
     with agent._session() as session:
-        initial_policy_version = session.current_policy_version()
+        initial_policy_version = session.current_train_policy_version()
         grouped_results, _failures = _execute_grouped_results(
             agent,
             session,
@@ -137,19 +164,82 @@ def train(
                 f"{exc} (call produced {len(trajectory_ids)} trajectories; "
                 f"active runtime global_batch_size={global_batch_size})"
             ) from exc
-        final_policy_version = session.current_policy_version()
+        final_policy_version = session.current_train_policy_version()
 
-    rewards = [reward for result in grouped_results for reward in result.rewards]
-    group_mean_rewards = [
-        sum(result.rewards) / len(result.rewards) for result in grouped_results
-    ]
-    return {
-        "group_size": group_size,
-        "prompt_groups": len(grouped_results),
-        "samples": len(rewards),
-        "initial_policy_version": initial_policy_version,
-        "final_policy_version": final_policy_version,
-        "max_group_reward": max(max(result.rewards) for result in grouped_results),
-        "mean_group_reward": sum(group_mean_rewards) / len(group_mean_rewards),
-        "sample_mean_reward": sum(rewards) / len(rewards),
-    }
+    return _build_train_summary(
+        grouped_results=grouped_results,
+        group_size=group_size,
+        initial_policy_version=initial_policy_version,
+        final_policy_version=final_policy_version,
+    )
+
+
+def train_async(
+    agent: _RegisteredAgent,
+    *,
+    inputs: list[dict[str, Any]],
+    group_size: int,
+    concurrency: int | None = None,
+    retries: int = 0,
+) -> dict[str, Any]:
+    """Run grouped trajectories through the gateway and return after rollout ends."""
+    if not isinstance(agent, _RegisteredAgent):
+        raise TypeError("agent must be a function registered with @ninja.agent")
+    if group_size <= 0:
+        raise ValueError("group_size must be > 0")
+    if retries < 0:
+        raise ValueError("retries must be >= 0")
+
+    call_specs, _single_request = _normalize_requests(
+        args=(),
+        kwargs={},
+        requests=inputs,
+    )
+    if not call_specs:
+        raise ValueError("inputs must not be empty")
+    for request_index, (call_args, call_kwargs) in enumerate(call_specs):
+        agent._validate_call(
+            call_args,
+            call_kwargs,
+            request_index=request_index,
+        )
+
+    resolved_concurrency = _resolve_concurrency(
+        concurrency=concurrency,
+        job_count=len(call_specs) * group_size,
+    )
+    global_batch_size: int | None = None
+    if agent._gateway_config is None:
+        global_batch_size = _try_active_global_batch_size()
+        if global_batch_size is not None and group_size > global_batch_size:
+            raise ValueError(
+                "group_size must be <= active runtime global_batch_size: "
+                f"{group_size} > {global_batch_size}"
+            )
+
+    with agent._session() as session:
+        initial_policy_version = session.current_train_policy_version()
+        grouped_results, _failures = _execute_grouped_results(
+            agent,
+            session,
+            call_specs,
+            group_size=group_size,
+            concurrency=resolved_concurrency,
+            retries=retries,
+            purpose="train",
+            raise_on_failure=True,
+        )
+        trajectory_ids = [
+            trajectory_id
+            for result in grouped_results
+            for trajectory_id in result.trajectory_ids
+        ]
+        final_policy_version = session.current_train_policy_version()
+
+    return _build_train_summary(
+        grouped_results=grouped_results,
+        group_size=group_size,
+        initial_policy_version=initial_policy_version,
+        final_policy_version=final_policy_version,
+        trajectory_ids=trajectory_ids,
+    )

@@ -14,8 +14,8 @@ from .common import _AUTO_CONCURRENCY_CAP
 
 
 class _ActiveSession:
-    REQUEST_TIMEOUT_SECONDS = 3600.0
-    EXPORT_TIMEOUT_SECONDS = 3600.0
+    REQUEST_TIMEOUT_SECONDS = 7200.0
+    EXPORT_TIMEOUT_SECONDS = 7200.0
     VALIDATION_WAIT_TIMEOUT_SECONDS = 300.0
     STATUS_POLL_INTERVAL_SECONDS = 0.1
     MAX_CONNECTIONS = _AUTO_CONCURRENCY_CAP
@@ -166,7 +166,7 @@ class _ActiveSession:
         assert isinstance(payload, dict)
         return payload
 
-    def current_policy_version(self) -> int:
+    def current_train_policy_version(self) -> int:
         response = self.get("/current_session")
         response.raise_for_status()
         payload = response.json()

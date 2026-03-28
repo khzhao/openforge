@@ -15,7 +15,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import openforge.ninja as ninja
 import ray
 from _script_test_utils import start_test_ray_cluster
 from test_gateway_real_e2e import (
@@ -35,6 +34,8 @@ from test_gateway_real_e2e_with_train import (
     record_event,
     trajectory_rows,
 )
+
+import openforge.ninja as ninja
 
 
 def parse_args() -> argparse.Namespace:
@@ -235,7 +236,7 @@ def main() -> int:
             probe_response = response.model_dump(mode="json")
             return 0.0
 
-        initial_policy_version = probe_agent.policy_version()
+        initial_policy_version = int(started["policy_version"])
         assert initial_policy_version == 0
         record_event(
             response_log_path,

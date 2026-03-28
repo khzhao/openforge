@@ -63,6 +63,8 @@ class Service:
     GENERATE_BATCH_MAX_SIZE = 320
     GENERATE_BATCH_MAX_SIZE_PER_REPLICA = 64
     GENERATE_BATCH_MAX_WAIT_SECONDS = 0.02
+    TRAIN_ADMISSION_POLL_INITIAL_SECONDS = 0.25
+    TRAIN_ADMISSION_POLL_MAX_SECONDS = 2.0
     _TOOL_CALL_PATTERN = re.compile(
         r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
         flags=re.DOTALL,
@@ -82,8 +84,10 @@ class Service:
         self._active_turn_counts: dict[str, int] = {}
         self._generate_lock = asyncio.Lock()
         self._generate_task: asyncio.Task[None] | None = None
+        self._train_admission_lock = asyncio.Lock()
         self._pending_generates: list[_PendingGenerate] = []
         self._generate_batch_max_size = self.GENERATE_BATCH_MAX_SIZE
+        self._max_untrained_train_trajectories: int | None = None
         self._runtime_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="openforge-gateway-runtime",
@@ -180,6 +184,9 @@ class Service:
                 rollout_replicas * self.GENERATE_BATCH_MAX_SIZE_PER_REPLICA,
             ),
         )
+        self._max_untrained_train_trajectories = int(
+            runtime_config.train.global_batch_size
+        ) * (int(runtime_config.train.max_rollout_policy_lag) + 1)
         train_runtime = self.runtime.train()
         self._session_logger.start(
             session_id=session_id,
@@ -253,7 +260,15 @@ class Service:
                     )
                 )
             trajectory_ids_per_group.append(trajectory_ids)
-        await self._record_active_trajectories(trajectories_to_create)
+        if purpose == "train":
+            async with self._train_admission_lock:
+                await self._wait_for_train_capacity(
+                    session_id=session_id,
+                    requested_trajectory_count=len(trajectories_to_create),
+                )
+                await self._record_active_trajectories(trajectories_to_create)
+        else:
+            await self._record_active_trajectories(trajectories_to_create)
         return StartTrajectoryGroupsResponse(
             session_id=session_id,
             trajectory_ids=trajectory_ids_per_group,
@@ -526,6 +541,7 @@ class Service:
         self._active_trajectories = {}
         self._active_turn_counts = {}
         self._generate_batch_max_size = self.GENERATE_BATCH_MAX_SIZE
+        self._max_untrained_train_trajectories = None
         self._session_logger.flush(force=True)
         self._session_logger.finish()
         await self.runtime.train().end_session()
@@ -539,6 +555,7 @@ class Service:
         self._active_trajectories = {}
         self._active_turn_counts = {}
         self._generate_batch_max_size = self.GENERATE_BATCH_MAX_SIZE
+        self._max_untrained_train_trajectories = None
         self._session_logger.finish()
         try:
             await self.runtime.shutdown()
@@ -901,6 +918,50 @@ class Service:
         for trajectory in trajectories:
             self._active_trajectories[trajectory.trajectory_id] = trajectory
             self._active_turn_counts[trajectory.trajectory_id] = 0
+
+    async def _wait_for_train_capacity(
+        self,
+        *,
+        session_id: str,
+        requested_trajectory_count: int,
+    ) -> None:
+        max_untrained = self._max_untrained_train_trajectories
+        if max_untrained is None:
+            return
+        if requested_trajectory_count > max_untrained:
+            raise Exception(
+                "requested train trajectories exceed in-flight capacity: "
+                f"{requested_trajectory_count} > {max_untrained}"
+            )
+        sleep_seconds = self.TRAIN_ADMISSION_POLL_INITIAL_SECONDS
+        while True:
+            if self._active_session_id != session_id:
+                raise Exception(f"session {session_id} is not active")
+            untrained_count = await self._count_untrained_train_trajectories(
+                session_id=session_id
+            )
+            if untrained_count + requested_trajectory_count <= max_untrained:
+                return
+            await asyncio.sleep(sleep_seconds)
+            sleep_seconds = min(
+                sleep_seconds * 2.0,
+                self.TRAIN_ADMISSION_POLL_MAX_SECONDS,
+            )
+
+    async def _count_untrained_train_trajectories(
+        self,
+        *,
+        session_id: str,
+    ) -> int:
+        active_train_count = sum(
+            1
+            for trajectory in self._active_trajectories.values()
+            if trajectory.session_id == session_id and trajectory.purpose == "train"
+        )
+        completed_train_count = len(
+            await self.store.list_trajectories(session_id, status="completed")
+        )
+        return active_train_count + completed_train_count
 
     @staticmethod
     def _build_generate_response(

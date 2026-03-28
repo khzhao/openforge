@@ -147,7 +147,7 @@ def validate(
         job_count=len(call_specs),
     )
     with agent._session() as session:
-        policy_version = session.current_policy_version()
+        policy_version = session.current_train_policy_version()
         session.wait_for_rollout_policy_version(
             policy_version=policy_version,
             timeout=wait_timeout,

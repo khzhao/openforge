@@ -38,7 +38,7 @@ from .session import (
     _ModelsClient,
     _TrajectoryClient,
 )
-from .training import _wait_for_trained_trajectories, train
+from .training import _wait_for_trained_trajectories, train, train_async
 from .validation import (
     _build_validation_update,
     _load_request_rows,
@@ -49,6 +49,7 @@ from .validation import (
 __all__ = [
     "agent",
     "train",
+    "train_async",
     "validate",
     "httpx",
     "active_state",

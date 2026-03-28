@@ -971,14 +971,13 @@ def test_register_retries_single_finish_on_remote_protocol_error() -> None:
     assert fake_gateway.failed == []
 
 
-def test_agent_checkpoint_and_policy_accessors() -> None:
+def test_agent_checkpoint_accessor() -> None:
     @ninja.agent(_gateway_config())
     def agent(prompt: str) -> float:
         _ = prompt
         return 1.0
 
     with _patched_ninja():
-        assert agent.policy_version() == 0
         assert agent.save() == {
             "session_id": "sess_1",
             "policy_version": 0,
@@ -1017,6 +1016,41 @@ def test_module_train_runs_grouped_rollouts_and_waits_for_training() -> None:
     assert all(
         fake_gateway.trajectory_statuses[trajectory_id] == "trained"
         for trajectory_id, _reward in fake_gateway.finished
+    )
+
+
+def test_module_train_async_returns_after_rollout_completes() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return 1.0 if response.choices[0].message.content else -1.0
+
+    with _patched_ninja() as fake_gateway:
+        summary = ninja.train_async(
+            agent,
+            inputs=[{"prompt": "hello"}],
+            group_size=2,
+            concurrency=2,
+        )
+
+    assert summary == {
+        "group_size": 2,
+        "prompt_groups": 1,
+        "samples": 2,
+        "initial_policy_version": 0,
+        "final_policy_version": 0,
+        "max_group_reward": 1.0,
+        "mean_group_reward": 1.0,
+        "sample_mean_reward": 1.0,
+        "trajectory_ids": ["traj_1", "traj_2"],
+    }
+    assert fake_gateway.policy_version == 0
+    assert all(
+        fake_gateway.trajectory_statuses[trajectory_id] == "completed"
+        for trajectory_id in summary["trajectory_ids"]
     )
 
 
@@ -1195,8 +1229,9 @@ def main() -> int:
             test_sample_validates_requests_before_connecting,
             test_register_retries_single_finish_on_read_error,
             test_register_retries_single_fail_on_read_error,
-            test_agent_checkpoint_and_policy_accessors,
+            test_agent_checkpoint_accessor,
             test_module_train_runs_grouped_rollouts_and_waits_for_training,
+            test_module_train_async_returns_after_rollout_completes,
             test_module_train_validates_requests_before_connecting,
             test_module_train_preflights_against_active_runtime_global_batch_size,
             test_module_train_skips_active_runtime_preflight_for_explicit_gateway,

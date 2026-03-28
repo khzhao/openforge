@@ -12,7 +12,7 @@ from _script_test_utils import expect_raises, install_test_stubs, run_tests
 
 install_test_stubs()
 
-from openforge.data import SQLiteOpenForgeStore
+from openforge.data import SQLiteOpenForgeStore, Trajectory
 from openforge.gateway.runtime import (
     Generation,
     Runtime,
@@ -542,6 +542,55 @@ def test_gateway_service_validation_trajectories_are_not_persisted() -> None:
     asyncio.run(run())
 
 
+def test_gateway_service_blocks_train_group_admission_until_capacity_frees() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+            runtime = _FakeRuntime()
+            service = Service(store=store, runtime=runtime)
+
+            session = await service.start_session(**_start_session_kwargs("model-a"))
+            first = await service.start_trajectory_groups(
+                session_id=session.session_id,
+                counts=[1],
+                group_ids=[None],
+            )
+            first_trajectory_id = first.trajectory_ids[0][0]
+
+            second_task = asyncio.create_task(
+                service.start_trajectory_groups(
+                    session_id=session.session_id,
+                    counts=[1],
+                    group_ids=[None],
+                )
+            )
+            await asyncio.sleep(service.TRAIN_ADMISSION_POLL_INITIAL_SECONDS * 2)
+            assert second_task.done() is False
+
+            await service.end_trajectory(
+                session_id=session.session_id,
+                trajectory_id=first_trajectory_id,
+                final_reward=1.0,
+            )
+            await asyncio.sleep(service.TRAIN_ADMISSION_POLL_INITIAL_SECONDS * 2)
+            assert second_task.done() is False
+
+            await store.update_trajectory(
+                Trajectory(
+                    trajectory_id=first_trajectory_id,
+                    session_id=session.session_id,
+                    group_id=None,
+                    status="trained",
+                    final_reward=1.0,
+                )
+            )
+            second = await asyncio.wait_for(second_task, timeout=3.0)
+            assert second.trajectory_ids[0][0] != first_trajectory_id
+            await store.close()
+
+    asyncio.run(run())
+
+
 def test_gateway_service_reports_trajectory_statuses() -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -943,6 +992,7 @@ def main() -> int:
             test_gateway_service_start_generate_and_end,
             test_gateway_service_current_session_tracks_active_model,
             test_gateway_service_validation_trajectories_are_not_persisted,
+            test_gateway_service_blocks_train_group_admission_until_capacity_frees,
             test_gateway_service_reports_trajectory_statuses,
             test_gateway_service_status_includes_gateway_train_and_rollout,
             test_gateway_service_start_session_rejects_second_active_session,

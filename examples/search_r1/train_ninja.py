@@ -436,12 +436,13 @@ def main() -> int:
             validation_updates.append(validation_event)
             print_validation_update(validation_event)
 
+    final_checkpoint = search_agent.save()
     summary = {
         "artifact_dir": str(artifact_dir),
         "completed_updates": len(train_updates),
         "expected_updates": train_plan["expected_updates"],
-        "final_checkpoint": search_agent.save(),
-        "final_policy_version": search_agent.policy_version(),
+        "final_checkpoint": final_checkpoint,
+        "final_policy_version": final_checkpoint["policy_version"],
         "global_batch_size": train_plan["global_batch_size"],
         "group_size": args.group_size,
         "input_key": args.input_key,

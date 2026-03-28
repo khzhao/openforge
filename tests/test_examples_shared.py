@@ -106,7 +106,7 @@ class _FakeSession:
     def __init__(self) -> None:
         self.policy_version = 0
 
-    def current_policy_version(self) -> int:
+    def current_train_policy_version(self) -> int:
         return self.policy_version
 
 
