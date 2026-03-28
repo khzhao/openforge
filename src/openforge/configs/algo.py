@@ -15,6 +15,8 @@ __all__ = [
 
 class _GRPOBaseConfig(OpenForgeBaseModel):
     clip_range: float = 0.2
+    clip_range_low: float | None = None
+    clip_range_high: float | None = None
     normalize_group_std: bool = True
     entropy_coef: float = 0.0
     kl_coef: float = 0.0
@@ -23,6 +25,10 @@ class _GRPOBaseConfig(OpenForgeBaseModel):
     def _validate_grpo(self) -> "_GRPOBaseConfig":
         if self.clip_range < 0.0:
             raise ValueError("clip_range must be >= 0.0")
+        if self.clip_range_low is not None and self.clip_range_low < 0.0:
+            raise ValueError("clip_range_low must be >= 0.0")
+        if self.clip_range_high is not None and self.clip_range_high < 0.0:
+            raise ValueError("clip_range_high must be >= 0.0")
         if self.entropy_coef < 0.0:
             raise ValueError("entropy_coef must be >= 0.0")
         if self.kl_coef < 0.0:

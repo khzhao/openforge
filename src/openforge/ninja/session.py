@@ -186,20 +186,18 @@ class _ActiveSession:
         policy_version: int,
         timeout: float = VALIDATION_WAIT_TIMEOUT_SECONDS,
     ) -> None:
-        deadline = time.monotonic() + timeout
-        while True:
-            status = self.status()
-            rollout = status.get("rollout", {})
-            if isinstance(rollout, dict):
-                min_weight_version = int(rollout.get("min_weight_version", 0))
-                if min_weight_version >= policy_version:
-                    return
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    "timed out waiting for rollout to load policy_version "
-                    f"{policy_version}"
-                )
-            time.sleep(self.STATUS_POLL_INTERVAL_SECONDS)
+        response = self._retry_post(
+            "/wait_for_rollout_policy_version",
+            {
+                "session_id": self.session_id,
+                "policy_version": policy_version,
+                "timeout_s": timeout,
+            },
+            timeout=max(10.0, timeout + 5.0),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        assert isinstance(payload, dict)
 
     def log_validation_update(self, payload: dict[str, object]) -> None:
         self._retry_post(
@@ -254,10 +252,12 @@ class _ActiveSession:
         self,
         path: str,
         payload: dict[str, Any],
+        *,
+        timeout: float | None = None,
     ) -> httpx.Response:
         for attempt in range(self.END_RETRIES):
             try:
-                response = self.post(path, payload)
+                response = self.post(path, payload, timeout=timeout)
                 response.raise_for_status()
                 return response
             except httpx.TransportError:

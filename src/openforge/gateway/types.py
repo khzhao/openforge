@@ -53,6 +53,8 @@ __all__ = [
     "TrajectoryStatusesResponse",
     "ValidationUpdateRequest",
     "ValidationUpdateResponse",
+    "WaitForRolloutPolicyVersionRequest",
+    "WaitForRolloutPolicyVersionResponse",
     "WandbConfig",
     "chat_message_payload",
     "tool_payloads",
@@ -401,6 +403,23 @@ class ValidationUpdateResponse(BaseModel):
 
     session_id: str
     status: Literal["logged"] = "logged"
+
+
+class WaitForRolloutPolicyVersionRequest(BaseModel):
+    """Request payload for waiting until rollout loads a target policy version."""
+
+    session_id: str
+    policy_version: int
+    timeout_s: float
+
+
+class WaitForRolloutPolicyVersionResponse(BaseModel):
+    """Response payload for one rollout policy-version wait."""
+
+    session_id: str
+    policy_version: int
+    min_weight_version: int
+    status: Literal["ready"] = "ready"
 
 
 def chat_message_payload(message: ChatCompletionMessage) -> dict[str, Any]:

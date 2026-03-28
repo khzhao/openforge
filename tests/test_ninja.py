@@ -152,6 +152,8 @@ class _FakeGateway:
         self.status_calls = 0
         self.validation_updates: list[dict[str, object]] = []
         self.rollout_min_weight_versions: list[int] = []
+        self.rollout_wait_calls = 0
+        self.rollout_wait_checks = 0
         self._transport_errors: dict[
             tuple[str, str], tuple[int, type[httpx.TransportError]]
         ] = {}
@@ -477,6 +479,43 @@ class _FakeGateway:
                     "status": "logged",
                 },
             )
+
+        if method == "POST" and path == "/wait_for_rollout_policy_version":
+            assert payload is not None
+            policy_version = int(payload["policy_version"])
+            timeout_s = float(payload["timeout_s"])
+            deadline = time.monotonic() + timeout_s
+            with self._lock:
+                self.rollout_wait_calls += 1
+            while True:
+                with self._lock:
+                    self.rollout_wait_checks += 1
+                    min_weight_version = (
+                        self.rollout_min_weight_versions.pop(0)
+                        if self.rollout_min_weight_versions
+                        else self.policy_version
+                    )
+                if min_weight_version >= policy_version:
+                    return _FakeResponse(
+                        200,
+                        {
+                            "session_id": self.active_session_id,
+                            "policy_version": policy_version,
+                            "min_weight_version": min_weight_version,
+                            "status": "ready",
+                        },
+                    )
+                if time.monotonic() >= deadline:
+                    return _FakeResponse(
+                        400,
+                        {
+                            "detail": (
+                                "timed out waiting for rollout to load "
+                                f"policy_version {policy_version}"
+                            )
+                        },
+                    )
+                time.sleep(ninja._ActiveSession.STATUS_POLL_INTERVAL_SECONDS)
 
         raise AssertionError(f"unexpected request: {method} {path}")
 
@@ -1206,7 +1245,8 @@ def test_validate_waits_for_rollout_to_load_latest_policy_version() -> None:
                 )
 
     assert summary["policy_version"] == 2
-    assert fake_gateway.status_calls == 3
+    assert fake_gateway.rollout_wait_calls == 1
+    assert fake_gateway.rollout_wait_checks == 3
     assert all(call["purpose"] == "validation" for call in fake_gateway.generate_calls)
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import copy
 import json
-import math
 import os
 import pickle
 import random
@@ -115,27 +114,28 @@ runpy.run_path(sys.argv[1], run_name="__main__")
 """
 
 
+def _parse_signature(starter_code: str) -> str:
+    if "def " in starter_code:
+        return "def " + starter_code.split("def ", 1)[1].split("Input\n", 1)[0].strip()
+    return starter_code.strip()
+
+
 def build_livecodebench_prompt(
     question: str,
     *,
     starter_code: str | None = None,
 ) -> str:
-    """Build a code-generation prompt from a problem statement and starter code."""
+    """Build the SDPO-style LiveCodeBench prompt text."""
     parts = [question.rstrip()]
     if starter_code:
         parts.extend(
             [
                 "",
-                "Complete the following Python starter code:",
-                f"```python\n{starter_code.rstrip()}\n```",
+                "Your solution should have the following signature: ```python",
+                _parse_signature(starter_code),
+                "```",
             ]
         )
-    parts.extend(
-        [
-            "",
-            "Return only valid Python code in a single ```python``` block.",
-        ]
-    )
     return "\n".join(parts).strip()
 
 

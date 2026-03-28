@@ -203,6 +203,8 @@ class _FakeRuntime:
         self.last_trajectory_ids: list[str] | None = None
         self.released_trajectory_ids: list[list[str]] = []
         self.shutdown_count = 0
+        self.rollout_min_weight_versions: list[int] = []
+        self.rollout_status_calls = 0
 
     def list_models(self) -> list[str]:
         return list(self._supported_models)
@@ -272,18 +274,27 @@ class _FakeRuntime:
     def train(self) -> _FakeTrainRuntime:
         return self._train
 
+    def rollout_status(self) -> dict[str, object]:
+        self.rollout_status_calls += 1
+        min_weight_version = (
+            self.rollout_min_weight_versions.pop(0)
+            if self.rollout_min_weight_versions
+            else 0
+        )
+        return {
+            "heartbeat_age_s": 0.0,
+            "latest_published_train_version": 0,
+            "min_weight_version": min_weight_version,
+            "max_weight_version": min_weight_version,
+            "stale_worker_count": 0,
+            "workers": {},
+        }
+
     def status(self) -> dict[str, object]:
         return {
             "current_model": self._current_model,
             "train": self._train.status(),
-            "rollout": {
-                "heartbeat_age_s": 0.0,
-                "latest_published_train_version": 0,
-                "min_weight_version": 0,
-                "max_weight_version": 0,
-                "stale_worker_count": 0,
-                "workers": {},
-            },
+            "rollout": self.rollout_status(),
             "cluster": {},
         }
 
@@ -538,6 +549,35 @@ def test_gateway_service_validation_trajectories_are_not_persisted() -> None:
             assert runtime.released_trajectory_ids == [[started.trajectory_id]]
             assert await store.list_trajectories(session.session_id) == []
             await store.close()
+
+    asyncio.run(run())
+
+
+def test_gateway_service_waits_for_rollout_policy_version() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+            runtime = _FakeRuntime()
+            runtime.rollout_min_weight_versions = [0, 1, 2]
+            service = Service(store=store, runtime=runtime)
+            session = await service.start_session(**_start_session_kwargs("model-a"))
+            original_poll = service.ROLLOUT_VERSION_POLL_SECONDS
+            service.ROLLOUT_VERSION_POLL_SECONDS = 0.001
+            try:
+                response = await service.wait_for_rollout_policy_version(
+                    session_id=session.session_id,
+                    policy_version=2,
+                    timeout_s=1.0,
+                )
+            finally:
+                service.ROLLOUT_VERSION_POLL_SECONDS = original_poll
+
+            assert response.session_id == session.session_id
+            assert response.policy_version == 2
+            assert response.min_weight_version == 2
+            assert runtime.rollout_status_calls == 3
+
+            await service.shutdown()
 
     asyncio.run(run())
 

@@ -18,6 +18,9 @@ from examples.livecodebench_lcb_v6.task import (
     decode_livecodebench_private_test_cases,
 )
 from examples.shared import add_train_cli_args, load_runtime_config, make_artifact_dir
+from openforge.utils.processing import load_tokenizer
+
+_MAX_PROMPT_TOKENS = 2048
 
 
 @dataclass(slots=True)
@@ -49,8 +52,9 @@ def build_train_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-top-k", type=int, default=None)
     parser.add_argument("--repetition-penalty", type=float, default=None)
     parser.add_argument("--train-max-new-tokens", type=int, default=None)
-    parser.add_argument("--judge-timeout", type=float, default=5.0)
+    parser.add_argument("--judge-timeout", type=float, default=6.0)
     parser.add_argument("--judge-memory-mb", type=int, default=1024)
+    parser.add_argument("--validation-data", default=None)
     return parser
 
 
@@ -66,12 +70,19 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         prefix="livecodebench-ninja-",
     )
     runtime_config = load_runtime_config(args.runtime_config)
-    examples = load_train_examples(
+    train_examples = load_examples(
         path=args.prompt_data,
+        split_name="train",
         seed=args.seed,
         max_examples=args.max_train_examples,
         judge_timeout=args.judge_timeout,
         judge_memory_mb=args.judge_memory_mb,
+    )
+    train_examples, dropped_train_examples = _filter_overlong_prompt_examples(
+        train_examples,
+        tokenizer_name_or_path=runtime_config.model.tokenizer_name_or_path,
+        chat_template_kwargs=runtime_config.model.chat_template_kwargs,
+        max_prompt_tokens=_MAX_PROMPT_TOKENS,
     )
     sampling_params = {
         "temperature": (
@@ -100,14 +111,32 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
             else args.train_max_new_tokens
         ),
     }
-    inputs = [
-        {
-            "prompt": example.prompt,
-            "reward_spec": example.reward_spec,
-            "problem_id": example.problem_id,
-        }
-        for example in examples
-    ]
+    inputs = [_example_request(example) for example in train_examples]
+    validation_path: Path | None = None
+    validation_examples = 0
+    dropped_validation_examples = 0
+    validation_data = (
+        args.prompt_data if args.validation_data is None else args.validation_data
+    )
+    if args.validation_every_updates > 0:
+        validation_rows = load_examples(
+            path=validation_data,
+            split_name="validation",
+            seed=args.seed,
+            max_examples=args.max_validation_examples,
+            judge_timeout=args.judge_timeout,
+            judge_memory_mb=args.judge_memory_mb,
+        )
+        validation_rows, dropped_validation_examples = _filter_overlong_prompt_examples(
+            validation_rows,
+            tokenizer_name_or_path=runtime_config.model.tokenizer_name_or_path,
+            chat_template_kwargs=runtime_config.model.chat_template_kwargs,
+            max_prompt_tokens=_MAX_PROMPT_TOKENS,
+        )
+        validation_inputs = [_example_request(example) for example in validation_rows]
+        validation_path = artifact_dir / "data" / "validation.jsonl"
+        _write_jsonl(validation_path, validation_inputs)
+        validation_examples = len(validation_inputs)
     summary = {
         "artifact_dir": str(artifact_dir),
         "group_size": args.group_size,
@@ -115,7 +144,8 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         "model_path": runtime_config.model.model_name_or_path,
         "global_batch_size": runtime_config.train.global_batch_size,
         "total_epochs": args.total_epochs,
-        "train_examples": len(examples),
+        "train_examples": len(train_examples),
+        "dropped_train_examples_over_prompt_limit": dropped_train_examples,
         "train_group_parallelism": (
             "auto"
             if args.train_group_parallelism is None
@@ -124,6 +154,13 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         "train_group_retries": args.train_group_retries,
         "train_sampling": sampling_params,
         "prompt_data": args.prompt_data,
+        "validation_data": validation_data,
+        "validation_every_updates": args.validation_every_updates,
+        "validation_examples": validation_examples,
+        "dropped_validation_examples_over_prompt_limit": (
+            dropped_validation_examples
+        ),
+        "max_prompt_tokens": _MAX_PROMPT_TOKENS,
         "judge_timeout": args.judge_timeout,
         "judge_memory_mb": args.judge_memory_mb,
     }
@@ -133,19 +170,21 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         "sampling_params": sampling_params,
         "summary": summary,
         "summary_path": artifact_dir / "summary.json",
+        "validation_path": validation_path,
     }
 
 
-def load_train_examples(
+def load_examples(
     *,
     path: str,
+    split_name: str,
     seed: int,
     max_examples: int | None,
     judge_timeout: float,
     judge_memory_mb: int,
 ) -> list[LiveCodeBenchExample]:
     """Load and normalize rows from a local LiveCodeBench-style dataset."""
-    input_path = _resolve_data_path(path, split_name="train")
+    input_path = _resolve_data_path(path, split_name=split_name)
     suffix = input_path.suffix
     row_iterable: list[dict[str, Any]] | datasets.Dataset
     if suffix == ".parquet":
@@ -179,6 +218,45 @@ def load_train_examples(
         if max_examples is not None and len(examples) >= max_examples:
             break
     return examples
+
+
+def _example_request(example: LiveCodeBenchExample) -> dict[str, Any]:
+    return {
+        "prompt": example.prompt,
+        "reward_spec": example.reward_spec,
+        "problem_id": example.problem_id,
+    }
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+
+def _filter_overlong_prompt_examples(
+    examples: list[LiveCodeBenchExample],
+    *,
+    tokenizer_name_or_path: str,
+    chat_template_kwargs: dict[str, Any],
+    max_prompt_tokens: int,
+) -> tuple[list[LiveCodeBenchExample], int]:
+    tokenizer = load_tokenizer(tokenizer_name_or_path, trust_remote_code=True)
+    kept: list[LiveCodeBenchExample] = []
+    dropped = 0
+    for example in examples:
+        token_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": example.prompt}],
+            tokenize=True,
+            add_generation_prompt=True,
+            **chat_template_kwargs,
+        )
+        if len(token_ids) <= max_prompt_tokens:
+            kept.append(example)
+        else:
+            dropped += 1
+    return kept, dropped
 
 
 def _normalize_problem_row(

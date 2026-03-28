@@ -113,6 +113,7 @@ class Runtime:
                 tokenize=True,
                 add_generation_prompt=True,
                 tools=tool_payloads(list(tools) if tools is not None else None),
+                **self._runtime_cfg.model.chat_template_kwargs,
             )
         except Exception as exc:
             raise Exception(
@@ -139,6 +140,7 @@ class Runtime:
                 tokenize=True,
                 add_generation_prompt=True,
                 tools=tool_payloads(list(tools) if tools is not None else None),
+                **self._runtime_cfg.model.chat_template_kwargs,
             )
         except Exception as exc:
             raise Exception(
@@ -188,6 +190,12 @@ class Runtime:
         slot = self._slot
         assert slot is not None
         return slot.train_runtime
+
+    def rollout_status(self) -> dict[str, Any]:
+        slot = self._slot
+        if slot is None:
+            return {}
+        return slot.rollout_manager.status()
 
     def status(self) -> dict[str, Any]:
         slot = self._slot

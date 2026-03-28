@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -40,11 +41,14 @@ from openforge.gateway.types import (
     TrajectoryStatusesResponse,
     ValidationUpdateRequest,
     ValidationUpdateResponse,
+    WaitForRolloutPolicyVersionRequest,
+    WaitForRolloutPolicyVersionResponse,
 )
 
 __all__ = ["create_app"]
 
 ResponseT = TypeVar("ResponseT")
+_LOG = logging.getLogger(__name__)
 
 
 def _build_store(cfg: GatewayServerConfig) -> SQLiteOpenForgeStore:
@@ -57,6 +61,7 @@ async def _invoke(operation: Awaitable[ResponseT]) -> ResponseT:
     try:
         return await operation
     except Exception as exc:
+        _LOG.exception("gateway request failed")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -242,6 +247,21 @@ def create_app(
             service.log_validation_update(
                 session_id=payload.session_id,
                 payload=payload.payload,
+            )
+        )
+
+    @app.post(
+        "/wait_for_rollout_policy_version",
+        response_model=WaitForRolloutPolicyVersionResponse,
+    )
+    async def wait_for_rollout_policy_version(
+        payload: WaitForRolloutPolicyVersionRequest,
+    ) -> WaitForRolloutPolicyVersionResponse:
+        return await _invoke(
+            service.wait_for_rollout_policy_version(
+                session_id=payload.session_id,
+                policy_version=payload.policy_version,
+                timeout_s=payload.timeout_s,
             )
         )
 

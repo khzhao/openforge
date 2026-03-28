@@ -8,6 +8,8 @@ Gateway-first post-training for LLM agents. RL-as-a-Service (RLaaS).
 
 Train the agent, not the glue code.
 
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)
+![API](https://img.shields.io/badge/API-OpenAI--Compatible-0f766e)
 ![License](https://img.shields.io/badge/License-Apache%202.0-7c3aed)
 
 ## News

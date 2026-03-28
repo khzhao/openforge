@@ -58,19 +58,29 @@ class GRPOAlgorithm:
         ref_log_probs: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         ratio = (curr_log_probs - old_log_probs).exp()
+        clip_range_low = (
+            self.cfg.clip_range
+            if self.cfg.clip_range_low is None
+            else self.cfg.clip_range_low
+        )
+        clip_range_high = (
+            self.cfg.clip_range
+            if self.cfg.clip_range_high is None
+            else self.cfg.clip_range_high
+        )
         clipped_ratio = ratio.clamp(
-            min=1.0 - self.cfg.clip_range,
-            max=1.0 + self.cfg.clip_range,
+            min=1.0 - clip_range_low,
+            max=1.0 + clip_range_high,
         )
         if self.cfg.name == "grpo_tis":
             assert rollout_log_probs is not None
             tis = (old_log_probs - rollout_log_probs).exp().clamp(max=self.cfg.tis_cap)
         else:
             tis = 1.0
-        policy_loss = -torch.minimum(
-            tis * ratio * advantages,
-            tis * clipped_ratio * advantages,
-        )
+        pg_losses1 = -advantages * ratio
+        pg_losses2 = -advantages * clipped_ratio
+        policy_loss = torch.maximum(pg_losses1, pg_losses2)
+        policy_loss = policy_loss * tis
         loss = (policy_loss * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)
         outputs = {
             "loss": loss,

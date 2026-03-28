@@ -1,4 +1,5 @@
 # Copyright 2026 openforge
+# ruff: noqa: D103
 
 from __future__ import annotations
 
@@ -79,3 +80,17 @@ def test_grpo_entropy_bonus_reduces_loss() -> None:
     assert "entropy_loss" in outputs
     torch.testing.assert_close(outputs["entropy_loss"], torch.tensor(0.75))
     torch.testing.assert_close(outputs["loss"], outputs["pg_loss"] - torch.tensor(0.225))
+
+
+def test_grpo_uses_asymmetric_upper_clip_when_configured() -> None:
+    algo = GRPOAlgorithm(GRPOConfig(clip_range=0.2, clip_range_high=0.28))
+
+    outputs = algo.compute_loss(
+        curr_log_probs=torch.tensor([0.5]),
+        old_log_probs=torch.tensor([0.0]),
+        rollout_log_probs=None,
+        advantages=torch.tensor([1.0]),
+        loss_mask=torch.tensor([1.0]),
+    )
+
+    torch.testing.assert_close(outputs["loss"], torch.tensor(-1.28))

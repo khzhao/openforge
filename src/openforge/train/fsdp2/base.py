@@ -321,6 +321,11 @@ class FSDP2Engine(TrainBackend):
         model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             attn_implementation=attn_implementation,
+            torch_dtype=(
+                None
+                if self.cfg.model.load_dtype is None
+                else get_torch_dtype(self.cfg.model.load_dtype)
+            ),
             trust_remote_code=True,
         )
         if not is_eval_only and fsdp_cfg.gradient_checkpointing:

@@ -12,6 +12,8 @@ SESSION_LOG="$JOB_DIR/session.log"
 GATEWAY_DB="$JOB_DIR/gateway.sqlite3"
 GATEWAY_CONFIG="$JOB_DIR/gateway.yaml"
 TRAIN_GROUP_PARALLELISM="${OPENFORGE_TRAIN_GROUP_PARALLELISM:-64}"
+VALIDATION_EVERY_UPDATES="${OPENFORGE_VALIDATION_EVERY_UPDATES:-5}"
+MAX_VALIDATION_EXAMPLES="${OPENFORGE_MAX_VALIDATION_EXAMPLES:-}"
 
 mkdir -p "$JOB_DIR"
 
@@ -29,6 +31,8 @@ echo "GATEWAY_LOG=$GATEWAY_LOG"
 echo "SESSION_LOG=$SESSION_LOG"
 echo "ARTIFACT_DIR=$ARTIFACT_DIR"
 echo "TRAIN_GROUP_PARALLELISM=$TRAIN_GROUP_PARALLELISM"
+echo "VALIDATION_EVERY_UPDATES=$VALIDATION_EVERY_UPDATES"
+echo "MAX_VALIDATION_EXAMPLES=$MAX_VALIDATION_EXAMPLES"
 
 python - "$ROOT/examples/livecodebench_lcb_v6/gateway.yaml" "$GATEWAY_CONFIG" "$GATEWAY_DB" <<'PY'
 from pathlib import Path
@@ -63,7 +67,15 @@ openforge session start \
 echo "Session started; logs: $SESSION_LOG"
 
 echo "Starting training..."
-PYTHONUNBUFFERED=1 python -m examples.livecodebench_lcb_v6.train_ninja \
+train_cmd=(
+  python -m examples.livecodebench_lcb_v6.train_ninja
   --artifact-dir "$ARTIFACT_DIR" \
   --train-group-parallelism "$TRAIN_GROUP_PARALLELISM" \
-  "$@"
+  --validation-every-updates "$VALIDATION_EVERY_UPDATES" \
+)
+
+if [[ -n "$MAX_VALIDATION_EXAMPLES" ]]; then
+  train_cmd+=(--max-validation-examples "$MAX_VALIDATION_EXAMPLES")
+fi
+
+PYTHONUNBUFFERED=1 "${train_cmd[@]}" "$@"

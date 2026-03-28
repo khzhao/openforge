@@ -1,7 +1,7 @@
 # Copyright 2026 openforge
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import Field, model_validator
@@ -33,6 +33,8 @@ class ModelConfig(OpenForgeBaseModel):
     tokenizer_name_or_path: str
     reference_model_name_or_path: str | None = None
     attn_implementation: Literal["flash_attention_2", "eager", "sdpa"] = "sdpa"
+    load_dtype: Literal["float32", "float16", "bfloat16"] | None = None
+    chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
 class OpenForgeConfig(OpenForgeBaseModel):

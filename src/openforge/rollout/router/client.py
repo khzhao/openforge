@@ -18,6 +18,9 @@ __all__ = ["RolloutRouter", "RolloutRouterClient"]
 class RolloutRouterClient(SGLangClient):
     """HTTP client for the OpenForge rollout router."""
 
+    STATUS_TIMEOUT_SECONDS = 60.0
+    CONTROL_TIMEOUT_SECONDS = 30.0
+
     @property
     def url(self) -> str:
         return self.base_url
@@ -48,14 +51,14 @@ class RolloutRouterClient(SGLangClient):
     def health(self, *, timeout: float = 1.0) -> bool:
         return self._ok("GET", "/health", timeout=timeout)
 
-    def status(self, *, timeout: float = 5.0) -> dict[str, Any]:
+    def status(self, *, timeout: float = STATUS_TIMEOUT_SECONDS) -> dict[str, Any]:
         return self._get_json("/status", timeout=timeout)
 
     def register_train_server(
         self,
         *,
         train_server_url: str,
-        timeout: float = 5.0,
+        timeout: float = CONTROL_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         return self._post_json(
             "/register_train_server",
@@ -67,7 +70,7 @@ class RolloutRouterClient(SGLangClient):
         self,
         *,
         policy_version: int,
-        timeout: float = 5.0,
+        timeout: float = CONTROL_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         return self._post_json(
             "/receive_policy_version",
@@ -79,7 +82,7 @@ class RolloutRouterClient(SGLangClient):
         self,
         *,
         trajectory_ids: Sequence[str],
-        timeout: float = 5.0,
+        timeout: float = CONTROL_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         return self._post_json(
             "/release_trajectories",
@@ -95,7 +98,7 @@ class RolloutRouterClient(SGLangClient):
 class RolloutRouter(RolloutRouterClient):
     """Lightweight client wrapper for the rollout router service."""
 
-    REQUEST_TIMEOUT_SECONDS = 5.0
+    REQUEST_TIMEOUT_SECONDS = 30.0
     POLL_INTERVAL_SECONDS = 0.1
 
     def __init__(self, base_url: str) -> None:

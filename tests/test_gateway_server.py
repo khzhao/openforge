@@ -201,6 +201,8 @@ class _FakeRuntime:
         self.last_trajectory_ids: list[str] | None = None
         self.released_trajectory_ids: list[list[str]] = []
         self.shutdown_count = 0
+        self.rollout_min_weight_versions: list[int] = []
+        self.rollout_status_calls = 0
 
     def list_models(self) -> list[str]:
         return list(self._supported_models)
@@ -270,18 +272,27 @@ class _FakeRuntime:
     def train(self) -> _FakeTrainRuntime:
         return self._train
 
+    def rollout_status(self) -> dict[str, object]:
+        self.rollout_status_calls += 1
+        min_weight_version = (
+            self.rollout_min_weight_versions.pop(0)
+            if self.rollout_min_weight_versions
+            else 0
+        )
+        return {
+            "heartbeat_age_s": 0.0,
+            "latest_published_train_version": 0,
+            "min_weight_version": min_weight_version,
+            "max_weight_version": min_weight_version,
+            "stale_worker_count": 0,
+            "workers": {},
+        }
+
     def status(self) -> dict[str, object]:
         return {
             "current_model": self._current_model,
             "train": self._train.status(),
-            "rollout": {
-                "heartbeat_age_s": 0.0,
-                "latest_published_train_version": 0,
-                "min_weight_version": 0,
-                "max_weight_version": 0,
-                "stale_worker_count": 0,
-                "workers": {},
-            },
+            "rollout": self.rollout_status(),
             "cluster": {},
         }
 
@@ -491,6 +502,36 @@ def test_gateway_http_health_and_models_reflect_loaded_model() -> None:
                 status = client.get("/status")
                 assert status.status_code == 200
                 assert status.json()["session_id"] == started.json()["session_id"]
+
+
+def test_gateway_http_waits_for_rollout_policy_version() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+        runtime = _FakeRuntime()
+        runtime.rollout_min_weight_versions = [0, 1, 2]
+        with _patched_app(store=store, runtime=runtime) as app:
+            with TestClient(app) as client:
+                started = client.post(
+                    "/start_session", json=_start_session_payload("model-a")
+                )
+                assert started.status_code == 200
+                session_id = started.json()["session_id"]
+                wait = client.post(
+                    "/wait_for_rollout_policy_version",
+                    json={
+                        "session_id": session_id,
+                        "policy_version": 2,
+                        "timeout_s": 1.0,
+                    },
+                )
+                assert wait.status_code == 200
+                assert wait.json() == {
+                    "session_id": session_id,
+                    "policy_version": 2,
+                    "min_weight_version": 2,
+                    "status": "ready",
+                }
+                assert runtime.rollout_status_calls == 3
 
 
 def test_gateway_http_updates_shared_state_for_gateway_and_session() -> None:

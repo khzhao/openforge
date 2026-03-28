@@ -36,6 +36,7 @@ from openforge.gateway.types import (
     TrajectoryStatusesResponse,
     TrajectoryStatusInfo,
     ValidationUpdateResponse,
+    WaitForRolloutPolicyVersionResponse,
 )
 from openforge.logging import SessionLogger
 
@@ -65,6 +66,7 @@ class Service:
     GENERATE_BATCH_MAX_WAIT_SECONDS = 0.02
     TRAIN_ADMISSION_POLL_INITIAL_SECONDS = 0.25
     TRAIN_ADMISSION_POLL_MAX_SECONDS = 2.0
+    ROLLOUT_VERSION_POLL_SECONDS = 0.1
     _TOOL_CALL_PATTERN = re.compile(
         r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
         flags=re.DOTALL,
@@ -583,6 +585,40 @@ class Service:
             rollout_status=rollout_status,
             cluster_status=cluster_status,
         )
+
+    async def wait_for_rollout_policy_version(
+        self,
+        *,
+        session_id: str,
+        policy_version: int,
+        timeout_s: float,
+    ) -> WaitForRolloutPolicyVersionResponse:
+        await self._require_active_session(session_id)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                rollout_status = await self._run_blocking_call(
+                    self.runtime.rollout_status
+                )
+            except OSError:
+                rollout_status = None
+            min_weight_version = (
+                0
+                if rollout_status is None
+                else int(rollout_status.get("min_weight_version", 0))
+            )
+            if rollout_status is not None and min_weight_version >= policy_version:
+                return WaitForRolloutPolicyVersionResponse(
+                    session_id=session_id,
+                    policy_version=policy_version,
+                    min_weight_version=min_weight_version,
+                )
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "timed out waiting for rollout to load policy_version "
+                    f"{policy_version}"
+                )
+            await asyncio.sleep(self.ROLLOUT_VERSION_POLL_SECONDS)
 
     def _ensure_generate_task_locked(self) -> None:
         task = self._generate_task
