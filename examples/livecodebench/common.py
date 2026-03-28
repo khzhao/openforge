@@ -18,7 +18,6 @@ from examples.livecodebench.task import (
     decode_livecodebench_private_test_cases,
 )
 from examples.shared import add_train_cli_args, load_runtime_config, make_artifact_dir
-from openforge.gateway.types import RuntimeConfig
 
 
 @dataclass(slots=True)
@@ -441,7 +440,6 @@ def _decode_private_tests(
         return None
 
 
-
 def _load_jsonl_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as handle:
@@ -470,6 +468,7 @@ def _load_json_rows(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"{path} must contain JSON objects")
         normalized_rows.append(row)
     return normalized_rows
+
 
 def _resolve_data_path(path: str, *, split_name: str) -> Path:
     candidate = Path(path)

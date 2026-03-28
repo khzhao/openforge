@@ -19,6 +19,11 @@ _LOG = logging.getLogger(__name__)
 def main() -> int:
     """Run the LiveCodeBench Ninja training example."""
     args = parse_train_args()
+    if args.validation_every_updates != 0:
+        raise ValueError(
+            "validation-every-updates is not implemented for the LiveCodeBench "
+            "LCB v6 example"
+        )
     setup = prepare_train_setup(args)
     sampling_params = setup["sampling_params"]
 

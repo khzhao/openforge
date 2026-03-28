@@ -12,6 +12,8 @@ SESSION_LOG="$JOB_DIR/session.log"
 GATEWAY_DB="$JOB_DIR/gateway.sqlite3"
 GATEWAY_CONFIG="$JOB_DIR/gateway.yaml"
 TRAIN_GROUP_PARALLELISM="${OPENFORGE_TRAIN_GROUP_PARALLELISM:-128}"
+VALIDATION_EVERY_UPDATES="${OPENFORGE_VALIDATION_EVERY_UPDATES:-10}"
+MAX_VALIDATION_EXAMPLES="${OPENFORGE_MAX_VALIDATION_EXAMPLES:-256}"
 
 mkdir -p "$JOB_DIR"
 
@@ -29,6 +31,8 @@ echo "GATEWAY_LOG=$GATEWAY_LOG"
 echo "SESSION_LOG=$SESSION_LOG"
 echo "ARTIFACT_DIR=$ARTIFACT_DIR"
 echo "TRAIN_GROUP_PARALLELISM=$TRAIN_GROUP_PARALLELISM"
+echo "VALIDATION_EVERY_UPDATES=$VALIDATION_EVERY_UPDATES"
+echo "MAX_VALIDATION_EXAMPLES=$MAX_VALIDATION_EXAMPLES"
 
 python - "$ROOT/examples/gsm8k/gateway.yaml" "$GATEWAY_CONFIG" "$GATEWAY_DB" <<'PY'
 from pathlib import Path
@@ -66,5 +70,7 @@ echo "Starting training..."
 PYTHONUNBUFFERED=1 python -m examples.gsm8k.train_ninja \
   --artifact-dir "$ARTIFACT_DIR" \
   --train-group-parallelism "$TRAIN_GROUP_PARALLELISM" \
+  --validation-every-updates "$VALIDATION_EVERY_UPDATES" \
+  --max-validation-examples "$MAX_VALIDATION_EXAMPLES" \
   --max-updates 250 \
   "$@"

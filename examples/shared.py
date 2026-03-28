@@ -54,7 +54,7 @@ def add_train_cli_args(
     parser.add_argument("--group-size", type=int, default=default_group_size)
     parser.add_argument("--total-epochs", type=int, default=default_total_epochs)
     parser.add_argument("--max-train-examples", type=int, default=None)
-    parser.add_argument("--wait-timeout", type=float, default=3600.0)
+    parser.add_argument("--wait-timeout", type=float, default=7200.0)
     parser.add_argument(
         "--train-group-parallelism",
         type=int,
@@ -158,7 +158,7 @@ def run_train(
     seed: int,
     parallelism: int | None = None,
     retries: int = 0,
-    wait_timeout: float = 3600.0,
+    wait_timeout: float = 7200.0,
     max_updates: int | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:

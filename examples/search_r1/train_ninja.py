@@ -316,6 +316,11 @@ def main() -> int:
 
     artifact_dir = make_artifact_dir(args.artifact_dir, prefix="search-r1-ninja-")
     runtime_config = load_runtime_config(args.runtime_config)
+    if int(runtime_config.train.max_rollout_policy_lag) <= 0:
+        raise ValueError(
+            "SearchR1 requires train.max_rollout_policy_lag > 0 when using "
+            "ninja.train_async()"
+        )
     sampling_params = {
         "temperature": runtime_config.rollout.request.temperature,
         "top_p": runtime_config.rollout.request.top_p,
@@ -404,17 +409,15 @@ def main() -> int:
         start=1,
     ):
         assert isinstance(batch_inputs, list)
-        train_update = ninja.train(
+        train_update = ninja.train_async(
             search_agent,
             inputs=batch_inputs,
             group_size=args.group_size,
             concurrency=args.train_group_parallelism,
             retries=args.train_group_retries,
-            wait_timeout=args.wait_timeout,
         )
         train_event = {
             **train_update,
-            "policy_version": train_update["final_policy_version"],
             "update_index": update_index,
         }
         train_updates.append(train_event)
