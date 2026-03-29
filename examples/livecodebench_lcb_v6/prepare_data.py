@@ -9,7 +9,12 @@ from typing import Any
 
 import datasets
 
-from examples.livecodebench_lcb_v6.common import _normalize_problem_row
+from examples.livecodebench_lcb_v6.common import (
+    LIVECODEBENCH_V6_END_DATE,
+    LIVECODEBENCH_V6_START_DATE,
+    _normalize_problem_row,
+    keep_livecodebench_v6_row,
+)
 from examples.livecodebench_lcb_v6.task import (
     sample_livecodebench_train_reward_spec,
 )
@@ -54,12 +59,17 @@ def main() -> int:
     test_rows: list[dict[str, Any]] = []
     train_test_counts: list[int] = []
     full_test_counts: list[int] = []
+    skipped_outside_release_window = 0
 
     for index, row in enumerate(rows):
         if args.max_examples is not None and len(test_rows) >= args.max_examples:
             break
+        normalized_row = dict(row)
+        if not keep_livecodebench_v6_row(normalized_row):
+            skipped_outside_release_window += 1
+            continue
         example = _normalize_problem_row(
-            dict(row),
+            normalized_row,
             index=index,
             judge_timeout=args.judge_timeout,
             judge_memory_mb=args.judge_memory_mb,
@@ -97,6 +107,7 @@ def main() -> int:
         "input_data": args.input_data,
         "output_dir": str(output_dir),
         "examples": len(test_rows),
+        "examples_skipped_outside_release_window": skipped_outside_release_window,
         "train_test_fraction": args.train_test_fraction,
         "mean_tests_train": (
             0.0
@@ -108,6 +119,12 @@ def main() -> int:
         ),
         "judge_timeout": args.judge_timeout,
         "judge_memory_mb": args.judge_memory_mb,
+        "prompt_wrapper": "code_prompt",
+        "reward_bundle": "private_only",
+        "v6_date_filter": [
+            LIVECODEBENCH_V6_START_DATE,
+            LIVECODEBENCH_V6_END_DATE,
+        ],
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True),

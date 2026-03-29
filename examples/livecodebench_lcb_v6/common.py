@@ -21,6 +21,8 @@ from examples.shared import add_train_cli_args, load_runtime_config, make_artifa
 from openforge.utils.processing import load_tokenizer
 
 _MAX_PROMPT_TOKENS = 2048
+LIVECODEBENCH_V6_START_DATE = "2025-02-01"
+LIVECODEBENCH_V6_END_DATE = "2025-05-01"
 
 
 @dataclass(slots=True)
@@ -207,9 +209,12 @@ def load_examples(
 
     examples: list[LiveCodeBenchExample] = []
     for index, row in enumerate(rows):
+        normalized_row = dict(row)
+        if not keep_livecodebench_v6_row(normalized_row):
+            continue
         examples.append(
             _normalize_problem_row(
-                row,
+                normalized_row,
                 index=index,
                 judge_timeout=judge_timeout,
                 judge_memory_mb=judge_memory_mb,
@@ -266,6 +271,8 @@ def _normalize_problem_row(
     judge_timeout: float,
     judge_memory_mb: int,
 ) -> LiveCodeBenchExample:
+    metadata = _coerce_json_like(row.get("metadata"))
+    metadata_dict = metadata if isinstance(metadata, dict) else {}
     prompt = row.get("prompt")
     if prompt is None:
         question = _first_text(
@@ -277,10 +284,15 @@ def _normalize_problem_row(
         if question is None:
             raise ValueError("row is missing prompt/question_content")
         starter_code = _optional_text(row.get("starter_code"))
-        prompt = build_livecodebench_prompt(question, starter_code=starter_code)
+        prompt = build_livecodebench_prompt(
+            question,
+            starter_code=starter_code,
+            time_limit_seconds=_extract_time_limit_seconds(row, metadata_dict),
+        )
 
     reward_spec = _build_reward_spec(
         row,
+        metadata_dict=metadata_dict,
         judge_timeout=judge_timeout,
         judge_memory_mb=judge_memory_mb,
     )
@@ -303,6 +315,7 @@ def _normalize_problem_row(
 def _build_reward_spec(
     row: dict[str, Any],
     *,
+    metadata_dict: dict[str, Any] | None = None,
     judge_timeout: float,
     judge_memory_mb: int,
 ) -> dict[str, Any]:
@@ -316,8 +329,9 @@ def _build_reward_spec(
         reward_spec.setdefault("memory_limit_mb", judge_memory_mb)
         return reward_spec
 
-    metadata = _coerce_json_like(row.get("metadata"))
-    metadata_dict = metadata if isinstance(metadata, dict) else {}
+    if metadata_dict is None:
+        metadata = _coerce_json_like(row.get("metadata"))
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
     decoded_private_tests = _decode_private_tests(row, metadata_dict)
     entry_point = _optional_text(
         row.get("entry_point")
@@ -332,7 +346,7 @@ def _build_reward_spec(
         )
     )
 
-    test_cases = _collect_test_cases(
+    test_cases = _collect_private_test_cases(
         row,
         decoded_private_tests=decoded_private_tests,
     )
@@ -352,38 +366,41 @@ def _build_reward_spec(
     }
 
 
-def _collect_test_cases(
+def _collect_private_test_cases(
     row: dict[str, Any],
     *,
     decoded_private_tests: dict[str, Any] | None = None,
 ) -> list[Any]:
-    cases: list[Any] = []
-    for key in ("private_test_cases", "test_cases", "tests", "public_test_cases"):
-        value = row.get(key)
-        if value is None:
-            continue
-        if key == "private_test_cases" and decoded_private_tests is not None:
-            loaded = decoded_private_tests
-        else:
-            loaded = _coerce_json_like(value)
-        if isinstance(loaded, dict) and "tests" in loaded:
-            loaded = loaded["tests"]
-        if isinstance(loaded, dict) and "inputs" in loaded and "outputs" in loaded:
-            loaded = [
-                {"input": item_input, "output": item_output}
-                for item_input, item_output in zip(
-                    loaded["inputs"],
-                    loaded["outputs"],
-                    strict=True,
-                )
-            ]
-        if isinstance(loaded, list):
-            cases.extend(loaded)
-        else:
-            raise ValueError(f"{key} must decode to a list or test bundle")
-    if not cases:
-        raise ValueError("row is missing test cases")
-    return cases
+    raw_private_tests = row.get("private_test_cases")
+    if decoded_private_tests is not None:
+        loaded = decoded_private_tests
+    elif raw_private_tests is not None:
+        loaded = _coerce_json_like(raw_private_tests)
+    else:
+        raise ValueError("row is missing private_test_cases")
+    if isinstance(loaded, dict) and "tests" in loaded:
+        loaded = loaded["tests"]
+    if isinstance(loaded, dict) and "inputs" in loaded and "outputs" in loaded:
+        loaded = [
+            {"input": item_input, "output": item_output}
+            for item_input, item_output in zip(
+                loaded["inputs"],
+                loaded["outputs"],
+                strict=True,
+            )
+        ]
+    if not isinstance(loaded, list):
+        raise ValueError("private_test_cases must decode to a list or test bundle")
+    if not loaded:
+        raise ValueError("row is missing private test cases")
+    return loaded
+
+
+def keep_livecodebench_v6_row(row: dict[str, Any]) -> bool:
+    contest_date = _extract_contest_date(row)
+    if contest_date is None:
+        return True
+    return LIVECODEBENCH_V6_START_DATE <= contest_date < LIVECODEBENCH_V6_END_DATE
 
 
 def _normalize_function_tests(test_cases: list[Any]) -> list[dict[str, Any]]:
@@ -516,6 +533,59 @@ def _decode_private_tests(
         )
     except Exception:
         return None
+
+
+def _extract_contest_date(row: dict[str, Any]) -> str | None:
+    metadata = _coerce_json_like(row.get("metadata"))
+    metadata_dict = metadata if isinstance(metadata, dict) else {}
+    for candidate in (
+        row.get("contest_date"),
+        row.get("contestDate"),
+        row.get("release_date"),
+        metadata_dict.get("contest_date"),
+        metadata_dict.get("contestDate"),
+        metadata_dict.get("release_date"),
+    ):
+        date_text = _extract_date_token(candidate)
+        if date_text is not None:
+            return date_text
+    return None
+
+
+def _extract_date_token(value: Any) -> str | None:
+    if value is None:
+        return None
+    match = re.search(r"\d{4}-\d{2}-\d{2}", str(value))
+    if match is None:
+        return None
+    return match.group(0)
+
+
+def _extract_time_limit_seconds(
+    row: dict[str, Any],
+    metadata_dict: dict[str, Any],
+) -> float | None:
+    for candidate in (
+        row.get("time_limit"),
+        row.get("time_limit_seconds"),
+        metadata_dict.get("time_limit"),
+        metadata_dict.get("time_limit_seconds"),
+    ):
+        seconds = _coerce_seconds(candidate)
+        if seconds is not None:
+            return seconds
+    return None
+
+
+def _coerce_seconds(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"\d+(?:\.\d+)?", str(value))
+    if match is None:
+        return None
+    return float(match.group(0))
 
 
 def _load_jsonl_rows(path: Path) -> list[dict[str, Any]]:

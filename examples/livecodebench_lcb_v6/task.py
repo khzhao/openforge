@@ -26,6 +26,11 @@ __all__ = [
 ]
 
 _CODE_BLOCK_PATTERN = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_CODE_PROMPT_PREFIX = (
+    "You are a coding expert. You will be given a coding problem, and you need "
+    "to write a correct Python program that matches the specification and "
+    "passes all tests."
+)
 _FUNCTION_RUNNER = """\
 from __future__ import annotations
 
@@ -124,9 +129,16 @@ def build_livecodebench_prompt(
     question: str,
     *,
     starter_code: str | None = None,
+    time_limit_seconds: float | None = None,
 ) -> str:
-    """Build the SDPO-style LiveCodeBench prompt text."""
-    parts = [question.rstrip()]
+    """Build the wrapped LiveCodeBench prompt text."""
+    time_limit_sentence = _format_time_limit_sentence(time_limit_seconds)
+    header = (
+        f"{_CODE_PROMPT_PREFIX}{time_limit_sentence} "
+        "You may start by outlining your thought process. In the end, please "
+        "provide the complete code in a code block enclosed with ``` ```."
+    ).strip()
+    parts = [header, "", question.rstrip()]
     if starter_code:
         parts.extend(
             [
@@ -137,6 +149,16 @@ def build_livecodebench_prompt(
             ]
         )
     return "\n".join(parts).strip()
+
+
+def _format_time_limit_sentence(time_limit_seconds: float | None) -> str:
+    if time_limit_seconds is None:
+        return ""
+    if float(time_limit_seconds).is_integer():
+        whole_seconds = int(time_limit_seconds)
+        unit = "second" if whole_seconds == 1 else "seconds"
+        return f" The time limit is {whole_seconds} {unit}."
+    return f" The time limit is {time_limit_seconds:g} seconds."
 
 
 def extract_python_code(response_text: str) -> str:

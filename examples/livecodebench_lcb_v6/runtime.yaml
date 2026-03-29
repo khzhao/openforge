@@ -1,6 +1,6 @@
 # Copyright 2026 openforge
 
-# Closest OpenForge mapping of the SDPO repo's LiveCodeBench v6 GRPO baseline:
+# Closest OpenForge mapping of the reference LiveCodeBench v6 GRPO baseline:
 # - Qwen/Qwen3-8B
 # - train_batch_size=32 prompt groups
 # - rollout.n=8

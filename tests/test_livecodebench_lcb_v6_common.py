@@ -267,3 +267,45 @@ def test_prepare_train_setup_filters_overlong_prompts(tmp_path: Path) -> None:
     assert len(setup["inputs"]) == 1
     assert setup["inputs"][0]["problem_id"] == "keep"
     assert setup["summary"]["dropped_train_examples_over_prompt_limit"] == 1
+
+
+def test_keep_livecodebench_v6_row_filters_exact_date_window() -> None:
+    assert common.keep_livecodebench_v6_row({"contest_date": "2025-01-31"}) is False
+    assert common.keep_livecodebench_v6_row({"contest_date": "2025-02-01"}) is True
+    assert common.keep_livecodebench_v6_row({"contest_date": "2025-04-30"}) is True
+    assert common.keep_livecodebench_v6_row({"contest_date": "2025-05-01"}) is False
+    assert common.keep_livecodebench_v6_row({"problem_id": "prepared-row"}) is True
+
+
+def test_normalize_problem_row_uses_private_tests_only_and_wrapped_prompt() -> None:
+    row = {
+        "question_content": "Solve the task.",
+        "starter_code": "def solve(x):\n    return x\n",
+        "contest_date": "2025-03-15T00:00:00",
+        "time_limit": 2,
+        "private_test_cases": json.dumps(
+            [{"input": "1\n", "output": "1\n"}]
+        ),
+        "public_test_cases": json.dumps(
+            [{"input": "2\n", "output": "2\n"}]
+        ),
+        "problem_id": "example-problem",
+    }
+
+    example = common._normalize_problem_row(
+        row,
+        index=0,
+        judge_timeout=6.0,
+        judge_memory_mb=1024,
+    )
+
+    assert example.problem_id == "example-problem"
+    assert example.prompt.startswith("You are a coding expert.")
+    assert "The time limit is 2 seconds." in example.prompt
+    assert "```python" in example.prompt
+    assert example.reward_spec == {
+        "task_type": "stdin_stdout",
+        "tests": [{"stdin": "1", "stdout": "1"}],
+        "timeout_seconds": 6.0,
+        "memory_limit_mb": 1024,
+    }
