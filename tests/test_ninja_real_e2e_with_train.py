@@ -104,10 +104,6 @@ def main() -> int:
         raise ValueError("global_batch_size must be > 0")
     if args.global_batch_size % args.group_size != 0:
         raise ValueError("global_batch_size must be divisible by group_size")
-    if args.algo_name == "grpo" and args.max_rollout_policy_lag != 0:
-        raise ValueError("grpo requires max_rollout_policy_lag=0")
-    if args.algo_name == "grpo_tis" and args.max_rollout_policy_lag <= 0:
-        raise ValueError("grpo_tis requires max_rollout_policy_lag > 0")
     prompt_group_count = args.global_batch_size // args.group_size
     total_requested_gpus = args.train_gpus + (
         args.rollout_replicas * args.gpus_per_replica

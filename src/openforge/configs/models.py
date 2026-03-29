@@ -54,14 +54,6 @@ class OpenForgeConfig(OpenForgeBaseModel):
             raise ValueError(
                 "model.reference_model_name_or_path must be set when algo.kl_coef > 0.0"
             )
-        if self.algo.name == "grpo" and self.train.max_rollout_policy_lag != 0:
-            raise ValueError(
-                "train.max_rollout_policy_lag must be 0 when algo.name is grpo"
-            )
-        if self.algo.name == "grpo_tis" and self.train.max_rollout_policy_lag <= 0:
-            raise ValueError(
-                "train.max_rollout_policy_lag must be > 0 when algo.name is grpo_tis"
-            )
         return self
 
     @model_validator(mode="after")

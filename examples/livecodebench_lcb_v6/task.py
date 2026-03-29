@@ -25,42 +25,22 @@ __all__ = [
     "sample_livecodebench_train_reward_spec",
 ]
 
-_CODE_BLOCK_PATTERN = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
-_CODE_PROMPT_PREFIX = (
+_CODE_BLOCK_PATTERN = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
+_CODE_PROMPT = (
     "You are a coding expert. You will be given a coding problem, and you need "
     "to write a correct Python program that matches the specification and "
-    "passes all tests."
+    "passes all tests. The time limit is 1 second. You may start by outlining "
+    "your thought process. In the end, please provide the complete code in a "
+    "code block enclosed with ``` ```."
 )
 _FUNCTION_RUNNER = """\
 from __future__ import annotations
 
 import importlib.util
 import json
-import math
 import resource
 import sys
 import traceback
-
-
-def _values_match(left, right):
-    if isinstance(left, float) or isinstance(right, float):
-        try:
-            return math.isclose(float(left), float(right), rel_tol=1e-6, abs_tol=1e-6)
-        except (TypeError, ValueError):
-            return False
-    if isinstance(left, str) and isinstance(right, str):
-        return left.strip() == right.strip()
-    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
-        return len(left) == len(right) and all(
-            _values_match(item_left, item_right)
-            for item_left, item_right in zip(left, right)
-        )
-    if isinstance(left, dict) and isinstance(right, dict):
-        return left.keys() == right.keys() and all(
-            _values_match(left[key], right[key]) for key in left
-        )
-    return left == right
-
 
 def _to_safe_jsonable(value):
     if value is None or isinstance(value, (bool, int, float, str)):
@@ -73,7 +53,7 @@ def _to_safe_jsonable(value):
 
 
 payload = json.load(sys.stdin)
-cpu_seconds = max(1, int(math.ceil(float(payload.get("timeout_seconds", 5.0)))))
+cpu_seconds = max(1, int(float(payload.get("timeout_seconds", 5.0))))
 memory_bytes = max(256, int(payload.get("memory_limit_mb", 1024))) * 1024 * 1024
 file_bytes = 8 * 1024 * 1024
 resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
@@ -89,10 +69,12 @@ try:
     spec.loader.exec_module(module)
     fn = getattr(module, payload["entry_point"])
     result = fn(*payload["args"], **payload["kwargs"])
+    pred = _to_safe_jsonable(result)
+    expected = _to_safe_jsonable(payload["expected"])
     json.dump(
         {
-            "passed": _values_match(result, payload["expected"]),
-            "pred": _to_safe_jsonable(result),
+            "passed": pred == expected,
+            "pred": pred,
         },
         sys.stdout,
     )
@@ -132,13 +114,8 @@ def build_livecodebench_prompt(
     time_limit_seconds: float | None = None,
 ) -> str:
     """Build the wrapped LiveCodeBench prompt text."""
-    time_limit_sentence = _format_time_limit_sentence(time_limit_seconds)
-    header = (
-        f"{_CODE_PROMPT_PREFIX}{time_limit_sentence} "
-        "You may start by outlining your thought process. In the end, please "
-        "provide the complete code in a code block enclosed with ``` ```."
-    ).strip()
-    parts = [header, "", question.rstrip()]
+    del time_limit_seconds
+    parts = [_CODE_PROMPT, "", question.rstrip()]
     if starter_code:
         parts.extend(
             [
@@ -152,6 +129,7 @@ def build_livecodebench_prompt(
 
 
 def _format_time_limit_sentence(time_limit_seconds: float | None) -> str:
+    # Kept only for compatibility with older callers.
     if time_limit_seconds is None:
         return ""
     if float(time_limit_seconds).is_integer():
@@ -162,11 +140,11 @@ def _format_time_limit_sentence(time_limit_seconds: float | None) -> str:
 
 
 def extract_python_code(response_text: str) -> str:
-    """Extract the first fenced Python block or fall back to the raw text."""
+    """Extract the longest fenced code block."""
     matches = _CODE_BLOCK_PATTERN.findall(response_text)
-    if matches:
-        return matches[0].strip()
-    return response_text.strip()
+    if not matches:
+        return ""
+    return max((code for _, code in matches), key=len).strip()
 
 
 def decode_livecodebench_private_test_cases(
@@ -226,7 +204,7 @@ def evaluate_livecodebench_response(
             "incorrect_format": True,
             "timed_out": False,
             "truncated": False,
-            "feedback": "No Python code block found in the response.",
+            "feedback": "Incorrect Format: Put your code inside a ```python ... ``` block.",
             "passed_tests": 0,
             "total_tests": 0,
         }
@@ -340,7 +318,7 @@ def _run_function_test(
     completed = _run_python_file(
         argv=[str(runner_path)],
         input_text=json.dumps(payload),
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=timeout_seconds + 1.0,
         cwd=submission_path.parent,
     )
     if completed is None:
@@ -412,7 +390,7 @@ def _run_stdio_test(
     completed = _run_python_file(
         argv=[str(runner_path), str(submission_path)],
         input_text=str(test_case["stdin"]),
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=timeout_seconds + 1.0,
         cwd=submission_path.parent,
         env_updates={
             "OPENFORGE_TIMEOUT_SECONDS": str(timeout_seconds),
@@ -440,8 +418,8 @@ def _run_stdio_test(
                 f"stderr={completed.stderr.strip()}"
             ),
         }
-    actual = _normalize_text_output(completed.stdout)
-    expected = _normalize_text_output(str(test_case["stdout"]))
+    actual = _normalize_reference_text_output(completed.stdout)
+    expected = _normalize_reference_text_output(str(test_case["stdout"]))
     if actual == expected:
         return {
             "passed": True,
@@ -494,3 +472,10 @@ def _judge_environment(env_updates: dict[str, str] | None = None) -> dict[str, s
 
 def _normalize_text_output(text: str) -> str:
     return text.replace("\r\n", "\n").strip()
+
+
+def _normalize_reference_text_output(text: str) -> str:
+    normalized = text.strip()
+    if normalized.endswith("-"):
+        normalized = normalized[: normalized.rfind("-")].rstrip()
+    return normalized.replace("\r", "").replace("\n", " ").strip()

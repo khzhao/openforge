@@ -316,11 +316,6 @@ def main() -> int:
 
     artifact_dir = make_artifact_dir(args.artifact_dir, prefix="search-r1-ninja-")
     runtime_config = load_runtime_config(args.runtime_config)
-    if int(runtime_config.train.max_rollout_policy_lag) <= 0:
-        raise ValueError(
-            "SearchR1 requires train.max_rollout_policy_lag > 0 when using "
-            "ninja.train_async()"
-        )
     sampling_params = {
         "temperature": runtime_config.rollout.request.temperature,
         "top_p": runtime_config.rollout.request.top_p,

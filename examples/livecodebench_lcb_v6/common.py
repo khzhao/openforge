@@ -409,20 +409,38 @@ def _normalize_function_tests(test_cases: list[Any]) -> list[dict[str, Any]]:
         loaded = _coerce_json_like(case)
         if not isinstance(loaded, dict):
             raise ValueError("function test case must be an object")
-        raw_args = loaded.get("args", loaded.get("input", loaded.get("inputs", [])))
-        raw_args = _coerce_literal_like(raw_args)
-        if isinstance(raw_args, tuple):
-            args = list(raw_args)
-        elif isinstance(raw_args, list):
-            args = raw_args
-        else:
-            args = [raw_args]
-        raw_kwargs = loaded.get("kwargs", {})
+        raw_kwargs = loaded.get("kwargs")
         if raw_kwargs is None:
             raw_kwargs = {}
-        kwargs = _coerce_literal_like(raw_kwargs)
-        if not isinstance(kwargs, dict):
-            raise ValueError("function test kwargs must be a mapping")
+        if "args" in loaded:
+            raw_args = _coerce_literal_like(loaded["args"])
+            if isinstance(raw_args, tuple):
+                args = list(raw_args)
+            elif isinstance(raw_args, list):
+                args = raw_args
+            else:
+                args = [raw_args]
+            kwargs = _coerce_literal_like(raw_kwargs)
+            if not isinstance(kwargs, dict):
+                raise ValueError("function test kwargs must be a mapping")
+        else:
+            raw_input = loaded.get("input", loaded.get("inputs", []))
+            if isinstance(raw_input, dict):
+                args = []
+                kwargs = {
+                    str(key): _coerce_literal_like(value)
+                    for key, value in raw_input.items()
+                }
+            elif isinstance(raw_input, str):
+                stripped = raw_input.strip()
+                if not stripped:
+                    args = []
+                else:
+                    args = [json.loads(token) for token in stripped.split()]
+                kwargs = {}
+            else:
+                args = [_coerce_literal_like(raw_input)]
+                kwargs = {}
         expected = loaded.get("expected", loaded.get("output", loaded.get("outputs")))
         if expected is None:
             raise ValueError("function test case is missing expected output")

@@ -57,9 +57,22 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
             handle.write(json.dumps(row) + "\n")
 
 
+def agent_input(example: GSM8kExample) -> dict[str, str]:
+    """Project one example down to the agent kwargs accepted by train/validate."""
+    return {
+        "prompt": example.prompt,
+        "ground_truth": example.ground_truth,
+    }
+
+
 def save_split(path: Path, examples: list[GSM8kExample]) -> None:
     """Persist a prepared split as JSONL."""
     write_jsonl(path, [asdict(example) for example in examples])
+
+
+def save_agent_input_split(path: Path, examples: list[GSM8kExample]) -> None:
+    """Persist only the fields that match the GSM8K agent signature."""
+    write_jsonl(path, [agent_input(example) for example in examples])
 
 
 def response_text(response: Any) -> str:
@@ -105,7 +118,7 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
             max_examples=args.max_validation_examples,
         )
         validation_path = artifact_dir / "data" / "validation.jsonl"
-        save_split(validation_path, validation_examples)
+        save_agent_input_split(validation_path, validation_examples)
         validation_examples_count = len(validation_examples)
 
     sampling_params = {
@@ -115,13 +128,7 @@ def prepare_train_setup(args: argparse.Namespace) -> dict[str, Any]:
         "repetition_penalty": args.repetition_penalty,
         "max_new_tokens": runtime_config.rollout.request.max_new_tokens,
     }
-    inputs = [
-        {
-            "prompt": example.prompt,
-            "ground_truth": example.ground_truth,
-        }
-        for example in train_examples
-    ]
+    inputs = [agent_input(example) for example in train_examples]
     summary = {
         "artifact_dir": str(artifact_dir),
         "group_size": args.group_size,

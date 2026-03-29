@@ -16,9 +16,10 @@
 # - This example targets a 4-GPU node with 2 train GPUs and 2 rollout GPUs.
 
 algo:
-  name: grpo
+  name: grpo_tis
   clip_range: 0.2
   clip_range_high: 0.28
+  tis_cap: 2.0
   normalize_group_std: false
   entropy_coef: 0.0
   kl_coef: 0.0
@@ -51,7 +52,7 @@ train:
       adam_beta1: 0.9
       adam_beta2: 0.95
       adam_eps: 1.0e-8
-      weight_decay: 0.0
+      weight_decay: 0.01
       max_grad_norm: 1.0
     scheduler:
       type: constant
@@ -104,7 +105,7 @@ rollout:
       sglang_server_overrides:
         max_running_requests: 8
         cuda_graph_max_bs: 8
-        max_total_tokens: 65536
+        max_total_tokens: 131072
 
 wandb:
   enabled: true

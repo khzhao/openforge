@@ -106,10 +106,28 @@ def test_runtime_config_parses_valid_payload() -> None:
     assert cfg.train.max_rollout_policy_lag == 0
 
 
+def test_runtime_config_allows_grpo_with_nonzero_lag() -> None:
+    cfg = RuntimeConfig.model_validate(
+        _runtime_payload(algo={"name": "grpo", "kl_coef": 0.0}, lag=2)
+    )
+    assert cfg.algo.name == "grpo"
+    assert cfg.train.max_rollout_policy_lag == 2
+
+
+def test_runtime_config_allows_grpo_tis_with_zero_lag() -> None:
+    cfg = RuntimeConfig.model_validate(
+        _runtime_payload(algo={"name": "grpo_tis", "kl_coef": 0.0, "tis_cap": 2.0}, lag=0)
+    )
+    assert cfg.algo.name == "grpo_tis"
+    assert cfg.train.max_rollout_policy_lag == 0
+
+
 def main() -> int:
     return run_tests(
         [
             test_runtime_config_parses_valid_payload,
+            test_runtime_config_allows_grpo_with_nonzero_lag,
+            test_runtime_config_allows_grpo_tis_with_zero_lag,
         ]
     )
 

@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 common = importlib.import_module("examples.livecodebench_lcb_v6.common")
+task = importlib.import_module("examples.livecodebench_lcb_v6.task")
 gateway_types = importlib.import_module("openforge.gateway.types")
 RuntimeConfig = gateway_types.RuntimeConfig
 StartSessionRequest = gateway_types.StartSessionRequest
@@ -301,7 +302,7 @@ def test_normalize_problem_row_uses_private_tests_only_and_wrapped_prompt() -> N
 
     assert example.problem_id == "example-problem"
     assert example.prompt.startswith("You are a coding expert.")
-    assert "The time limit is 2 seconds." in example.prompt
+    assert "The time limit is 1 second." in example.prompt
     assert "```python" in example.prompt
     assert example.reward_spec == {
         "task_type": "stdin_stdout",
@@ -309,3 +310,66 @@ def test_normalize_problem_row_uses_private_tests_only_and_wrapped_prompt() -> N
         "timeout_seconds": 6.0,
         "memory_limit_mb": 1024,
     }
+
+
+def test_build_livecodebench_prompt_matches_reference_wrapper() -> None:
+    prompt = task.build_livecodebench_prompt(
+        "Solve the task.",
+        starter_code="def solve(x):\n    return x\n",
+        time_limit_seconds=9.0,
+    )
+
+    assert prompt.startswith(
+        "You are a coding expert. You will be given a coding problem, and you need "
+        "to write a correct Python program that matches the specification and "
+        "passes all tests. The time limit is 1 second."
+    )
+    assert "The time limit is 9 seconds." not in prompt
+    assert "Your solution should have the following signature: ```python" in prompt
+
+
+def test_normalize_problem_row_keeps_functional_string_input_as_single_argument() -> None:
+    row = {
+        "question_content": "Solve the task.",
+        "starter_code": "class Solution:\n    def solve(self, nums):\n        pass\n",
+        "contest_date": "2025-03-15T00:00:00",
+        "metadata": json.dumps({"func_name": "solve"}),
+        "private_test_cases": json.dumps(
+            [
+                {
+                    "input": "[3,0,-3]",
+                    "output": "2",
+                }
+            ]
+        ),
+        "problem_id": "function-problem",
+    }
+
+    example = common._normalize_problem_row(
+        row,
+        index=0,
+        judge_timeout=6.0,
+        judge_memory_mb=1024,
+    )
+
+    assert example.reward_spec == {
+        "task_type": "function",
+        "entry_point": "solve",
+        "tests": [
+            {
+                "args": [[3, 0, -3]],
+                "kwargs": {},
+                "expected": 2,
+            }
+        ],
+        "timeout_seconds": 6.0,
+        "memory_limit_mb": 1024,
+    }
+
+
+def test_extract_python_code_prefers_longest_fenced_block() -> None:
+    response = (
+        "First try:\n```python\nprint('x')\n```\n"
+        "Second try:\n```text\nprint('much longer')\nprint('block')\n```\n"
+    )
+    assert task.extract_python_code(response) == "print('much longer')\nprint('block')"
