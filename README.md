@@ -371,8 +371,6 @@ algo:
   name: grpo
 ```
 
-`grpo` requires `train.max_rollout_policy_lag: 0`.
-
 ### GRPO + TIS
 
 Use `grpo_tis` when you want token-level importance sampling correction:
@@ -382,8 +380,6 @@ algo:
   name: grpo_tis
   tis_cap: 2.0
 ```
-
-`grpo_tis` requires `train.max_rollout_policy_lag > 0` and accepts `tis_cap`.
 
 ## Development
 
@@ -406,6 +402,16 @@ Or run a smaller slice while iterating:
 ```bash
 pytest tests/test_cli.py tests/test_ninja.py tests/test_gateway_service.py
 ```
+
+## Training Curves
+
+Example training reward curves produced with openforge:
+
+| GSM8k (Qwen2.5-0.5B-Instruct) | Search R1 (Qwen2.5-3B-Instruct) |
+|:---:|:---:|
+| ![GSM8k train reward](./assets/gsm8k.png) | ![Search R1 train reward](./assets/searchr1.png) |
+
+Both runs use GRPO with token-level truncated importance sampling (TIS).
 
 ## Citation
 

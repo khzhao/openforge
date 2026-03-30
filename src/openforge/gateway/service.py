@@ -84,6 +84,7 @@ class Service:
         self._active_session_model_name: str | None = None
         self._active_trajectories: dict[str, Trajectory] = {}
         self._active_turn_counts: dict[str, int] = {}
+        self._terminal_validation_trajectories: dict[str, Trajectory] = {}
         self._generate_lock = asyncio.Lock()
         self._generate_task: asyncio.Task[None] | None = None
         self._train_admission_lock = asyncio.Lock()
@@ -138,6 +139,8 @@ class Service:
             trajectory = self._active_trajectories.get(trajectory_id)
             if trajectory is None:
                 trajectory = stored.get(trajectory_id)
+            if trajectory is None:
+                trajectory = self._terminal_validation_trajectories.get(trajectory_id)
             if trajectory is None or trajectory.session_id != session_id:
                 raise Exception(f"unknown trajectory_id: {trajectory_id}")
             trajectories.append(
@@ -175,6 +178,7 @@ class Service:
         self._active_session_model_name = resolved_model_name
         self._active_trajectories = {}
         self._active_turn_counts = {}
+        self._terminal_validation_trajectories = {}
         rollout_replicas = sum(
             int(engine_group.replicas)
             for engine_group in runtime_config.rollout.engine_groups
@@ -369,10 +373,19 @@ class Service:
             trajectory = self._active_trajectories.get(trajectory_id)
             if trajectory is None:
                 stored_trajectory = await self.store.get_trajectory(trajectory_id)
-                if (
-                    stored_trajectory is None
-                    or stored_trajectory.session_id != session_id
-                ):
+                if stored_trajectory is None:
+                    terminal_validation_trajectory = (
+                        self._terminal_validation_trajectories.get(trajectory_id)
+                    )
+                    if (
+                        terminal_validation_trajectory is None
+                        or terminal_validation_trajectory.session_id != session_id
+                    ):
+                        raise Exception(f"unknown trajectory_id: {trajectory_id}")
+                    if terminal_validation_trajectory.status == "completed":
+                        continue
+                    raise Exception(f"trajectory {trajectory_id} is not active")
+                if stored_trajectory.session_id != session_id:
                     raise Exception(f"unknown trajectory_id: {trajectory_id}")
                 if stored_trajectory.status == "completed":
                     continue
@@ -542,6 +555,7 @@ class Service:
         self._active_session_model_name = None
         self._active_trajectories = {}
         self._active_turn_counts = {}
+        self._terminal_validation_trajectories = {}
         self._generate_batch_max_size = self.GENERATE_BATCH_MAX_SIZE
         self._max_untrained_train_trajectories = None
         self._session_logger.flush(force=True)
@@ -556,6 +570,7 @@ class Service:
         self._active_session_model_name = None
         self._active_trajectories = {}
         self._active_turn_counts = {}
+        self._terminal_validation_trajectories = {}
         self._generate_batch_max_size = self.GENERATE_BATCH_MAX_SIZE
         self._max_untrained_train_trajectories = None
         self._session_logger.finish()
@@ -887,6 +902,11 @@ class Service:
             if trajectory.session_id != session_id:
                 raise Exception(f"unknown trajectory_id: {trajectory_id}")
             return trajectory
+        trajectory = self._terminal_validation_trajectories.get(trajectory_id)
+        if trajectory is not None:
+            if trajectory.session_id != session_id:
+                raise Exception(f"unknown trajectory_id: {trajectory_id}")
+            raise Exception(f"trajectory {trajectory_id} is not active")
         trajectory = await self.store.get_trajectory(trajectory_id)
         if trajectory is None or trajectory.session_id != session_id:
             raise Exception(f"unknown trajectory_id: {trajectory_id}")
@@ -910,6 +930,13 @@ class Service:
         for trajectory_id in trajectory_ids:
             trajectory = self._active_trajectories.get(trajectory_id)
             if trajectory is None:
+                terminal_validation_trajectory = (
+                    self._terminal_validation_trajectories.get(trajectory_id)
+                )
+                if terminal_validation_trajectory is not None:
+                    if terminal_validation_trajectory.session_id != session_id:
+                        raise Exception(f"unknown trajectory_id: {trajectory_id}")
+                    raise Exception(f"trajectory {trajectory_id} is not active")
                 stored_trajectory = stored.get(trajectory_id)
                 if (
                     stored_trajectory is None
@@ -930,9 +957,15 @@ class Service:
         if not trajectories:
             return
         for trajectory in trajectories:
-            if trajectory.purpose != "train":
+            if trajectory.purpose == "train":
+                self._terminal_validation_trajectories.pop(
+                    trajectory.trajectory_id, None
+                )
+                await self.store.update_trajectory(trajectory)
                 continue
-            await self.store.update_trajectory(trajectory)
+            self._terminal_validation_trajectories[trajectory.trajectory_id] = (
+                trajectory
+            )
         # This is a short control-plane release call. Keeping it inline avoids
         # executor hangs in short-lived async test runners.
         self.runtime.release_trajectories(

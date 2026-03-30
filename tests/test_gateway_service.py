@@ -553,6 +553,47 @@ def test_gateway_service_validation_trajectories_are_not_persisted() -> None:
     asyncio.run(run())
 
 
+def test_gateway_service_duplicate_validation_end_is_idempotent() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+            runtime = _FakeRuntime()
+            service = Service(store=store, runtime=runtime)
+
+            session = await service.start_session(**_start_session_kwargs("model-a"))
+            started = await service.start_trajectory(
+                session_id=session.session_id,
+                purpose="validation",
+            )
+            await service.generate(
+                request=_chat_request(
+                    session_id=session.session_id,
+                    trajectory_id=started.trajectory_id,
+                    content="hello validation",
+                    purpose="validation",
+                )
+            )
+
+            first = await service.end_trajectory(
+                session_id=session.session_id,
+                trajectory_id=started.trajectory_id,
+                final_reward=0.75,
+            )
+            second = await service.end_trajectory(
+                session_id=session.session_id,
+                trajectory_id=started.trajectory_id,
+                final_reward=0.75,
+            )
+
+            assert first.status == "completed"
+            assert second.status == "completed"
+            assert runtime.released_trajectory_ids == [[started.trajectory_id]]
+            assert await store.list_trajectories(session.session_id) == []
+            await store.close()
+
+    asyncio.run(run())
+
+
 def test_gateway_service_waits_for_rollout_policy_version() -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
