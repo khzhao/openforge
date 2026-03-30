@@ -672,6 +672,112 @@ def test_gateway_service_blocks_train_group_admission_until_capacity_frees() -> 
     asyncio.run(run())
 
 
+def test_gateway_service_reuses_explicit_group_trajectory_ids() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+            runtime = _FakeRuntime()
+            service = Service(store=store, runtime=runtime)
+
+            session = await service.start_session(**_start_session_kwargs("model-a"))
+            trajectory_ids = [["traj_explicit_1", "traj_explicit_2"]]
+            first = await service.start_trajectory_groups(
+                session_id=session.session_id,
+                counts=[2],
+                trajectory_ids=trajectory_ids,
+                group_ids=["group_a"],
+                purpose="validation",
+            )
+            second = await service.start_trajectory_groups(
+                session_id=session.session_id,
+                counts=[2],
+                trajectory_ids=trajectory_ids,
+                group_ids=["group_a"],
+                purpose="validation",
+            )
+
+            assert first.trajectory_ids == trajectory_ids
+            assert second.trajectory_ids == trajectory_ids
+            assert sorted(service._active_trajectories) == sorted(trajectory_ids[0])
+            await store.close()
+
+    asyncio.run(run())
+
+
+def test_gateway_service_concurrent_duplicate_train_start_is_idempotent() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+            runtime = _FakeRuntime()
+            service = Service(store=store, runtime=runtime)
+
+            session = await service.start_session(**_start_session_kwargs("model-a"))
+            started = await asyncio.wait_for(
+                asyncio.gather(
+                    service.start_trajectory(
+                        session_id=session.session_id,
+                        trajectory_id="traj_explicit_single",
+                    ),
+                    service.start_trajectory(
+                        session_id=session.session_id,
+                        trajectory_id="traj_explicit_single",
+                    ),
+                ),
+                timeout=1.0,
+            )
+
+            assert [item.trajectory_id for item in started] == [
+                "traj_explicit_single",
+                "traj_explicit_single",
+            ]
+            stored = await store.list_trajectories(session.session_id)
+            assert [trajectory.trajectory_id for trajectory in stored] == [
+                "traj_explicit_single"
+            ]
+            await store.close()
+
+    asyncio.run(run())
+
+
+def test_gateway_service_concurrent_duplicate_train_group_start_is_idempotent() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteOpenForgeStore(Path(tmpdir) / "gateway.sqlite3")
+            runtime = _FakeRuntime()
+            service = Service(store=store, runtime=runtime)
+
+            session = await service.start_session(**_start_session_kwargs("model-a"))
+            started = await asyncio.wait_for(
+                asyncio.gather(
+                    service.start_trajectory_groups(
+                        session_id=session.session_id,
+                        counts=[1],
+                        trajectory_ids=[["traj_explicit_group"]],
+                        group_ids=["group_a"],
+                    ),
+                    service.start_trajectory_groups(
+                        session_id=session.session_id,
+                        counts=[1],
+                        trajectory_ids=[["traj_explicit_group"]],
+                        group_ids=["group_a"],
+                    ),
+                ),
+                timeout=1.0,
+            )
+
+            assert [item.trajectory_ids for item in started] == [
+                [["traj_explicit_group"]],
+                [["traj_explicit_group"]],
+            ]
+            stored = await store.list_trajectories(session.session_id)
+            assert [trajectory.trajectory_id for trajectory in stored] == [
+                "traj_explicit_group"
+            ]
+            await store.close()
+
+    asyncio.run(run())
+
+
 def test_gateway_service_reports_trajectory_statuses() -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

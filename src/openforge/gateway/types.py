@@ -130,6 +130,7 @@ class StartTrajectoryRequest(BaseModel):
     """Request payload for starting a trajectory, optionally inside a group."""
 
     session_id: str
+    trajectory_id: str | None = None
     group_id: str | None = None
     purpose: TrajectoryPurpose = "train"
 
@@ -147,6 +148,7 @@ class StartTrajectoryGroupsRequest(BaseModel):
 
     session_id: str
     counts: list[int]
+    trajectory_ids: list[list[str]] | None = None
     group_ids: list[str | None]
     purpose: TrajectoryPurpose = "train"
 

@@ -145,6 +145,7 @@ class _FakeGateway:
         self.generate_calls: list[dict[str, object]] = []
         self.finished: list[tuple[str, float]] = []
         self.failed: list[str] = []
+        self.started_group_ids: list[str | None] = []
         self.policy_version = 0
         self.active_generates = 0
         self.max_active_generates = 0
@@ -155,6 +156,9 @@ class _FakeGateway:
         self.rollout_wait_calls = 0
         self.rollout_wait_checks = 0
         self._transport_errors: dict[
+            tuple[str, str], tuple[int, type[httpx.TransportError]]
+        ] = {}
+        self._post_commit_transport_errors: dict[
             tuple[str, str], tuple[int, type[httpx.TransportError]]
         ] = {}
 
@@ -171,6 +175,25 @@ class _FakeGateway:
     def inject_read_error(self, method: str, path: str, *, count: int = 1) -> None:
         self.inject_transport_error(method, path, count=count)
 
+    def inject_post_commit_transport_error(
+        self,
+        method: str,
+        path: str,
+        *,
+        count: int = 1,
+        error_type: type[httpx.TransportError] = httpx.ReadError,
+    ) -> None:
+        self._post_commit_transport_errors[(method, path)] = (count, error_type)
+
+    def inject_post_commit_read_error(
+        self,
+        method: str,
+        path: str,
+        *,
+        count: int = 1,
+    ) -> None:
+        self.inject_post_commit_transport_error(method, path, count=count)
+
     def handle(
         self,
         method: str,
@@ -185,6 +208,22 @@ class _FakeGateway:
             if remaining > 0:
                 self._transport_errors[read_error_key] = (remaining - 1, error_type)
                 raise error_type(f"transient transport error for {method} {path}")
+
+        def maybe_raise_post_commit(response: _FakeResponse) -> _FakeResponse:
+            with self._lock:
+                remaining, error_type = self._post_commit_transport_errors.get(
+                    read_error_key,
+                    (0, httpx.ReadError),
+                )
+                if remaining > 0:
+                    self._post_commit_transport_errors[read_error_key] = (
+                        remaining - 1,
+                        error_type,
+                    )
+                    raise error_type(
+                        f"post-commit transport error for {method} {path}"
+                    )
+            return response
 
         if method == "GET" and path == "/current_session":
             if self.active_session_id is None:
@@ -237,42 +276,68 @@ class _FakeGateway:
             )
 
         if method == "POST" and path == "/start_trajectory":
+            assert payload is not None
+            requested_trajectory_id = payload.get("trajectory_id")
             with self._lock:
                 assert self.active_session_id is not None
-                self.next_trajectory_index += 1
-                trajectory_id = f"traj_{self.next_trajectory_index}"
+                if requested_trajectory_id is None:
+                    self.next_trajectory_index += 1
+                    trajectory_id = f"traj_{self.next_trajectory_index}"
+                else:
+                    trajectory_id = str(requested_trajectory_id)
                 self.active_trajectory_ids.add(trajectory_id)
                 self.trajectory_statuses[trajectory_id] = "active"
-            return _FakeResponse(
-                200,
-                {
-                    "session_id": self.active_session_id,
-                    "trajectory_id": trajectory_id,
-                    "group_id": None,
-                },
+            return maybe_raise_post_commit(
+                _FakeResponse(
+                    200,
+                    {
+                        "session_id": self.active_session_id,
+                        "trajectory_id": trajectory_id,
+                        "group_id": None,
+                    },
+                )
             )
 
         if method == "POST" and path == "/start_trajectory_groups":
             assert payload is not None
             counts = [int(count) for count in payload["counts"]]
+            group_ids = [
+                None if group_id is None else str(group_id)
+                for group_id in payload["group_ids"]
+            ]
+            requested_trajectory_ids = payload.get("trajectory_ids")
             trajectory_ids: list[list[str]] = []
             with self._lock:
                 assert self.active_session_id is not None
-                for count in counts:
+                self.started_group_ids.extend(group_ids)
+                for group_index, count in enumerate(counts):
+                    requested_group_ids = (
+                        None
+                        if requested_trajectory_ids is None
+                        else [
+                            str(trajectory_id)
+                            for trajectory_id in requested_trajectory_ids[group_index]
+                        ]
+                    )
                     group: list[str] = []
-                    for _ in range(count):
-                        self.next_trajectory_index += 1
-                        trajectory_id = f"traj_{self.next_trajectory_index}"
+                    for rollout_index in range(count):
+                        if requested_group_ids is None:
+                            self.next_trajectory_index += 1
+                            trajectory_id = f"traj_{self.next_trajectory_index}"
+                        else:
+                            trajectory_id = requested_group_ids[rollout_index]
                         self.active_trajectory_ids.add(trajectory_id)
                         self.trajectory_statuses[trajectory_id] = "active"
                         group.append(trajectory_id)
                     trajectory_ids.append(group)
-            return _FakeResponse(
-                200,
-                {
-                    "session_id": self.active_session_id,
-                    "trajectory_ids": trajectory_ids,
-                },
+            return maybe_raise_post_commit(
+                _FakeResponse(
+                    200,
+                    {
+                        "session_id": self.active_session_id,
+                        "trajectory_ids": trajectory_ids,
+                    },
+                )
             )
 
         if method == "POST" and path == "/v1/chat/completions":
@@ -837,6 +902,8 @@ def test_execute_grouped_retries_only_failed_group() -> None:
     assert len(fake_gateway.finished) == 6
     assert len(fake_gateway.failed) == 3
     assert len(fake_gateway.generate_calls) == 9
+    assert len(fake_gateway.started_group_ids) == 3
+    assert len(set(fake_gateway.started_group_ids)) == 3
     failed_prompts = {
         call["messages"][0]["content"]
         for call in fake_gateway.generate_calls
@@ -1084,8 +1151,9 @@ def test_module_train_async_returns_after_rollout_completes() -> None:
         "max_group_reward": 1.0,
         "mean_group_reward": 1.0,
         "sample_mean_reward": 1.0,
-        "trajectory_ids": ["traj_1", "traj_2"],
+        "trajectory_ids": summary["trajectory_ids"],
     }
+    assert len(summary["trajectory_ids"]) == 2
     assert fake_gateway.policy_version == 0
     assert all(
         fake_gateway.trajectory_statuses[trajectory_id] == "completed"
@@ -1137,6 +1205,52 @@ def test_module_train_preflights_against_active_runtime_global_batch_size() -> N
                     )
 
     assert fake_gateway.http_client_count == 0
+
+
+def test_agent_retries_single_start_after_post_commit_transport_error() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(prompt: str) -> float:
+        _ = prompt
+        return 1.0
+
+    with _patched_ninja() as fake_gateway:
+        fake_gateway.inject_post_commit_read_error("POST", "/start_trajectory")
+        reward = agent(prompt="hello")
+
+    assert reward == 1.0
+    assert len(fake_gateway.trajectory_statuses) == 1
+    assert list(fake_gateway.trajectory_statuses.values()) == ["completed"]
+
+
+def test_module_train_async_retries_group_start_after_post_commit_transport_error() -> None:
+    @ninja.agent(_gateway_config())
+    def agent(client, prompt: str) -> float:
+        response = client.chat.completions.create(
+            model="model-a",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return 1.0 if response.choices[0].message.content else -1.0
+
+    with _patched_ninja() as fake_gateway:
+        fake_gateway.inject_post_commit_read_error(
+            "POST",
+            "/start_trajectory_groups",
+        )
+        summary = ninja.train_async(
+            agent,
+            inputs=[{"prompt": "hello"}],
+            group_size=2,
+            concurrency=2,
+        )
+
+    assert summary["group_size"] == 2
+    assert len(summary["trajectory_ids"]) == 2
+    assert len(fake_gateway.generate_calls) == 2
+    assert len(fake_gateway.trajectory_statuses) == 2
+    assert all(
+        fake_gateway.trajectory_statuses[trajectory_id] == "completed"
+        for trajectory_id in summary["trajectory_ids"]
+    )
 
 
 def test_module_train_skips_active_runtime_preflight_for_explicit_gateway() -> None:

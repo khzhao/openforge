@@ -94,11 +94,15 @@ class _ActiveSession:
         if not counts:
             return []
 
-        response = self.post(
+        requested_trajectory_ids = [
+            [f"traj_{uuid4().hex}" for _ in range(count)] for count in counts
+        ]
+        response = self._retry_post(
             "/start_trajectory_groups",
             {
                 "session_id": self.session_id,
                 "counts": counts,
+                "trajectory_ids": requested_trajectory_ids,
                 "group_ids": group_ids,
                 "purpose": purpose,
             },
@@ -334,10 +338,11 @@ class _TrajectoryClient:
         response.raise_for_status()
 
     def _start(self) -> None:
-        response = self._post(
+        response = self._retry_post(
             "/start_trajectory",
             {
                 "session_id": self._session_id,
+                "trajectory_id": self._trajectory_id,
                 "group_id": self._group_id,
                 "purpose": self._purpose,
             },

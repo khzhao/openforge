@@ -123,9 +123,9 @@ def _execute_grouped_results(
     ) -> _GroupedExecutionResult | _GroupedExecutionFailure:
         request_index, (call_args, call_kwargs) = group_job
         last_error: Exception | None = None
-        group_id = f"group_{uuid4().hex}"
 
         for attempt in range(retries + 1):
+            group_id = f"group_{uuid4().hex}"
             clients: list[_TrajectoryClient] = []
             try:
                 clients = session.trajectory_groups(

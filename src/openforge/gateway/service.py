@@ -87,6 +87,7 @@ class Service:
         self._terminal_validation_trajectories: dict[str, Trajectory] = {}
         self._generate_lock = asyncio.Lock()
         self._generate_task: asyncio.Task[None] | None = None
+        self._start_lock = asyncio.Lock()
         self._train_admission_lock = asyncio.Lock()
         self._pending_generates: list[_PendingGenerate] = []
         self._generate_batch_max_size = self.GENERATE_BATCH_MAX_SIZE
@@ -130,19 +131,14 @@ class Service:
         if not trajectory_ids:
             return TrajectoryStatusesResponse(session_id=session_id, trajectories=[])
 
-        stored = {
-            trajectory.trajectory_id: trajectory
-            for trajectory in await self.store.get_trajectories(trajectory_ids)
-        }
+        known = await self._lookup_trajectories(trajectory_ids)
         trajectories: list[TrajectoryStatusInfo] = []
         for trajectory_id in trajectory_ids:
-            trajectory = self._active_trajectories.get(trajectory_id)
-            if trajectory is None:
-                trajectory = stored.get(trajectory_id)
-            if trajectory is None:
-                trajectory = self._terminal_validation_trajectories.get(trajectory_id)
-            if trajectory is None or trajectory.session_id != session_id:
-                raise Exception(f"unknown trajectory_id: {trajectory_id}")
+            trajectory = self._require_known_trajectory(
+                session_id=session_id,
+                trajectory_id=trajectory_id,
+                trajectory=known.get(trajectory_id),
+            )
             trajectories.append(
                 TrajectoryStatusInfo(
                     trajectory_id=trajectory_id,
@@ -213,21 +209,45 @@ class Service:
         self,
         *,
         session_id: str,
+        trajectory_id: str | None = None,
         group_id: str | None = None,
         purpose: str = "train",
     ) -> StartTrajectoryResponse:
         await self._require_active_session(session_id)
-        trajectory = Trajectory(
-            trajectory_id=self._new_id("traj"),
-            session_id=session_id,
-            group_id=group_id,
-            status="active",
-            purpose=purpose,
-            expected_group_size=1,
-        )
-        await self._record_active_trajectories([trajectory])
+        trajectory_id = trajectory_id or self._new_id("traj")
+        async with self._start_lock:
+            existing = await self._lookup_trajectory(trajectory_id)
+            if existing is None:
+                trajectory = Trajectory(
+                    trajectory_id=trajectory_id,
+                    session_id=session_id,
+                    group_id=group_id,
+                    status="active",
+                    purpose=purpose,
+                    expected_group_size=1,
+                )
+                await self._record_active_trajectories([trajectory])
+            else:
+                trajectory = self._require_known_trajectory(
+                    session_id=session_id,
+                    trajectory_id=trajectory_id,
+                    trajectory=existing,
+                )
+                if (
+                    trajectory.group_id != group_id
+                    or trajectory.purpose != purpose
+                    or trajectory.expected_group_size != 1
+                ):
+                    raise Exception(
+                        "trajectory start does not match existing trajectory: "
+                        f"{trajectory_id}"
+                    )
+                self._require_active_trajectory_status(
+                    trajectory_id=trajectory_id,
+                    trajectory=trajectory,
+                )
         return StartTrajectoryResponse(
-            trajectory_id=trajectory.trajectory_id,
+            trajectory_id=trajectory_id,
             session_id=session_id,
             group_id=group_id,
         )
@@ -237,44 +257,108 @@ class Service:
         *,
         session_id: str,
         counts: list[int],
+        trajectory_ids: list[list[str]] | None = None,
         group_ids: list[str | None],
         purpose: str = "train",
     ) -> StartTrajectoryGroupsResponse:
         await self._require_active_session(session_id)
         if len(counts) != len(group_ids):
             raise Exception("counts must align with group_ids")
+        if trajectory_ids is not None and len(counts) != len(trajectory_ids):
+            raise Exception("counts must align with trajectory_ids")
         if not counts:
             return StartTrajectoryGroupsResponse(
                 session_id=session_id, trajectory_ids=[]
             )
 
-        trajectory_ids_per_group: list[list[str]] = []
-        trajectories_to_create: list[Trajectory] = []
-        for count, group_id in zip(counts, group_ids, strict=True):
+        trajectory_ids_per_group = (
+            [
+                [str(trajectory_id) for trajectory_id in trajectory_group]
+                for trajectory_group in trajectory_ids
+            ]
+            if trajectory_ids is not None
+            else [[self._new_id("traj") for _ in range(count)] for count in counts]
+        )
+        for count, trajectory_group in zip(
+            counts,
+            trajectory_ids_per_group,
+            strict=True,
+        ):
             if count <= 0:
                 raise Exception("count must be >= 1")
-            trajectory_ids = [self._new_id("traj") for _ in range(count)]
-            for trajectory_id in trajectory_ids:
-                trajectories_to_create.append(
-                    Trajectory(
-                        trajectory_id=trajectory_id,
+            if len(trajectory_group) != count:
+                raise Exception("trajectory_ids must align with counts")
+
+        async with self._start_lock:
+            flat_trajectory_ids = [
+                trajectory_id
+                for trajectory_group in trajectory_ids_per_group
+                for trajectory_id in trajectory_group
+            ]
+            known = await self._lookup_trajectories(flat_trajectory_ids)
+            trajectories_to_create: list[Trajectory] = []
+            for count, trajectory_group, group_id in zip(
+                counts,
+                trajectory_ids_per_group,
+                group_ids,
+                strict=True,
+            ):
+                known_group = [
+                    known.get(trajectory_id) for trajectory_id in trajectory_group
+                ]
+                if any(trajectory is None for trajectory in known_group):
+                    if any(trajectory is not None for trajectory in known_group):
+                        raise Exception(
+                            "trajectory group start partially matched existing "
+                            f"trajectories: {trajectory_group}"
+                        )
+                    for trajectory_id in trajectory_group:
+                        trajectories_to_create.append(
+                            Trajectory(
+                                trajectory_id=trajectory_id,
+                                session_id=session_id,
+                                group_id=group_id,
+                                status="active",
+                                purpose=purpose,
+                                expected_group_size=count,
+                            )
+                        )
+                    continue
+
+                for trajectory_id, trajectory in zip(
+                    trajectory_group,
+                    known_group,
+                    strict=True,
+                ):
+                    assert trajectory is not None
+                    existing = self._require_known_trajectory(
                         session_id=session_id,
-                        group_id=group_id,
-                        status="active",
-                        purpose=purpose,
-                        expected_group_size=count,
+                        trajectory_id=trajectory_id,
+                        trajectory=trajectory,
                     )
-                )
-            trajectory_ids_per_group.append(trajectory_ids)
-        if purpose == "train":
-            async with self._train_admission_lock:
-                await self._wait_for_train_capacity(
-                    session_id=session_id,
-                    requested_trajectory_count=len(trajectories_to_create),
-                )
+                    if (
+                        existing.group_id != group_id
+                        or existing.purpose != purpose
+                        or existing.expected_group_size != count
+                    ):
+                        raise Exception(
+                            "trajectory group start does not match existing "
+                            f"trajectory: {trajectory_id}"
+                        )
+                    self._require_active_trajectory_status(
+                        trajectory_id=trajectory_id,
+                        trajectory=existing,
+                    )
+
+            if purpose == "train":
+                async with self._train_admission_lock:
+                    await self._wait_for_train_capacity(
+                        session_id=session_id,
+                        requested_trajectory_count=len(trajectories_to_create),
+                    )
+                    await self._record_active_trajectories(trajectories_to_create)
+            else:
                 await self._record_active_trajectories(trajectories_to_create)
-        else:
-            await self._record_active_trajectories(trajectories_to_create)
         return StartTrajectoryGroupsResponse(
             session_id=session_id,
             trajectory_ids=trajectory_ids_per_group,
@@ -364,44 +448,28 @@ class Service:
                 status="completed",
             )
 
+        known = await self._lookup_trajectories(trajectory_ids)
         trajectories_to_update: list[Trajectory] = []
         for trajectory_id, final_reward in zip(
             trajectory_ids,
             final_rewards,
             strict=True,
         ):
-            trajectory = self._active_trajectories.get(trajectory_id)
-            if trajectory is None:
-                stored_trajectory = await self.store.get_trajectory(trajectory_id)
-                if stored_trajectory is None:
-                    terminal_validation_trajectory = (
-                        self._terminal_validation_trajectories.get(trajectory_id)
-                    )
-                    if (
-                        terminal_validation_trajectory is None
-                        or terminal_validation_trajectory.session_id != session_id
-                    ):
-                        raise Exception(f"unknown trajectory_id: {trajectory_id}")
-                    if terminal_validation_trajectory.status == "completed":
-                        continue
-                    raise Exception(f"trajectory {trajectory_id} is not active")
-                if stored_trajectory.session_id != session_id:
-                    raise Exception(f"unknown trajectory_id: {trajectory_id}")
-                if stored_trajectory.status == "completed":
-                    continue
-                raise Exception(f"trajectory {trajectory_id} is not active")
-            if trajectory.session_id != session_id:
-                raise Exception(f"unknown trajectory_id: {trajectory_id}")
-            if trajectory.status != "active":
-                raise Exception(f"trajectory {trajectory_id} is not active")
+            trajectory = self._require_known_trajectory(
+                session_id=session_id,
+                trajectory_id=trajectory_id,
+                trajectory=known.get(trajectory_id),
+            )
+            if trajectory.status == "completed":
+                continue
+            self._require_active_trajectory_status(
+                trajectory_id=trajectory_id,
+                trajectory=trajectory,
+            )
             trajectories_to_update.append(
-                Trajectory(
-                    trajectory_id=trajectory.trajectory_id,
-                    session_id=trajectory.session_id,
-                    group_id=trajectory.group_id,
+                self._trajectory_with_status(
+                    trajectory,
                     status="completed",
-                    purpose=trajectory.purpose,
-                    expected_group_size=trajectory.expected_group_size,
                     final_reward=final_reward,
                 )
             )
@@ -425,16 +493,7 @@ class Service:
             trajectory_id=trajectory_id,
         )
         await self._finish_trajectories(
-            [
-                Trajectory(
-                    trajectory_id=trajectory.trajectory_id,
-                    session_id=trajectory.session_id,
-                    group_id=trajectory.group_id,
-                    status="failed",
-                    purpose=trajectory.purpose,
-                    expected_group_size=trajectory.expected_group_size,
-                )
-            ]
+            [self._trajectory_with_status(trajectory, status="failed")]
         )
         return EndTrajectoryResponse(
             session_id=session_id,
@@ -459,19 +518,13 @@ class Service:
             session_id=session_id,
             trajectory_ids=trajectory_ids,
         )
-        trajectories_to_update: list[Trajectory] = []
-        for trajectory_id in trajectory_ids:
-            trajectory = trajectories_by_id[trajectory_id]
-            trajectories_to_update.append(
-                Trajectory(
-                    trajectory_id=trajectory.trajectory_id,
-                    session_id=trajectory.session_id,
-                    group_id=trajectory.group_id,
-                    status="failed",
-                    purpose=trajectory.purpose,
-                    expected_group_size=trajectory.expected_group_size,
-                )
+        trajectories_to_update = [
+            self._trajectory_with_status(
+                trajectories_by_id[trajectory_id],
+                status="failed",
             )
+            for trajectory_id in trajectory_ids
+        ]
         await self._finish_trajectories(trajectories_to_update)
         return EndTrajectoriesResponse(
             session_id=session_id,
@@ -492,16 +545,7 @@ class Service:
             trajectory_id=trajectory_id,
         )
         await self._finish_trajectories(
-            [
-                Trajectory(
-                    trajectory_id=trajectory.trajectory_id,
-                    session_id=trajectory.session_id,
-                    group_id=trajectory.group_id,
-                    status="discarded",
-                    purpose=trajectory.purpose,
-                    expected_group_size=trajectory.expected_group_size,
-                )
-            ]
+            [self._trajectory_with_status(trajectory, status="discarded")]
         )
         return EndTrajectoryResponse(
             session_id=session_id,
@@ -702,23 +746,10 @@ class Service:
         batch_started_monotonic = time.monotonic()
         session = await self._require_active_session(session_id)
         new_trajectories: list[Trajectory] = []
-        missing_trajectory_ids = [
-            trajectory_id
-            for trajectory_id in trajectory_ids
-            if trajectory_id not in self._active_trajectories
-        ]
-        stored_trajectories = {
-            trajectory.trajectory_id: trajectory
-            for trajectory in await self.store.get_trajectories(missing_trajectory_ids)
-        }
+        known_trajectories = await self._lookup_trajectories(trajectory_ids)
         for trajectory_id, group_id in zip(trajectory_ids, group_ids, strict=True):
-            trajectory = self._active_trajectories.get(trajectory_id)
+            trajectory = known_trajectories.get(trajectory_id)
             if trajectory is None:
-                stored_trajectory = stored_trajectories.get(trajectory_id)
-                if stored_trajectory is not None:
-                    if stored_trajectory.session_id != session_id:
-                        raise Exception(f"unknown trajectory_id: {trajectory_id}")
-                    raise Exception(f"trajectory {trajectory_id} is not active")
                 new_trajectories.append(
                     Trajectory(
                         trajectory_id=trajectory_id,
@@ -730,10 +761,15 @@ class Service:
                     )
                 )
                 continue
-            if trajectory.session_id != session_id:
-                raise Exception(f"unknown trajectory_id: {trajectory_id}")
-            if trajectory.status != "active":
-                raise Exception(f"trajectory {trajectory_id} is not active")
+            self._require_known_trajectory(
+                session_id=session_id,
+                trajectory_id=trajectory_id,
+                trajectory=trajectory,
+            )
+            self._require_active_trajectory_status(
+                trajectory_id=trajectory_id,
+                trajectory=trajectory,
+            )
         await self._record_active_trajectories(new_trajectories)
         turn_indexes = [
             self._active_turn_counts[trajectory_id] for trajectory_id in trajectory_ids
@@ -897,20 +933,16 @@ class Service:
         session_id: str,
         trajectory_id: str,
     ) -> Trajectory:
-        trajectory = self._active_trajectories.get(trajectory_id)
-        if trajectory is not None:
-            if trajectory.session_id != session_id:
-                raise Exception(f"unknown trajectory_id: {trajectory_id}")
-            return trajectory
-        trajectory = self._terminal_validation_trajectories.get(trajectory_id)
-        if trajectory is not None:
-            if trajectory.session_id != session_id:
-                raise Exception(f"unknown trajectory_id: {trajectory_id}")
-            raise Exception(f"trajectory {trajectory_id} is not active")
-        trajectory = await self.store.get_trajectory(trajectory_id)
-        if trajectory is None or trajectory.session_id != session_id:
-            raise Exception(f"unknown trajectory_id: {trajectory_id}")
-        raise Exception(f"trajectory {trajectory_id} is not active")
+        trajectory = self._require_known_trajectory(
+            session_id=session_id,
+            trajectory_id=trajectory_id,
+            trajectory=await self._lookup_trajectory(trajectory_id),
+        )
+        self._require_active_trajectory_status(
+            trajectory_id=trajectory_id,
+            trajectory=trajectory,
+        )
+        return trajectory
 
     async def _require_active_trajectories(
         self,
@@ -918,40 +950,82 @@ class Service:
         session_id: str,
         trajectory_ids: list[str],
     ) -> dict[str, Trajectory]:
-        missing = [
-            trajectory_id
-            for trajectory_id in trajectory_ids
-            if trajectory_id not in self._active_trajectories
-        ]
-        stored = {
-            trajectory.trajectory_id: trajectory
-            for trajectory in await self.store.get_trajectories(missing)
-        }
+        known = await self._lookup_trajectories(trajectory_ids)
+        for trajectory_id in trajectory_ids:
+            trajectory = self._require_known_trajectory(
+                session_id=session_id,
+                trajectory_id=trajectory_id,
+                trajectory=known.get(trajectory_id),
+            )
+            self._require_active_trajectory_status(
+                trajectory_id=trajectory_id,
+                trajectory=trajectory,
+            )
+        return {trajectory_id: known[trajectory_id] for trajectory_id in trajectory_ids}
+
+    async def _lookup_trajectory(self, trajectory_id: str) -> Trajectory | None:
+        return (await self._lookup_trajectories([trajectory_id])).get(trajectory_id)
+
+    async def _lookup_trajectories(
+        self,
+        trajectory_ids: list[str],
+    ) -> dict[str, Trajectory]:
+        known: dict[str, Trajectory] = {}
+        missing: list[str] = []
         for trajectory_id in trajectory_ids:
             trajectory = self._active_trajectories.get(trajectory_id)
             if trajectory is None:
-                terminal_validation_trajectory = (
-                    self._terminal_validation_trajectories.get(trajectory_id)
-                )
-                if terminal_validation_trajectory is not None:
-                    if terminal_validation_trajectory.session_id != session_id:
-                        raise Exception(f"unknown trajectory_id: {trajectory_id}")
-                    raise Exception(f"trajectory {trajectory_id} is not active")
-                stored_trajectory = stored.get(trajectory_id)
-                if (
-                    stored_trajectory is None
-                    or stored_trajectory.session_id != session_id
-                ):
-                    raise Exception(f"unknown trajectory_id: {trajectory_id}")
-                raise Exception(f"trajectory {trajectory_id} is not active")
-            if trajectory.session_id != session_id:
-                raise Exception(f"unknown trajectory_id: {trajectory_id}")
-            if trajectory.status != "active":
-                raise Exception(f"trajectory {trajectory_id} is not active")
-        return {
-            trajectory_id: self._active_trajectories[trajectory_id]
-            for trajectory_id in trajectory_ids
-        }
+                trajectory = self._terminal_validation_trajectories.get(trajectory_id)
+            if trajectory is not None:
+                known[trajectory_id] = trajectory
+                continue
+            missing.append(trajectory_id)
+        if not missing:
+            return known
+        known.update(
+            {
+                trajectory.trajectory_id: trajectory
+                for trajectory in await self.store.get_trajectories(missing)
+            }
+        )
+        return known
+
+    @staticmethod
+    def _require_known_trajectory(
+        *,
+        session_id: str,
+        trajectory_id: str,
+        trajectory: Trajectory | None,
+    ) -> Trajectory:
+        if trajectory is None or trajectory.session_id != session_id:
+            raise Exception(f"unknown trajectory_id: {trajectory_id}")
+        return trajectory
+
+    @staticmethod
+    def _require_active_trajectory_status(
+        *,
+        trajectory_id: str,
+        trajectory: Trajectory,
+    ) -> None:
+        if trajectory.status != "active":
+            raise Exception(f"trajectory {trajectory_id} is not active")
+
+    @staticmethod
+    def _trajectory_with_status(
+        trajectory: Trajectory,
+        *,
+        status: str,
+        final_reward: float | None = None,
+    ) -> Trajectory:
+        return Trajectory(
+            trajectory_id=trajectory.trajectory_id,
+            session_id=trajectory.session_id,
+            group_id=trajectory.group_id,
+            status=status,
+            purpose=trajectory.purpose,
+            expected_group_size=trajectory.expected_group_size,
+            final_reward=final_reward,
+        )
 
     async def _finish_trajectories(self, trajectories: list[Trajectory]) -> None:
         if not trajectories:

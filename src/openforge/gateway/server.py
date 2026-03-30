@@ -146,6 +146,7 @@ def create_app(
         return await _invoke(
             service.start_trajectory(
                 session_id=payload.session_id,
+                trajectory_id=payload.trajectory_id,
                 group_id=payload.group_id,
                 purpose=payload.purpose,
             )
@@ -159,6 +160,7 @@ def create_app(
             service.start_trajectory_groups(
                 session_id=payload.session_id,
                 counts=payload.counts,
+                trajectory_ids=payload.trajectory_ids,
                 group_ids=payload.group_ids,
                 purpose=payload.purpose,
             )
