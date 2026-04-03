@@ -1,0 +1,52 @@
+{
+  "models": {
+    "providers": {
+      "openforge-openclaw": {
+        "baseUrl": "http://127.0.0.1:8011/v1",
+        "apiKey": "unused",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "Qwen/Qwen2.5-3B-Instruct",
+            "name": "OpenForge Qwen 2.5 3B",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 32768,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openforge-openclaw/Qwen/Qwen2.5-3B-Instruct"
+      }
+    }
+  },
+  "plugins": {
+    "enabled": true,
+    "load": {
+      "paths": [
+        "/ABSOLUTE/PATH/TO/openforge/examples/openclaw/extensions/rl-training-headers"
+      ]
+    },
+    "entries": {
+      "rl-training-headers": {
+        "enabled": true,
+        "config": {
+          "urlIncludes": [
+            "127.0.0.1:8011/v1/chat/completions"
+          ]
+        }
+      }
+    }
+  }
+}

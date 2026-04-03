@@ -1,0 +1,17 @@
+{
+  "id": "rl-training-headers",
+  "name": "RL Training Headers",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "urlIncludes": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "additionalProperties": false
+  }
+}
