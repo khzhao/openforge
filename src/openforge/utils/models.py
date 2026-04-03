@@ -13,6 +13,7 @@ __all__ = [
 SUPPORTED_MODELS: list[str] = [
     "Qwen/Qwen2.5-0.5B-Instruct",
     "Qwen/Qwen2.5-3B-Instruct",
+    "Qwen/Qwen3-4B",
     "Qwen/Qwen3-8B",
 ]
 

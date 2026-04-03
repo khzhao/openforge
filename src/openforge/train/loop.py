@@ -95,14 +95,23 @@ class TrainLoop:
         turns_by_trajectory_id: dict[str, list[Turn]] = {}
         for group in ready_groups:
             group_rollout_version = self.policy_version
+            group_missing_turns = False
             for trajectory in group:
                 turns = await self.store.list_turns(trajectory.trajectory_id)
-                assert turns
+                if not turns:
+                    logger.warning(
+                        "skipping completed trajectory with no stored turns: %s",
+                        trajectory.trajectory_id,
+                    )
+                    group_missing_turns = True
+                    break
                 turns_by_trajectory_id[trajectory.trajectory_id] = turns
                 group_rollout_version = min(
                     group_rollout_version,
                     min(turn.rollout_model_version for turn in turns),
                 )
+            if group_missing_turns:
+                continue
             if (
                 self.policy_version - group_rollout_version
                 > self.train.max_rollout_policy_lag

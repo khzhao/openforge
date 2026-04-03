@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import sys
 import time
@@ -20,6 +21,7 @@ from openforge.logging import render_status, render_watch_error
 
 DEFAULT_GATEWAY_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_START_TIMEOUT_SECONDS = 600.0
+DEFAULT_WATCH_INTERVAL_SECONDS = 1.009
 
 
 def _run_gateway_start(args: argparse.Namespace) -> int:
@@ -229,31 +231,53 @@ def _run_watch(args: argparse.Namespace) -> int:
     host, port = _wait_for_active_gateway_target(timeout=args.timeout)
     base_url = f"http://{host}:{port}"
     _wait_for_gateway(base_url=base_url, timeout=args.timeout)
-    while True:
-        output = None
-        try:
-            status, response = _request_json(
-                method="GET",
-                url=f"{base_url}/status",
-                payload=None,
+    use_tty = sys.stdout.isatty()
+    if use_tty and not args.once:
+        from openforge.cli.watch_tui import run_textual_watch
+
+        return run_textual_watch(
+            fetch_snapshot=lambda: _fetch_watch_snapshot(
+                base_url=base_url,
                 timeout=args.timeout,
+            ),
+            interval=args.interval,
+        )
+
+    while True:
+        terminal_width = shutil.get_terminal_size(fallback=(100, 30)).columns
+        ok, payload = _fetch_watch_snapshot(base_url=base_url, timeout=args.timeout)
+        output = (
+            render_status(payload, use_color=use_tty, width=terminal_width)
+            if ok
+            else render_watch_error(
+                str(payload), use_color=use_tty, width=terminal_width
             )
-        except SystemExit as exc:
-            output = render_watch_error(str(exc))
-        else:
-            if status != 200:
-                output = render_watch_error(
-                    f"gateway status failed with status {status}: "
-                    f"{json.dumps(response, sort_keys=True)}"
-                )
-            else:
-                output = render_status(response)
-        if sys.stdout.isatty():
-            print("\033[2J\033[H", end="")
+        )
         print(output, flush=True)
         if args.once:
             return 0
         time.sleep(args.interval)
+
+
+def _fetch_watch_snapshot(
+    *, base_url: str, timeout: float
+) -> tuple[bool, dict[str, object] | str]:
+    try:
+        status, response = _request_json(
+            method="GET",
+            url=f"{base_url}/status",
+            payload=None,
+            timeout=timeout,
+        )
+    except SystemExit as exc:
+        return False, str(exc)
+    if status != 200:
+        return (
+            False,
+            f"gateway status failed with status {status}: "
+            f"{json.dumps(response, sort_keys=True)}",
+        )
+    return True, response
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -310,8 +334,12 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument(
         "--interval",
         type=float,
-        default=1.0,
-        help="Seconds to wait between status refreshes.",
+        default=DEFAULT_WATCH_INTERVAL_SECONDS,
+        help=(
+            "Seconds to wait between status refreshes. Defaults to 1.009s "
+            "(1009 ms, prime) to avoid phase-locking with whole-second worker "
+            "health loops."
+        ),
     )
     watch_parser.add_argument(
         "--timeout",

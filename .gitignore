@@ -22,3 +22,7 @@ uv.lock
 checkpoints
 logs
 wandb
+
+# AI
+.codex
+.omx

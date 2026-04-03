@@ -2,7 +2,7 @@
   "models": {
     "providers": {
       "openforge-openclaw": {
-        "baseUrl": "http://127.0.0.1:8011/v1",
+        "baseUrl": "http://127.0.0.1:8012/v1",
         "apiKey": "unused",
         "api": "openai-completions",
         "models": [
@@ -31,19 +31,19 @@
       }
     }
   },
+  "gateway": {
+    "port": 18789,
+    "mode": "local"
+  },
   "plugins": {
     "enabled": true,
-    "load": {
-      "paths": [
-        "/ABSOLUTE/PATH/TO/openforge/examples/openclaw/extensions/rl-training-headers"
-      ]
-    },
     "entries": {
       "rl-training-headers": {
         "enabled": true,
         "config": {
           "urlIncludes": [
-            "127.0.0.1:8011/v1/chat/completions"
+            "127.0.0.1:8012/v1/chat/completions",
+            "localhost:8012/v1/chat/completions"
           ]
         }
       }

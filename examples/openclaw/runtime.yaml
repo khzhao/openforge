@@ -8,9 +8,9 @@ algo:
   kl_coef: 0.001
 
 model:
-  model_name_or_path: Qwen/Qwen2.5-3B-Instruct
-  tokenizer_name_or_path: Qwen/Qwen2.5-3B-Instruct
-  reference_model_name_or_path: Qwen/Qwen2.5-3B-Instruct
+  model_name_or_path: Qwen/Qwen3-4B
+  tokenizer_name_or_path: Qwen/Qwen3-4B
+  reference_model_name_or_path: Qwen/Qwen3-4B
   attn_implementation: flash_attention_2
 
 train:
@@ -41,8 +41,8 @@ train:
       min_lr: 0.0
       num_cycles: 0.5
       min_lr_rate: null
-  global_batch_size: 32
-  mini_batch_size: 8
+  global_batch_size: 16
+  mini_batch_size: 4
   micro_batch_size: 1
   ppo_epochs: 1
   max_rollout_policy_lag: 1
@@ -63,7 +63,7 @@ rollout:
     top_p: 1.0
     top_k: -1
     repetition_penalty: 1.0
-    max_new_tokens: 512
+    max_new_tokens: 8192
     stop: []
     stop_token_ids: []
     skip_special_tokens: true

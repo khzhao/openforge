@@ -34,10 +34,15 @@ This is an integration example, not a full OpenClaw-RL port.
 3. Run this middleware.
 4. Point OpenClaw at the middleware instead of the OpenForge gateway directly.
 
+The middleware should run on a different port from the OpenForge gateway. In this example:
+
+- OpenForge gateway: `127.0.0.1:8011`
+- OpenClaw middleware: `127.0.0.1:8012`
+
 The middleware discovers the active OpenForge gateway automatically when it runs on the same machine. You can also set an explicit upstream base URL:
 
 ```bash
-export OPENCLAW_OPENFORGE_BASE_URL="http://127.0.0.1:8000"
+export OPENFORGE_GATEWAY_BASE_URL="http://127.0.0.1:8011"
 ```
 
 Local starter configs are included in this folder:
@@ -53,7 +58,21 @@ Example launcher flow:
 ```bash
 openforge gateway start --config examples/openclaw/gateway.yaml
 openforge session start --runtime-config examples/openclaw/runtime.yaml
-python -m examples.openclaw.app
+OPENCLAW_MIDDLEWARE_PORT=8012 OPENFORGE_GATEWAY_BASE_URL=http://127.0.0.1:8011 python -m examples.openclaw.app
+```
+
+For replay-driven GSM8K experiments, reuse the same launcher with a lighter
+runtime:
+
+```bash
+OPENFORGE_RUNTIME_CONFIG=examples/openclaw/replay/gsm8k_runtime.yaml \
+  bash examples/openclaw/run_demo.sh
+```
+
+Visibility dashboard:
+
+```bash
+python -m examples.openclaw.tui --gateway-base-url http://127.0.0.1:8011
 ```
 
 Link the bundled OpenClaw extension into your local OpenClaw install:
@@ -62,19 +81,37 @@ Link the bundled OpenClaw extension into your local OpenClaw install:
 bash examples/openclaw/install_extension.sh
 ```
 
+Run a replay-driven GSM8K train pass against the middleware:
+
+```bash
+python -m examples.openclaw.replay.gsm8k_replay \
+  --mode train \
+  --state-db /tmp/openclaw-gsm8k-demo/openclaw-state.sqlite3 \
+  --max-examples 8
+```
+
+`gsm8k_replay.py` now defaults to the active OpenForge session model, so
+switching runtimes does not require a separate `--model` flag unless you want to
+override it explicitly.
+
+For short end-to-end verification runs, the replay runtime at
+[examples/openclaw/replay/gsm8k_runtime.yaml](/home/guo/kzhao/github/openforge/examples/openclaw/replay/gsm8k_runtime.yaml)
+uses a tiny batch size so a two-example train replay can trigger an actual
+policy update.
+
 ## Run
 
 ```bash
-python -m examples.openclaw.app
+OPENCLAW_MIDDLEWARE_PORT=8012 OPENFORGE_GATEWAY_BASE_URL=http://127.0.0.1:8011 python -m examples.openclaw.app
 ```
 
-By default the middleware serves on `127.0.0.1:8011`.
+By default the middleware serves on `127.0.0.1:8012`, which keeps it separate from the OpenForge gateway on `127.0.0.1:8011`.
 
 Optional environment variables:
 
-- `OPENCLAW_HOST`
-- `OPENCLAW_PORT`
-- `OPENCLAW_OPENFORGE_BASE_URL`
+- `OPENCLAW_MIDDLEWARE_HOST`
+- `OPENCLAW_MIDDLEWARE_PORT`
+- `OPENFORGE_GATEWAY_BASE_URL`
 - `OPENCLAW_STATE_DB`
 
 ## OpenClaw Configuration
@@ -85,14 +122,14 @@ Point the OpenClaw model provider at the middleware:
 {
   "models": {
     "providers": {
-      "openclaw-openforge": {
-        "baseUrl": "http://127.0.0.1:8011/v1",
+      "openforge-openclaw": {
+        "baseUrl": "http://127.0.0.1:8012/v1",
         "apiKey": "unused",
         "api": "openai-completions",
         "models": [
           {
-            "id": "qwen3-8b",
-            "name": "Qwen3 8B via OpenForge",
+            "id": "Qwen/Qwen2.5-3B-Instruct",
+            "name": "OpenForge Qwen 2.5 3B",
             "reasoning": true,
             "input": ["text"],
             "cost": {
@@ -107,14 +144,31 @@ Point the OpenClaw model provider at the middleware:
         ]
       }
     }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openforge-openclaw/Qwen/Qwen2.5-3B-Instruct"
+      }
+    }
   }
 }
 ```
 
 You also need to enable the bundled local extension from this example folder. The included [openclaw.json.example](/home/guo/kzhao/github/openforge/examples/openclaw/openclaw.json.example) shows both:
 
-- the provider pointing at `http://127.0.0.1:8011/v1`
-- the plugin load path for `extensions/rl-training-headers`
+- the provider pointing at `http://127.0.0.1:8012/v1`
+- the plugin entry for `rl-training-headers`
+
+Recommended setup:
+
+1. Run [install_extension.sh](/home/guo/kzhao/github/openforge/examples/openclaw/install_extension.sh) once to link the bundled extension into `~/.openclaw/extensions/rl-training-headers`.
+2. Copy the example config into your OpenClaw config and keep the `plugins.entries.rl-training-headers` block enabled.
+
+The example plugin config matches both middleware URLs:
+
+- `127.0.0.1:8012/v1/chat/completions`
+- `localhost:8012/v1/chat/completions`
 
 For learning across turns, you should configure OpenClaw to send a stable session id. The OpenClaw RL header plugin is the cleanest way to do that:
 

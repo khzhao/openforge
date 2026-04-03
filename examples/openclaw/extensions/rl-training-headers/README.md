@@ -37,7 +37,8 @@ Optional plugin config:
         "enabled": true,
         "config": {
           "urlIncludes": [
-            "127.0.0.1:8011/v1/chat/completions"
+            "127.0.0.1:8012/v1/chat/completions",
+            "localhost:8012/v1/chat/completions"
           ]
         }
       }
@@ -47,3 +48,7 @@ Optional plugin config:
 ```
 
 `urlIncludes` limits header injection to matching request URLs.
+
+If OpenClaw exposes a stable `user` field before a session id is available, the
+plugin also treats that as a fallback `X-Session-Id` source so the middleware's
+session mapping stays consistent with its own request-body fallback.

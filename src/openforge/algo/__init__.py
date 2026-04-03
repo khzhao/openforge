@@ -37,6 +37,8 @@ class Algorithm(Protocol):
 class GRPOAlgorithm:
     """Simple GRPO implementation for one-pass on-policy updates."""
 
+    _MAX_EXP_DELTA = 20.0
+
     def __init__(self, cfg: GRPOConfig | GRPOTISConfig) -> None:
         self.cfg = cfg
 
@@ -57,7 +59,11 @@ class GRPOAlgorithm:
         entropy: torch.Tensor | None = None,
         ref_log_probs: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        ratio = (curr_log_probs - old_log_probs).exp()
+        log_ratio = (curr_log_probs - old_log_probs).clamp(
+            min=-self._MAX_EXP_DELTA,
+            max=self._MAX_EXP_DELTA,
+        )
+        ratio = log_ratio.exp()
         clip_range_low = (
             self.cfg.clip_range
             if self.cfg.clip_range_low is None
@@ -74,7 +80,12 @@ class GRPOAlgorithm:
         )
         if self.cfg.name == "grpo_tis":
             assert rollout_log_probs is not None
-            tis = (old_log_probs - rollout_log_probs).exp().clamp(max=self.cfg.tis_cap)
+            tis = (
+                (old_log_probs - rollout_log_probs)
+                .clamp(min=-self._MAX_EXP_DELTA, max=self._MAX_EXP_DELTA)
+                .exp()
+                .clamp(max=self.cfg.tis_cap)
+            )
         else:
             tis = 1.0
         pg_losses1 = -advantages * ratio
@@ -97,11 +108,11 @@ class GRPOAlgorithm:
         if ref_log_probs is None:
             return outputs
 
-        kl = (
-            (ref_log_probs - curr_log_probs).exp()
-            - 1.0
-            - (ref_log_probs - curr_log_probs)
+        log_kl_ratio = (ref_log_probs - curr_log_probs).clamp(
+            min=-self._MAX_EXP_DELTA,
+            max=self._MAX_EXP_DELTA,
         )
+        kl = log_kl_ratio.exp() - 1.0 - log_kl_ratio
         kl_loss = (kl * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)
         loss = loss + self.cfg.kl_coef * kl_loss
         outputs["loss"] = loss

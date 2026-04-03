@@ -38,6 +38,7 @@ dependencies = [
     "sglang[all]>=0.5.9,<0.6",
     "sglang_router>=0.3.2,<0.4",
     "torch>=2.9.1,<3",
+    "textual>=1.0.0,<2",
     "transformers>=4.57.1,<5",
     "uvicorn>=0.41.0,<0.42",
     "wandb>=0.25.0,<1",

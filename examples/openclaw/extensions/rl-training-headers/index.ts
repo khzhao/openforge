@@ -40,10 +40,14 @@ function sessionIdFrom(event: any, ctx: any): string | null {
     event?.session?.id,
     event?.session?.sessionId,
     event?.run?.sessionId,
+    event?.user,
+    event?.message?.user,
+    event?.payload?.user,
     ctx?.sessionId,
     ctx?.session?.id,
     ctx?.session?.sessionId,
     ctx?.run?.sessionId,
+    ctx?.user,
   ];
   for (const value of candidates) {
     if (typeof value === "string" && value.trim()) {
@@ -126,13 +130,16 @@ export default function register(api: any) {
     "before_prompt_build",
     (event: any, ctx: any) => {
       const sessionId = sessionIdFrom(event, ctx);
-      if (!sessionId) {
-        return null;
-      }
-      getState().current = {
-        "X-Session-Id": sessionId,
+      const headers: Record<string, string> = {
         "X-Turn-Type": turnTypeFrom(event, ctx),
       };
+      if (sessionId) {
+        headers["X-Session-Id"] = sessionId;
+      }
+      if (Object.keys(headers).length === 0) {
+        return null;
+      }
+      getState().current = headers;
       return null;
     },
     { priority: 100 },

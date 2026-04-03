@@ -94,3 +94,19 @@ def test_grpo_uses_asymmetric_upper_clip_when_configured() -> None:
     )
 
     torch.testing.assert_close(outputs["loss"], torch.tensor(-1.28))
+
+
+def test_grpo_loss_stays_finite_for_large_logprob_deltas() -> None:
+    algo = GRPOAlgorithm(GRPOConfig(kl_coef=0.1))
+
+    outputs = algo.compute_loss(
+        curr_log_probs=torch.tensor([-1000.0, -900.0]),
+        old_log_probs=torch.tensor([0.0, 0.0]),
+        rollout_log_probs=None,
+        advantages=torch.tensor([1.0, -1.0]),
+        loss_mask=torch.tensor([1.0, 1.0]),
+        ref_log_probs=torch.tensor([1000.0, 900.0]),
+    )
+
+    for value in outputs.values():
+        assert torch.isfinite(value).all()

@@ -182,6 +182,12 @@ def test_openforge_gateway_start_runs_server() -> None:
     assert seen["port"] == 8000
 
 
+def test_openforge_watch_default_interval_is_prime_millis() -> None:
+    parser = openforge_cli.build_parser()
+    args = parser.parse_args(["watch", "--once"])
+    assert args.interval == openforge_cli.DEFAULT_WATCH_INTERVAL_SECONDS
+
+
 def test_openforge_session_start_rejects_existing_session() -> None:
     urls: list[str] = []
 
@@ -415,8 +421,11 @@ def test_openforge_watch_prints_status_once() -> None:
 
     printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list)
     assert "session sess-123" in printed
-    assert "min_weight_version=3" in printed
-    assert "max_version_skew=1" in printed
+    assert "LAST ACTIVITY" in printed
+    assert "STATUS" in printed
+    assert "live" in printed
+    assert "MIN WEIGHT VERSION" in printed
+    assert "MAX VERSION SKEW" in printed
     assert requests == [
         ("GET", "http://127.0.0.1:8000/health"),
         ("GET", "http://127.0.0.1:8000/status"),
@@ -445,8 +454,84 @@ def test_openforge_watch_prints_error_state_once_on_status_failure() -> None:
                     assert openforge_cli.main(["watch", "--once"]) == 0
 
     printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list)
-    assert "watch state=errored" in printed
+    assert "WATCH ERROR" in printed
+    assert "errored" in printed
     assert "waiting for next refresh attempt..." in printed
+    assert requests == [
+        ("GET", "http://127.0.0.1:8000/health"),
+        ("GET", "http://127.0.0.1:8000/status"),
+    ]
+
+
+def test_openforge_watch_uses_textual_dashboard_in_tty_mode() -> None:
+    requests: list[tuple[str, str]] = []
+    seen: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout: float):
+        requests.append((request.method, request.full_url))
+        if request.full_url.endswith("/health"):
+            return _FakeHTTPResponse(status=200, payload={"ok": True})
+        if request.full_url.endswith("/status"):
+            return _FakeHTTPResponse(
+                status=200,
+                payload={
+                    "session_id": "sess-tty",
+                    "wall_time_s": 5.0,
+                    "gateway": {"heartbeat_age_s": 0.2, "pending_generate_count": 0},
+                    "train": {
+                        "active": True,
+                        "heartbeat_age_s": 0.1,
+                        "last_update_age_s": 0.4,
+                        "global_step": 9,
+                        "policy_version": 9,
+                        "latest_update": {
+                            "reward_mean": 0.25,
+                            "grad_norm": 1.0,
+                            "lr": 1.0e-5,
+                        },
+                    },
+                    "rollout": {
+                        "heartbeat_age_s": 0.2,
+                        "latest_published_train_version": 9,
+                        "min_weight_version": 9,
+                        "max_weight_version": 9,
+                        "max_version_skew": 0,
+                        "stale_worker_count": 0,
+                        "workers": {},
+                    },
+                    "cluster": {},
+                },
+            )
+        raise AssertionError(request.full_url)
+
+    def fake_run_textual_watch(*, fetch_snapshot, interval: float) -> int:
+        seen["interval"] = interval
+        ok, payload = fetch_snapshot()
+        seen["ok"] = ok
+        seen["payload"] = payload
+        return 0
+
+    with patch.object(
+        openforge_cli.active_state,
+        "load_active_gateway_target",
+        lambda: ("127.0.0.1", 8000),
+    ):
+        with patch.object(openforge_cli.urllib_request, "urlopen", fake_urlopen):
+            with patch.object(openforge_cli.sys.stdout, "isatty", lambda: True):
+                with patch.dict(
+                    sys.modules,
+                    {
+                        "openforge.cli.watch_tui": types.SimpleNamespace(
+                            run_textual_watch=fake_run_textual_watch
+                        )
+                    },
+                ):
+                    assert openforge_cli.main(["watch", "--interval", "2.5"]) == 0
+
+    assert seen["interval"] == 2.5
+    assert seen["ok"] is True
+    assert isinstance(seen["payload"], dict)
+    assert seen["payload"]["session_id"] == "sess-tty"
     assert requests == [
         ("GET", "http://127.0.0.1:8000/health"),
         ("GET", "http://127.0.0.1:8000/status"),
@@ -457,12 +542,14 @@ def main() -> int:
     return run_tests(
         [
             test_openforge_gateway_start_runs_server,
+            test_openforge_watch_default_interval_is_prime_millis,
             test_openforge_session_start_rejects_existing_session,
             test_openforge_session_stop_ends_active_session,
             test_openforge_gateway_stop_terminates_recorded_process,
             test_openforge_gateway_stop_escalates_to_sigkill,
             test_openforge_watch_prints_status_once,
             test_openforge_watch_prints_error_state_once_on_status_failure,
+            test_openforge_watch_uses_textual_dashboard_in_tty_mode,
         ]
     )
 
