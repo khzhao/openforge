@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from typing import Any
 
@@ -151,12 +151,6 @@ class SessionStateStore:
             )
 
     def clear_all(self) -> None:
-        """Delete all middleware-side state for the OpenClaw example."""
-        with self._lock, sqlite3.connect(self._path) as conn:
-            conn.execute("DELETE FROM pending_turns")
-            conn.execute("DELETE FROM turn_records")
-
-    def clear_all(self) -> None:
         """Delete all middleware-side OpenClaw example state."""
         with self._lock, sqlite3.connect(self._path) as conn:
             conn.execute("DELETE FROM pending_turns")
@@ -263,7 +257,7 @@ class SessionStateStore:
                 SET
                     status = ?,
                     closed_at = CASE
-                        WHEN ? IN ('failed', 'discarded') THEN ?
+                        WHEN ? IN ('failed', 'discarded', 'skipped') THEN ?
                         ELSE closed_at
                     END
                 WHERE trajectory_id = ?

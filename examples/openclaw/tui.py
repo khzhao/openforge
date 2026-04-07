@@ -17,10 +17,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal
 from textual.widgets import Footer, Header, Static
 
 from openforge import active_state
+
 from .session_state import SessionStateStore, TurnRecord
 
 __all__ = ["main"]
@@ -182,6 +183,7 @@ class OpenClawDemoApp(App[None]):
 
 
 def main() -> int:
+    """Run the OpenClaw / OpenForge dashboard."""
     parser = argparse.ArgumentParser(description="OpenClaw / OpenForge visibility TUI")
     parser.add_argument("--refresh-seconds", type=float, default=1.0)
     parser.add_argument("--limit", type=int, default=8)
@@ -284,12 +286,27 @@ def _pending_panel(data: _DashboardData):
         now = time.time()
         for record in data.pending[:4]:
             age = now - record.created_at
+            request_role, request_text = _latest_visible_request_message(
+                record.normalized_messages
+            )
             lines.append(f"{record.external_session_id}\n", style="bold #8bd3ff")
             lines.append(
                 f"  pending {record.trajectory_id[:12]}  age={age:4.1f}s\n",
                 style="#f7c873",
             )
-            lines.append(f"  {_trim(record.assistant_text, 90)}\n", style="#f4f3ea")
+            lines.append(
+                "  awaiting next user/tool message to score this turn\n",
+                style="italic #8aa0b8",
+            )
+            if request_text:
+                lines.append(
+                    f"  {request_role}: {_trim(request_text, 82)}\n",
+                    style="#8bd3ff" if request_role == "user" else "#f7c873",
+                )
+            lines.append(
+                f"  assistant: {_trim(record.assistant_text, 68)}\n",
+                style="#f4f3ea",
+            )
     rewarded = [record for record in data.recent if record.reward is not None][:4]
     lines.append("\nRecent Rewards\n", style="bold #7be0a2")
     if not rewarded:
@@ -299,11 +316,16 @@ def _pending_panel(data: _DashboardData):
             f"  {record.reward:+.2f}  {record.external_session_id}  {_trim(record.reason or '-', 34)}\n",
             style="#f4f3ea",
         )
+        if record.feedback_text:
+            lines.append(
+                f"    judged by next state: {_trim(record.feedback_text, 68)}\n",
+                style="#8aa0b8",
+            )
     return Panel(lines, title="Pending / Rewards", border_style="#5ba36b")
 
 
 def _conversation_panel(data: _DashboardData):
-    record = data.recent[0] if data.recent else None
+    record = _focus_session_record(data)
     lines = Text()
     if record is None:
         lines.append("No conversation recorded yet.", style="italic #8aa0b8")
@@ -312,8 +334,9 @@ def _conversation_panel(data: _DashboardData):
             item
             for item in reversed(data.recent)
             if item.external_session_id == record.external_session_id
+            and item.purpose == "train"
         ]
-        max_turns = 3
+        max_turns = 4
         truncated = len(session_records) > max_turns
         visible_records = session_records[-max_turns:]
         lines.append(
@@ -322,18 +345,39 @@ def _conversation_panel(data: _DashboardData):
         )
         if truncated:
             lines.append("… older turns omitted …\n\n", style="italic #8aa0b8")
-        for item in visible_records:
-            latest_user = _latest_visible_user_message(item.normalized_messages)
-            if latest_user:
-                lines.append("user: ", style="bold #8bd3ff")
-                lines.append(f"{_trim(latest_user, 110)}\n", style="#f4f3ea")
+        start_index = len(session_records) - len(visible_records) + 1
+        for turn_index, item in enumerate(visible_records, start=start_index):
+            request_role, request_text = _latest_visible_request_message(
+                item.normalized_messages
+            )
+            lines.append(
+                f"turn {turn_index}  {item.trajectory_id[:12]}  {item.status}\n",
+                style="bold #f7c873",
+            )
+            if request_text:
+                lines.append(
+                    f"{request_role}: ",
+                    style="bold #8bd3ff" if request_role == "user" else "bold #f7c873",
+                )
+                lines.append(f"{_trim(request_text, 110)}\n", style="#f4f3ea")
             lines.append("assistant: ", style="bold #7be0a2")
             lines.append(f"{_trim(item.assistant_text, 110)}\n", style="#f4f3ea")
             if item.reward is not None:
+                if item.feedback_text:
+                    lines.append("next state: ", style="bold #f7c873")
+                    lines.append(
+                        f"{_trim(item.feedback_text, 110)}\n",
+                        style="#f4f3ea",
+                    )
                 lines.append("reward: ", style="bold #ff8f8f")
                 lines.append(
                     f"{item.reward:+.2f} ({item.reason or '-'})\n",
                     style="#f4f3ea",
+                )
+            elif item.status == "pending":
+                lines.append(
+                    "waiting for next user/tool message to score this turn\n",
+                    style="italic #8aa0b8",
                 )
             lines.append("\n", style="#f4f3ea")
         if record.feedback_text:
@@ -346,12 +390,16 @@ def _records_panel(data: _DashboardData):
     table = Table(expand=True, box=None, show_header=True, header_style="bold #8bd3ff")
     table.add_column("Status", width=10)
     table.add_column("Type", width=6)
+    table.add_column("Input", width=6)
     table.add_column("Session", width=18)
     table.add_column("Reward", width=8, justify="right")
     table.add_column("Reason", width=28)
     table.add_column("Trajectory", width=14)
     for record in data.recent[:10]:
         reward = "-" if record.reward is None else f"{record.reward:+.2f}"
+        request_role, _request_text = _latest_visible_request_message(
+            record.normalized_messages
+        )
         style = "#f4f3ea"
         if record.status == "pending":
             style = "#f7c873"
@@ -362,6 +410,7 @@ def _records_panel(data: _DashboardData):
         table.add_row(
             record.status,
             record.turn_type,
+            request_role,
             record.external_session_id[:18],
             reward,
             _trim(record.reason or "-", 28),
@@ -465,13 +514,28 @@ def _message_text(message: dict[str, Any]) -> str:
     return json.dumps(content, ensure_ascii=False)
 
 
-def _latest_visible_user_message(messages: list[dict[str, Any]]) -> str:
+def _latest_visible_request_message(messages: list[dict[str, Any]]) -> tuple[str, str]:
     for message in reversed(messages):
-        if str(message.get("role")) == "user":
-            text = _display_user_message(_message_text(message)).strip()
-            if text:
-                return text
-    return ""
+        role = str(message.get("role"))
+        if role not in {"user", "tool"}:
+            continue
+        text = (
+            _display_user_message(_message_text(message)).strip()
+            if role == "user"
+            else _message_text(message).strip()
+        )
+        if text:
+            return role, text
+    return "?", ""
+
+
+def _focus_session_record(data: _DashboardData) -> TurnRecord | None:
+    if data.pending:
+        return data.pending[0]
+    train_recent = [item for item in data.recent if item.purpose == "train"]
+    if train_recent:
+        return train_recent[0]
+    return data.recent[0] if data.recent else None
 
 
 def _display_user_message(text: str) -> str:

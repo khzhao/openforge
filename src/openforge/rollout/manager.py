@@ -49,7 +49,7 @@ class RolloutManager:
         mainrouter_kwargs = {
             "router_name": "openforge-router",
             "router_ip": router_ip or get_host_ip(),
-            "router_port": router_port or get_free_port(start=30000),
+            "router_port": router_port or get_free_port(start=31000),
             "request_timeout_secs": router_kwargs.pop(
                 "request_timeout_secs",
                 self.REQUEST_TIMEOUT_SECONDS,

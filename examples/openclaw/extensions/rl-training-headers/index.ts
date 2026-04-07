@@ -40,14 +40,10 @@ function sessionIdFrom(event: any, ctx: any): string | null {
     event?.session?.id,
     event?.session?.sessionId,
     event?.run?.sessionId,
-    event?.user,
-    event?.message?.user,
-    event?.payload?.user,
     ctx?.sessionId,
     ctx?.session?.id,
     ctx?.session?.sessionId,
     ctx?.run?.sessionId,
-    ctx?.user,
   ];
   for (const value of candidates) {
     if (typeof value === "string" && value.trim()) {

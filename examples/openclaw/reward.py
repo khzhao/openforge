@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +16,11 @@ __all__ = [
     "majority_vote",
     "parse_prm_score",
 ]
+
+_UNTRUSTED_METADATA_BLOCK_RE = re.compile(
+    r"(?ms)^(?:[^\n]*\(untrusted metadata\):\s*```json\n.*?\n```\s*)+"
+)
+_THINK_BLOCK_RE = re.compile(r"(?is)<think>.*?</think>")
 
 
 @dataclass(slots=True)
@@ -32,25 +38,19 @@ def extract_feedback_state(
     messages: list[dict[str, Any]],
 ) -> tuple[str, str]:
     """Extract follow-up state text and role for judging the previous turn."""
-    appended = (
-        messages[pending.request_message_count :]
-        if len(messages) > pending.request_message_count
-        else []
+    del pending
+    feedback_message = next(
+        (
+            item
+            for item in reversed(messages)
+            if str(item.get("role", "")) != "assistant"
+        ),
+        None,
     )
-    feedback_messages = [
-        item for item in appended if str(item.get("role", "")) != "assistant"
-    ]
-    if not feedback_messages:
-        feedback_messages = [
-            item for item in messages if str(item.get("role", "")) != "assistant"
-        ][-1:]
-
-    feedback_text = "\n".join(
-        _message_text(item) for item in feedback_messages if _message_text(item)
-    ).strip()
-    if not feedback_messages:
-        return feedback_text, "user"
-    next_state_role = str(feedback_messages[-1].get("role", "user"))
+    if feedback_message is None:
+        return "", "user"
+    feedback_text = _strip_untrusted_metadata(_message_text(feedback_message)).strip()
+    next_state_role = str(feedback_message.get("role", "user"))
     return feedback_text, next_state_role
 
 
@@ -64,33 +64,62 @@ def build_prm_judge_prompt(
         pending=pending,
         messages=messages,
     )
+    assistant_text = _strip_think_blocks(pending.assistant_text or "").strip()
     system_prompt = (
         "You are a process reward model (PRM) evaluating an AI assistant.\n"
         "You will see the assistant's output and the subsequent next state.\n"
-        "Your task: decide whether the assistant's output successfully fulfilled "
-        "the user's intent at that step, using the next state as evidence.\n\n"
+        "Your task: decide whether the assistant's output **successfully "
+        "fulfilled** the user's intent at that step, using the next state as "
+        "evidence.\n\n"
         "## Understanding the next state's role\n"
         "- role='user': A reply from the user.\n"
-        "- role='tool': The return value of a tool the assistant invoked.\n"
-        "This content was NOT available before the assistant's action.\n"
-        "A successful, non-error tool output means the assistant's action worked "
-        "correctly and should be scored positively.\n\n"
+        "- role='tool': The return value of a tool the assistant invoked. "
+        "This content was NOT available before the assistant's action — "
+        "it exists BECAUSE the assistant called the tool. "
+        "A successful, non-error tool output means the assistant's action "
+        "worked correctly only if the assistant's final answer or action "
+        "actually matches what the tool result confirms.\n\n"
         "## Scoring rules\n"
-        "- \\boxed{1} (good): The next state shows the task progressed as expected.\n"
-        "- \\boxed{-1} (bad): The next state signals the assistant's output was "
-        "wrong, incomplete, or unwanted.\n"
-        "- \\boxed{0} (neutral): The next state is ambiguous or unrelated.\n\n"
-        "Key negative signals include redo requests, correction requests, rephrased "
-        "requests, and tool/environment failures.\n\n"
+        "- Default to \\boxed{0} unless the next state is strong evidence.\n"
+        "- \\boxed{1} (good): Use only for explicit confirmation that the "
+        "assistant's final answer/action was correct. Good signals include:\n"
+        "  * The user explicitly confirms satisfaction or success.\n"
+        "  * A tool/environment result directly verifies the assistant's "
+        "stated answer or intended action.\n"
+        "- \\boxed{-1} (bad): The next state signals the assistant's output "
+        "was wrong, incomplete, or unwanted. **Key negative signals include:**\n"
+        "  * The user asks the assistant to **redo, retry, or repeat** the "
+        "same action (\"do it again\", \"try again\", \"one more time\").\n"
+        "  * The user requests a **correction or modification** to what the "
+        "assistant just did (\"change X to Y\", \"no, I meant …\", "
+        "\"not that, …\", \"please fix …\").\n"
+        "  * The user **rephrases or restates** the same request, implying the "
+        "assistant did not understand or execute it correctly.\n"
+        "  * The environment returns an **error, failure, or unexpected "
+        "result** caused by the assistant's action.\n"
+        "- \\boxed{0} (neutral): The next state is ambiguous — e.g. the user "
+        "gives any new request or topic change, the user keeps the "
+        "conversation going without explicit approval, there is insufficient "
+        "information to judge, or the user asks a question-only follow-up such "
+        "as a prediction or clarification request. A fresh request like "
+        "\"/start\" or \"what's in this directory?\" after the previous turn "
+        "is usually neutral, not positive.\n\n"
+        "## Important\n"
+        "A change request IS negative feedback — it means the previous output "
+        "did not meet the user's need. Do NOT treat it as a neutral new "
+        "instruction. Do NOT reward a turn merely because the user kept "
+        "talking or because a tool returned some output. Judge only the "
+        "assistant's final visible answer/action, not hidden reasoning.\n\n"
         "Think step-by-step, then give your final score inside \\boxed{}."
     )
     user_prompt = (
-        f"## Assistant output\n{pending.assistant_text or '[empty]'}\n\n"
+        f"## Assistant output\n{assistant_text or '[empty]'}\n\n"
         f"## Next state [role: {next_state_role}]\n"
         f"{feedback_text or '[no textual follow-up]'}\n\n"
         "First, classify the next state: is it (a) positive progression, "
-        "(b) a correction / redo / change request, or (c) ambiguous? "
-        "Then assign \\boxed{1}, \\boxed{-1}, or \\boxed{0}."
+        "(b) a correction / redo / change request, "
+        "(c) a question-only clarification / prediction request, or "
+        "(d) ambiguous? Then assign \\boxed{1}, \\boxed{-1}, or \\boxed{0}."
     )
     return (
         [
@@ -103,14 +132,11 @@ def build_prm_judge_prompt(
 
 def parse_prm_score(text: str) -> int | None:
     """Parse the last boxed PRM score from judge output."""
-    import re
-
     matches = re.findall(r"\\boxed\{([-+]?\d)\}", text)
-    if not matches:
-        return None
-    value = int(matches[-1])
-    if value in (-1, 0, 1):
-        return value
+    if matches:
+        value = int(matches[-1])
+        if value in (-1, 0, 1):
+            return value
     return None
 
 
@@ -140,3 +166,12 @@ def _message_text(message: dict[str, Any]) -> str:
                 chunks.append(text)
         return "\n".join(chunks)
     return ""
+
+
+def _strip_untrusted_metadata(text: str) -> str:
+    return _UNTRUSTED_METADATA_BLOCK_RE.sub("", text, count=1)
+
+
+def _strip_think_blocks(text: str) -> str:
+    cleaned = _THINK_BLOCK_RE.sub("", text)
+    return cleaned.strip()

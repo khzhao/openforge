@@ -18,7 +18,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from openforge import active_state
 from openforge.ninja.session import _ActiveSession, _TrajectoryClient
 
-from .reward import RewardDecision, build_prm_judge_prompt, majority_vote, parse_prm_score
+from .reward import (
+    RewardDecision,
+    build_prm_judge_prompt,
+    majority_vote,
+    parse_prm_score,
+)
 from .session_state import SessionStateStore
 
 __all__ = ["app", "main"]
@@ -27,9 +32,9 @@ _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8012
 _LOG = logging.getLogger(__name__)
 _NON_STANDARD_BODY_KEYS = {"session_id", "session_done", "turn_type"}
-_PRM_M = int(os.environ.get("OPENCLAW_PRM_M", "3"))
-_PRM_TEMPERATURE = float(os.environ.get("OPENCLAW_PRM_TEMPERATURE", "0.6"))
-_PRM_MAX_TOKENS = int(os.environ.get("OPENCLAW_PRM_MAX_TOKENS", "8192"))
+_JUDGE_M = int(os.environ.get("OPENCLAW_JUDGE_M", "1"))
+_JUDGE_TEMPERATURE = float(os.environ.get("OPENCLAW_JUDGE_TEMPERATURE", "0.0"))
+_JUDGE_MAX_TOKENS = int(os.environ.get("OPENCLAW_JUDGE_MAX_TOKENS", "2048"))
 
 
 def _flatten_message_content(content: Any) -> str:
@@ -141,6 +146,7 @@ async def health() -> dict[str, object]:
     return {
         "ok": True,
         "gateway_base_url": app.state.gateway_base_url,
+        "judge_mode": "local",
     }
 
 
@@ -159,12 +165,11 @@ async def chat_completions(request: Request) -> JSONResponse:
     payload, stream_requested = await _read_json_payload(request)
     messages = payload.get("messages")
     _LOG.info(
-        "openclaw request: stream=%r messages=%s x_session_id=%r x_turn_type=%r user=%r model=%r",
+        "openclaw request: stream=%r messages=%s x_session_id=%r x_turn_type=%r model=%r",
         stream_requested,
         len(messages) if isinstance(messages, list) else None,
         request.headers.get("X-Session-Id"),
         request.headers.get("X-Turn-Type"),
-        payload.get("user"),
         payload.get("model"),
     )
     if not isinstance(messages, list) or not messages:
@@ -184,7 +189,7 @@ async def chat_completions(request: Request) -> JSONResponse:
         payload.get("model"),
     )
 
-    external_session_id = _resolve_external_session_id(request, payload)
+    external_session_id = _resolve_external_session_id(request)
     turn_type = request.headers.get("X-Turn-Type", "main").strip().lower() or "main"
     purpose = "train" if turn_type == "main" else "validation"
     _LOG.info(
@@ -199,30 +204,47 @@ async def chat_completions(request: Request) -> JSONResponse:
     if purpose == "train":
         pending = store.get_pending(external_session_id)
         if pending is not None:
-            decision = await _run_gateway_call(
-                _run_sync(
-                    _judge_pending_sync,
-                    app.state.gateway_target,
-                    pending,
-                    [_as_message_dict(item) for item in messages],
+            next_state_message = _as_message_dict(messages[-1])
+            next_state_role = str(next_state_message.get("role", "user"))
+            if next_state_role == "tool":
+                await _run_gateway_call(
+                    _run_sync(
+                        _discard_trajectory_sync,
+                        session=None,
+                        session_id=pending.openforge_session_id,
+                        trajectory_id=pending.trajectory_id,
+                    )
                 )
-            )
-            await _run_gateway_call(
-                _run_sync(
-                    _finish_trajectory_sync,
-                    app.state.gateway_target,
-                    pending.openforge_session_id,
-                    pending.trajectory_id,
-                    decision.reward,
+                store.mark_turn_record_status(
+                    trajectory_id=pending.trajectory_id,
+                    status="skipped",
                 )
-            )
-            store.complete_turn_record(
-                trajectory_id=pending.trajectory_id,
-                reward=decision.reward,
-                reason=decision.reason,
-                feedback_text=decision.feedback_text,
-            )
-            store.clear_pending(external_session_id)
+                store.clear_pending(external_session_id)
+            else:
+                decision = await _run_gateway_call(
+                    _run_sync(
+                        _judge_pending_sync,
+                        app.state.gateway_target,
+                        pending,
+                        [next_state_message],
+                    )
+                )
+                await _run_gateway_call(
+                    _run_sync(
+                        _finish_trajectory_sync,
+                        app.state.gateway_target,
+                        pending.openforge_session_id,
+                        pending.trajectory_id,
+                        decision.reward,
+                    )
+                )
+                store.complete_turn_record(
+                    trajectory_id=pending.trajectory_id,
+                    reward=decision.reward,
+                    reason=decision.reason,
+                    feedback_text=decision.feedback_text,
+                )
+                store.clear_pending(external_session_id)
 
     session_id, trajectory_id, response_payload = await _run_gateway_call(
         _run_sync(
@@ -303,8 +325,8 @@ async def _run_gateway_call(coro):
         ) from exc
 
 
-async def _run_sync(fn, *args):
-    return await asyncio.to_thread(fn, *args)
+async def _run_sync(fn, *args, **kwargs):
+    return await asyncio.to_thread(fn, *args, **kwargs)
 
 
 def _parse_gateway_target(base_url: str) -> tuple[str, int]:
@@ -317,6 +339,15 @@ def _parse_gateway_target(base_url: str) -> tuple[str, int]:
             f"host and port, got {base_url!r}"
         )
     return host, port
+
+
+def _judge_chat_completions_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/chat/completions"
+    return f"{normalized}/v1/chat/completions"
 
 
 def _list_models_sync(gateway_target: tuple[str, int]) -> dict[str, Any]:
@@ -411,17 +442,17 @@ def _judge_pending_sync(
                 f"pending trajectory: {session.session_id} != "
                 f"{pending.openforge_session_id}"
             )
-        for _index in range(_PRM_M):
+        for _index in range(_JUDGE_M):
             trajectory = session.client(purpose="validation")
             agent_client = session.agent_client(trajectory)
             try:
                 response = agent_client.chat.completions.create(
                     model=pending.model_name,
                     messages=judge_messages,
-                    temperature=_PRM_TEMPERATURE,
+                    temperature=_JUDGE_TEMPERATURE,
                     top_p=1.0,
                     top_k=1,
-                    max_completion_tokens=_PRM_MAX_TOKENS,
+                    max_completion_tokens=_JUDGE_MAX_TOKENS,
                 )
             except Exception:
                 _LOG.exception(
@@ -486,18 +517,35 @@ def _finish_trajectory_sync(
 
 def _discard_trajectory_sync(
     *,
-    session: _ActiveSession,
+    session: _ActiveSession | None,
     session_id: str,
     trajectory_id: str,
 ) -> None:
-    response = session._retry_post(
-        "/discard_trajectory",
-        {
-            "session_id": session_id,
-            "trajectory_id": trajectory_id,
-        },
-    )
-    response.raise_for_status()
+    if session is not None:
+        response = session._retry_post(
+            "/discard_trajectory",
+            {
+                "session_id": session_id,
+                "trajectory_id": trajectory_id,
+            },
+        )
+        response.raise_for_status()
+        return
+    host, port = active_state.load_active_gateway_target()
+    with _ActiveSession((host, port)) as active_session:
+        if active_session.session_id != session_id:
+            raise RuntimeError(
+                "active OpenForge session changed while discarding a skipped "
+                f"trajectory: {active_session.session_id} != {session_id}"
+            )
+        response = active_session._retry_post(
+            "/discard_trajectory",
+            {
+                "session_id": session_id,
+                "trajectory_id": trajectory_id,
+            },
+        )
+        response.raise_for_status()
 
 
 async def _read_json_payload(request: Request) -> tuple[dict[str, Any], bool]:
@@ -519,24 +567,16 @@ async def _read_json_payload(request: Request) -> tuple[dict[str, Any], bool]:
     return payload, stream_requested
 
 
-def _resolve_external_session_id(request: Request, payload: dict[str, Any]) -> str:
+def _resolve_external_session_id(request: Request) -> str:
     external_session_id = request.headers.get("X-Session-Id")
-    if external_session_id is None:
-        user_value = payload.get("user")
-        if isinstance(user_value, str) and user_value.strip():
-            external_session_id = user_value
     if external_session_id is None or not external_session_id.strip():
         _LOG.warning(
-            "rejecting request: missing external session id (x_session_id=%r user=%r)",
+            "rejecting request: missing external session id (x_session_id=%r)",
             request.headers.get("X-Session-Id"),
-            payload.get("user"),
         )
         raise HTTPException(
             status_code=400,
-            detail=(
-                "missing external session id; set X-Session-Id in OpenClaw or "
-                "provide a stable user field"
-            ),
+            detail="missing external session id; set X-Session-Id in OpenClaw",
         )
     return external_session_id.strip()
 
