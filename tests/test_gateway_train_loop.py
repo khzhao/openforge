@@ -287,14 +287,14 @@ def test_train_loop_train_once_consumes_one_global_batch() -> None:
             rtol=1e-6,
         )
         assert rank_minibatches[0]["advantages"].tolist() == [
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0],
         ]
         assert rank_minibatches[0]["lengths"].tolist() == [3, 3]
         assert rank_minibatches[1]["tokens"].tolist() == [[12, 22, 32], [13, 23, 33]]
         assert rank_minibatches[1]["advantages"].tolist() == [
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
+            [3.0, 3.0, 3.0],
+            [4.0, 4.0, 4.0],
         ]
         assert rank_minibatches[1]["lengths"].tolist() == [3, 3]
 
@@ -460,7 +460,12 @@ def test_train_loop_train_once_splits_rank_local_minibatches() -> None:
             [8, 9, 10, 11, 12],
             [13, 14, 15, 0, 0],
         ]
-        assert rank_minibatches[0]["advantages"].tolist() == [[0.0] * 5] * 4
+        assert rank_minibatches[0]["advantages"].tolist() == [
+            [1.0, 1.0, 1.0, 0.0, 0.0],
+            [2.0, 2.0, 2.0, 2.0, 0.0],
+            [3.0, 3.0, 3.0, 3.0, 3.0],
+            [4.0, 4.0, 4.0, 0.0, 0.0],
+        ]
         assert rank_minibatches[0]["lengths"].tolist() == [3, 4, 5, 3]
         await store.close()
 
@@ -645,9 +650,9 @@ def test_train_loop_counts_batch_size_in_trajectories() -> None:
             [7, 8, 9],
         ]
         assert rank_minibatches[0]["advantages"].tolist() == [
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [9.0, 9.0, 9.0],
         ]
         t0 = await store.get_trajectory("t0")
         t1 = await store.get_trajectory("t1")

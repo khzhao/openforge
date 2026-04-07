@@ -24,6 +24,14 @@ def test_grpo_group_advantages_are_mean_centered_and_std_normalized() -> None:
     )
 
 
+def test_grpo_singleton_group_advantage_uses_raw_reward() -> None:
+    algo = GRPOAlgorithm(GRPOConfig())
+
+    advantages = algo.compute_group_advantages(torch.tensor([2.5], dtype=torch.float32))
+
+    torch.testing.assert_close(advantages, torch.tensor([2.5]))
+
+
 def test_grpo_loss_has_policy_gradient_at_unit_ratio() -> None:
     algo = GRPOAlgorithm(GRPOConfig())
     curr_log_probs = torch.tensor([0.1, -0.3, 0.2], requires_grad=True)

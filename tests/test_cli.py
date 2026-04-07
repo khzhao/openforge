@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import socket
 import signal
 import sys
 import tempfile
@@ -269,6 +270,43 @@ def test_openforge_session_stop_ends_active_session() -> None:
         ("GET", "http://127.0.0.1:8000/current_session"),
         ("POST", "http://127.0.0.1:8000/end_session"),
     ]
+
+
+def test_openforge_session_start_reports_gateway_read_timeout() -> None:
+    def fake_urlopen(request, timeout: float):
+        assert timeout in (2.0, openforge_cli.DEFAULT_SESSION_START_TIMEOUT_SECONDS)
+        if request.full_url.endswith("/health"):
+            return _FakeHTTPResponse(status=200, payload={"ok": True})
+        if request.full_url.endswith("/current_session"):
+            return _FakeHTTPResponse(
+                status=404,
+                payload={"detail": "no active session"},
+            )
+        if request.full_url.endswith("/start_session"):
+            raise socket.timeout("timed out")
+        raise AssertionError(request.full_url)
+
+    with patch.object(
+        openforge_cli.active_state,
+        "load_active_gateway_target",
+        lambda: ("127.0.0.1", 8000),
+    ):
+        with patch.object(
+            openforge_cli.RuntimeConfig, "from_yaml", lambda path: _runtime_config()
+        ):
+            with patch.object(openforge_cli.urllib_request, "urlopen", fake_urlopen):
+                with expect_raises(
+                    SystemExit,
+                    match=r"timed out waiting for gateway response from http://127.0.0.1:8000/start_session",
+                ):
+                    openforge_cli.main(
+                        [
+                            "session",
+                            "start",
+                            "--runtime-config",
+                            "examples/gsm8k/runtime.yaml",
+                        ]
+                    )
 
 
 def test_openforge_gateway_stop_terminates_recorded_process() -> None:
@@ -545,6 +583,7 @@ def main() -> int:
             test_openforge_watch_default_interval_is_prime_millis,
             test_openforge_session_start_rejects_existing_session,
             test_openforge_session_stop_ends_active_session,
+            test_openforge_session_start_reports_gateway_read_timeout,
             test_openforge_gateway_stop_terminates_recorded_process,
             test_openforge_gateway_stop_escalates_to_sigkill,
             test_openforge_watch_prints_status_once,
