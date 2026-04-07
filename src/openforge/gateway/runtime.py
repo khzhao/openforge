@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -22,6 +23,9 @@ __all__ = [
     "Runtime",
     "RuntimeSlot",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -253,6 +257,11 @@ class Runtime:
 
         started_ray = False
         if not ray.is_initialized():
+            logger.info(
+                "runtime startup: initializing Ray with %s CPUs and %s GPUs",
+                self._cfg.cluster.total_cpus,
+                self._cfg.cluster.total_gpus,
+            )
             ray.init(
                 address=os.environ.get("RAY_ADDRESS", "local"),
                 num_cpus=self._cfg.cluster.total_cpus,
@@ -260,23 +269,30 @@ class Runtime:
                 log_to_driver=False,
             )
             started_ray = True
+        else:
+            logger.info("runtime startup: reusing existing Ray instance")
 
+        logger.info("runtime startup: creating placement groups")
         placement_groups = create_placement_groups(cfg)
         train_runtime = None
         rollout_manager = None
         try:
+            logger.info("runtime startup: creating train runtime")
             train_runtime = create_train_runtime(
                 cfg,
                 master_addr=get_host_ip(),
                 master_port=get_free_port(start=20000),
                 placement_groups=placement_groups,
             )
+            logger.info("runtime startup: creating rollout manager")
             rollout_manager = create_rollout_manager(
                 cfg,
                 placement_groups,
                 log_level="warning",
             )
+            logger.info("runtime startup: registering rollout manager with trainer")
             train_runtime.register_rollout(rollout_manager.router_url)
+            logger.info("runtime startup: train and rollout runtime ready")
         except Exception:
             try:
                 if rollout_manager is not None:

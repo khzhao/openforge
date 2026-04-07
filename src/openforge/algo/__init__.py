@@ -43,6 +43,8 @@ class GRPOAlgorithm:
         self.cfg = cfg
 
     def compute_group_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
+        if rewards.numel() == 1:
+            return rewards.float()
         advantages = rewards.float() - rewards.float().mean()
         if self.cfg.normalize_group_std and rewards.numel() > 1:
             advantages = advantages / (advantages.std() + 1e-6)

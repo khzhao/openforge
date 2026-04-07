@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import shutil
 import signal
 import sys
@@ -22,6 +23,10 @@ from openforge.logging import render_status, render_watch_error
 DEFAULT_GATEWAY_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_START_TIMEOUT_SECONDS = 600.0
 DEFAULT_WATCH_INTERVAL_SECONDS = 1.009
+
+
+class GatewayRequestTimeoutError(RuntimeError):
+    """Raised when the gateway accepts a connection but does not reply in time."""
 
 
 def _run_gateway_start(args: argparse.Namespace) -> int:
@@ -98,6 +103,10 @@ def _try_request_json(
         with urllib_request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
             status = int(response.status)
+    except (TimeoutError, socket.timeout) as exc:
+        raise GatewayRequestTimeoutError(
+            f"timed out waiting for gateway response from {url}"
+        ) from exc
     except urllib_error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         status = exc.code
@@ -120,12 +129,15 @@ def _request_json(
     payload: dict[str, object] | None,
     timeout: float,
 ) -> tuple[int, dict[str, object]]:
-    response = _try_request_json(
-        method=method,
-        url=url,
-        payload=payload,
-        timeout=timeout,
-    )
+    try:
+        response = _try_request_json(
+            method=method,
+            url=url,
+            payload=payload,
+            timeout=timeout,
+        )
+    except GatewayRequestTimeoutError as exc:
+        raise SystemExit(str(exc)) from exc
     if response is None:
         raise SystemExit(f"failed to reach gateway at {url}")
     return response
@@ -134,12 +146,15 @@ def _request_json(
 def _wait_for_gateway(*, base_url: str, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        response = _try_request_json(
-            method="GET",
-            url=f"{base_url}/health",
-            payload=None,
-            timeout=min(timeout, 2.0),
-        )
+        try:
+            response = _try_request_json(
+                method="GET",
+                url=f"{base_url}/health",
+                payload=None,
+                timeout=min(timeout, 2.0),
+            )
+        except GatewayRequestTimeoutError:
+            response = None
         if response is not None and response[0] == 200:
             return
         time.sleep(1.0)
